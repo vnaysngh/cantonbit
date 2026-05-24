@@ -1,65 +1,125 @@
-import Image from "next/image";
+"use client";
 
-export default function Home() {
+import Link from "next/link";
+import { Coins, Flame } from "lucide-react";
+
+import { ActivityList } from "@/components/ActivityList";
+import { BalanceBadge } from "@/components/BalanceBadge";
+import { PartyIdDisplay } from "@/components/PartyIdDisplay";
+import { UTXOWarning } from "@/components/UTXOWarning";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { useBalance } from "@/hooks/useBalance";
+import { useTransfers } from "@/hooks/useTransfers";
+import { useWallet } from "@/hooks/useWallet";
+
+// Send/Receive intentionally omitted — cantonbit is a mint/redeem app,
+// not a wallet. See note in components/TopNav.tsx.
+const QUICK_ACTIONS = [
+  { href: "/mint", label: "Mint", Icon: Coins },
+  { href: "/redeem", label: "Redeem", Icon: Flame },
+] as const;
+
+export default function DashboardPage() {
+  const { isConnected, partyId, connect, isConnecting } = useWallet();
+  const {
+    total,
+    utxoCount,
+    isLoading: balanceLoading,
+    error: balanceError,
+  } = useBalance();
+  const { activity, isLoading: activityLoading } = useTransfers();
+
+  if (!isConnected) {
+    return (
+      <div className="mx-auto flex max-w-md flex-col items-center gap-4 py-16 text-center">
+        <h1 className="text-4xl">Welcome to cantonbit</h1>
+        <p className="text-sm text-muted-foreground">
+          Connect your Loop wallet to view your balance, send cBTC, and
+          accept incoming transfers.
+        </p>
+        <Button
+          size="lg"
+          onClick={() => {
+            connect().catch((err) => console.error(err));
+          }}
+          disabled={isConnecting}
+        >
+          {isConnecting ? "Connecting…" : "Connect Loop wallet"}
+        </Button>
+      </div>
+    );
+  }
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <div className="space-y-6">
+      <UTXOWarning count={utxoCount} />
+
+      {balanceError && (
+        <div
+          role="alert"
+          className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
+          Couldn&apos;t load balance: {balanceError}
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+      )}
+
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm font-medium text-muted-foreground">
+            Total balance
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          {balanceLoading ? (
+            <div className="h-12 w-48 animate-pulse rounded bg-muted" />
+          ) : (
+            <BalanceBadge amount={total} size="xl" />
+          )}
+          {partyId && (
+            <div className="text-xs text-muted-foreground">
+              {utxoCount >= 0 && (
+                <>
+                  Holding {utxoCount} UTXO{utxoCount === 1 ? "" : "s"} ·{" "}
+                </>
+              )}
+              <PartyIdDisplay partyId={partyId} />
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <div className="grid grid-cols-2 gap-3">
+        {QUICK_ACTIONS.map(({ href, label, Icon }) => (
+          <Link
+            key={href}
+            href={href}
+            className="group flex flex-col items-center justify-center gap-2 rounded-lg border bg-card p-4 transition-colors hover:bg-accent"
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+            <Icon className="h-5 w-5 text-muted-foreground group-hover:text-foreground" />
+            <span className="text-sm font-medium">{label}</span>
+          </Link>
+        ))}
+      </div>
+
+      <section className="space-y-3">
+        <div className="flex items-baseline justify-between">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+            Recent activity
+          </h2>
+          <Link
+            href="/activity"
+            className="text-xs text-muted-foreground hover:text-foreground"
           >
-            Documentation
-          </a>
+            View all →
+          </Link>
         </div>
-      </main>
+        {activityLoading ? (
+          <div className="h-32 animate-pulse rounded-md border bg-muted/30" />
+        ) : (
+          <ActivityList rows={activity.slice(0, 5)} />
+        )}
+      </section>
     </div>
   );
 }
