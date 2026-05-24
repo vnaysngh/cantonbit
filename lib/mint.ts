@@ -53,17 +53,34 @@ export interface DepositAccountSummary {
  * Step 1 (read-only): Check if the user already has a CBTCDepositAccount.
  * The deposit account can be reused across sessions — we only create one if
  * none exists. Returns empty array if this is the user's first mint.
+ *
+ * Filters by userParty (owner field in the contract payload) so that even
+ * if Loop returns contracts for multiple parties, we only get this user's own.
  */
 export async function listDepositAccounts(
   provider: LoopProvider,
+  userParty: string,
 ): Promise<DepositAccountSummary[]> {
   const contracts = await provider.getActiveContracts({
     templateId: DEPOSIT_ACCOUNT_TEMPLATE_ID,
   });
-  return contracts.map((c) => ({
-    contractId: c.contract_id,
-    payload: c as unknown as Record<string, unknown>,
-  }));
+  return contracts
+    .map((c) => ({
+      contractId: c.contract_id,
+      payload: c as unknown as Record<string, unknown>,
+    }))
+    .filter((c) => {
+      // Keep only contracts explicitly owned by this party.
+      // Checks both camelCase and snake_case payload shapes.
+      const p = c.payload as Record<string, unknown>;
+      const arg =
+        (p.create_argument as Record<string, unknown> | undefined) ??
+        (p.createArgument as Record<string, unknown> | undefined) ??
+        (p.payload as Record<string, unknown> | undefined) ??
+        p;
+      const owner = arg.owner;
+      return !owner || owner === userParty;
+    });
 }
 
 /**

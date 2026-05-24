@@ -70,21 +70,35 @@ export interface WithdrawRequestSummary {
 /**
  * Step 1 (read-only): Check if the user already has a CBTCWithdrawAccount
  * for this destination address. Reuses it if found — no need to create another.
+ *
+ * Filters by userParty (owner field) so only this user's accounts are returned.
  */
 export async function listWithdrawAccounts(
   provider: LoopProvider,
+  userParty: string,
 ): Promise<WithdrawAccountSummary[]> {
   const contracts = await provider.getActiveContracts({
     templateId: WITHDRAW_ACCOUNT_TEMPLATE_ID,
   });
-  return contracts.map((c) => {
-    const cAny = c as unknown as Record<string, unknown>;
-    return {
-      contractId: c.contract_id,
-      destinationBtcAddress: extractBtcAddress(cAny),
-      payload: cAny,
-    };
-  });
+  return contracts
+    .map((c) => {
+      const cAny = c as unknown as Record<string, unknown>;
+      return {
+        contractId: c.contract_id,
+        destinationBtcAddress: extractBtcAddress(cAny),
+        payload: cAny,
+      };
+    })
+    .filter((c) => {
+      const p = c.payload;
+      const arg =
+        (p.create_argument as Record<string, unknown> | undefined) ??
+        (p.createArgument as Record<string, unknown> | undefined) ??
+        (p.payload as Record<string, unknown> | undefined) ??
+        p;
+      const owner = arg.owner;
+      return !owner || owner === userParty;
+    });
 }
 
 /**
@@ -142,11 +156,15 @@ export async function createWithdrawAccount(
 /**
  * Step 3 (read-only): List the user's spendable cBTC Holding contracts.
  *
- * Locked holdings (in an active transfer) are filtered out. The contract ids
- * of the selected holdings are passed as the `tokens` argument to the burn.
+ * Filters by:
+ *  - owner === userParty (defence against cross-party leakage)
+ *  - not locked (locked = in-flight transfer, can't burn)
+ *
+ * The contract IDs of the selected holdings are passed as `tokens` to the burn.
  */
 export async function listSpendableHoldings(
   provider: LoopProvider,
+  userParty: string,
 ): Promise<HoldingSummary[]> {
   const contracts = await provider.getActiveContracts({
     interfaceId: HOLDING_INTERFACE_ID,
@@ -160,7 +178,17 @@ export async function listSpendableHoldings(
         payload: cAny,
       };
     })
-    .filter((h) => !isLocked(h.payload));
+    .filter((h) => {
+      // Filter by owner — only this party's holdings.
+      const viewValue =
+        (h.payload.interface_views as Array<{ view_value?: Record<string, unknown> }> | undefined)?.[0]?.view_value ??
+        (h.payload.interfaceViews as Array<{ viewValue?: Record<string, unknown> }> | undefined)?.[0]?.viewValue ??
+        h.payload;
+      const owner = (viewValue as Record<string, unknown>)?.owner;
+      const ownerMatch = !owner || owner === userParty;
+
+      return ownerMatch && !isLocked(h.payload);
+    });
 }
 
 /**

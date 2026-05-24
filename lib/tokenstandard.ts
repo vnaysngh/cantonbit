@@ -1,5 +1,9 @@
-import "server-only";
-
+/**
+ * NOTE: server-only guard removed. getAcceptChoiceContext is now called
+ * client-side from lib/transfer.ts. getInstrumentsMetadata and
+ * getTransferFactoryContractId are kept here for any server route that
+ * needs them (e.g. future admin routes).
+ */
 import {
   acceptChoiceContextUrl,
   instrumentsMetadataUrl,

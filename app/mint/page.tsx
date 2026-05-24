@@ -39,8 +39,9 @@ export default function MintPage() {
     setStage({ kind: "checking-account" });
 
     try {
-      // Reuse an existing deposit account if the user already has one
-      const existing = await listDepositAccounts(provider);
+      // Reuse an existing deposit account if the user already has one.
+      // Pass partyId so the query is filtered to this user's own contracts.
+      const existing = await listDepositAccounts(provider, partyId);
       let depositAccountCid: string;
 
       if (existing.length > 0) {

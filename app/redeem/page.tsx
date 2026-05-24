@@ -58,7 +58,8 @@ export default function RedeemPage() {
       setStage({ kind: "preparing" });
 
       // Step 1: find or create a WithdrawAccount for this BTC destination.
-      const existing = await listWithdrawAccounts(provider);
+      // Pass partyId so results are filtered to this user's own accounts.
+      const existing = await listWithdrawAccounts(provider, partyId);
       const reusable = existing.find(
         (a) => a.destinationBtcAddress === btcAddress.trim(),
       );
@@ -76,7 +77,8 @@ export default function RedeemPage() {
       }
 
       // Step 2: pick holdings that cover the amount (greedy, largest first).
-      const holdings = await listSpendableHoldings(provider);
+      // Pass partyId so only this user's own holdings are considered.
+      const holdings = await listSpendableHoldings(provider, partyId);
       const picked = pickHoldingsForAmount(holdings, amountSats);
       if (!picked) {
         throw new Error(
