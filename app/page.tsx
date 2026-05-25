@@ -7,7 +7,6 @@ import { ActivityList } from "@/components/ActivityList";
 import { BalanceBadge } from "@/components/BalanceBadge";
 import { PartyIdDisplay } from "@/components/PartyIdDisplay";
 import { UTXOWarning } from "@/components/UTXOWarning";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useBalance } from "@/hooks/useBalance";
 import { useTransfers } from "@/hooks/useTransfers";
@@ -21,7 +20,7 @@ const QUICK_ACTIONS = [
 ] as const;
 
 export default function DashboardPage() {
-  const { isConnected, partyId, connect, isConnecting } = useWallet();
+  const { partyId } = useWallet();
   const {
     total,
     utxoCount,
@@ -29,27 +28,6 @@ export default function DashboardPage() {
     error: balanceError,
   } = useBalance();
   const { activity, isLoading: activityLoading } = useTransfers();
-
-  if (!isConnected) {
-    return (
-      <div className="mx-auto flex max-w-md flex-col items-center gap-4 py-16 text-center">
-        <h1 className="text-4xl">Welcome to cantonbit</h1>
-        <p className="text-sm text-muted-foreground">
-          Connect your Loop wallet to view your balance, send cBTC, and
-          accept incoming transfers.
-        </p>
-        <Button
-          size="lg"
-          onClick={() => {
-            connect().catch((err) => console.error(err));
-          }}
-          disabled={isConnecting}
-        >
-          {isConnecting ? "Connecting…" : "Connect Loop wallet"}
-        </Button>
-      </div>
-    );
-  }
 
   return (
     <div className="space-y-6">

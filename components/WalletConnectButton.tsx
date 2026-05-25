@@ -1,38 +1,23 @@
 "use client";
 
-import { Button } from "@/components/ui/button";
-import { useWallet } from "@/hooks/useWallet";
+import { NETWORK } from "@/lib/constants";
 import { truncatePartyId } from "@/lib/format";
 
+/**
+ * WalletConnectButton — previously showed Loop wallet connect/disconnect UI.
+ * The Loop wallet has been removed; the WarpX party identity is now fixed
+ * server-side. This component now simply displays the truncated WarpX party ID.
+ *
+ * It is no longer rendered in TopNav (TopNav inlines the party badge directly),
+ * but is kept here in case other consumers reference it.
+ */
 export function WalletConnectButton() {
-  const { isConnected, partyId, isConnecting, connect, disconnect } = useWallet();
-
-  if (isConnected && partyId) {
-    return (
-      <div className="flex items-center gap-2">
-        <span
-          className="rounded-md bg-muted px-2 py-1 font-mono text-xs"
-          title={partyId}
-        >
-          {truncatePartyId(partyId)}
-        </span>
-        <Button variant="outline" size="sm" onClick={disconnect}>
-          Disconnect
-        </Button>
-      </div>
-    );
-  }
-
   return (
-    <Button
-      onClick={() => {
-        connect().catch((err) => {
-          console.error("Wallet connect failed:", err);
-        });
-      }}
-      disabled={isConnecting}
+    <span
+      className="rounded-md bg-muted px-2 py-1 font-mono text-xs"
+      title={NETWORK.warpxPartyId}
     >
-      {isConnecting ? "Connecting…" : "Connect Loop wallet"}
-    </Button>
+      {truncatePartyId(NETWORK.warpxPartyId)}
+    </span>
   );
 }

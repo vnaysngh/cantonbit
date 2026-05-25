@@ -44,6 +44,11 @@ function isFresh(token: CachedToken, nowMs: number): boolean {
 async function fetchNewToken(): Promise<CachedToken> {
   const { tokenUrl, clientId, clientSecret, scope } = readEnv();
 
+  console.log(`[auth] fetching new JWT from Authentik`);
+  console.log(`[auth] tokenUrl=${tokenUrl}`);
+  console.log(`[auth] clientId=${clientId}`);
+  console.log(`[auth] scope=${scope}`);
+
   const body = new URLSearchParams({
     grant_type: "client_credentials",
     client_id: clientId,
@@ -58,8 +63,11 @@ async function fetchNewToken(): Promise<CachedToken> {
     cache: "no-store",
   });
 
+  console.log(`[auth] Authentik response status=${res.status}`);
+
   if (!res.ok) {
     const text = await res.text().catch(() => "<no body>");
+    console.error(`[auth] Authentik token request failed status=${res.status} body=${text}`);
     throw new Error(
       `Authentik token request failed (${res.status} ${res.statusText}): ${text}`,
     );
@@ -67,13 +75,14 @@ async function fetchNewToken(): Promise<CachedToken> {
 
   const data = (await res.json()) as TokenResponse;
   if (!data.access_token || typeof data.expires_in !== "number") {
+    console.error(`[auth] Authentik response missing access_token or expires_in:`, data);
     throw new Error("Authentik token response missing access_token or expires_in");
   }
 
-  return {
-    accessToken: data.access_token,
-    expiresAt: Date.now() + data.expires_in * 1000,
-  };
+  const expiresAt = Date.now() + data.expires_in * 1000;
+  console.log(`[auth] JWT obtained successfully, expires_in=${data.expires_in}s expiresAt=${new Date(expiresAt).toISOString()}`);
+
+  return { accessToken: data.access_token, expiresAt };
 }
 
 /**
@@ -85,7 +94,15 @@ export async function getLedgerJwt(): Promise<string> {
   const now = Date.now();
 
   if (cached && isFresh(cached, now)) {
+    const remainingSecs = Math.round((cached.expiresAt - now) / 1000);
+    console.log(`[auth] using cached JWT, expires in ${remainingSecs}s`);
     return cached.accessToken;
+  }
+
+  if (cached && !isFresh(cached, now)) {
+    console.log(`[auth] cached JWT is stale, refreshing...`);
+  } else {
+    console.log(`[auth] no cached JWT, fetching fresh token...`);
   }
 
   if (!inflight) {

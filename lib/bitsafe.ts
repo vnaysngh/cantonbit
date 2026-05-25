@@ -15,6 +15,8 @@
 
 import { NETWORK } from "./constants";
 
+const TAG = "[bitsafe]";
+
 /** Raw shape of a Canton contract reference returned by coordinator endpoints. */
 export interface CoordinatorContract {
   contract_id: string;
@@ -50,32 +52,36 @@ export interface TokenStandardContracts {
 
 async function coordinatorPost<T>(path: string, body: unknown): Promise<T> {
   const url = `${NETWORK.coordinatorUrl}${path}`;
+  console.log(`${TAG} POST ${url} body=${JSON.stringify(body)}`);
+
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
     cache: "no-store",
   });
+
+  console.log(`${TAG} response status=${res.status} url=${url}`);
+
   if (!res.ok) {
     const text = await res.text().catch(() => "<no body>");
+    console.error(`${TAG} coordinator error path=${path} status=${res.status} body=${text}`);
     throw new Error(
       `Coordinator POST ${path} failed (${res.status} ${res.statusText}): ${text}`,
     );
   }
-  return (await res.json()) as T;
+
+  const data = await res.json() as T;
+  console.log(`${TAG} response keys=${Object.keys(data as object).join(",")}`);
+  return data;
 }
 
 /**
  * Step 1 of both mint and burn flows.
- *
- * Fetches the two shared factory contracts. These are disclosed in the
- * transaction that creates a DepositAccount (mint) or WithdrawAccount (burn).
- *
- * Mint flow ref: https://docs.bitsafe.finance/developers/cbtc-minting-and-burning
- * Step: "1. Authenticate (get JWT)" → "2. Create Deposit Account"
- * The da_rules contract_id is the contractId in the ExerciseCommand.
+ * Fetches da_rules (mint) and wa_rules (burn) factory contracts.
  */
 export async function getAccountContractRules(): Promise<AccountContractRules> {
+  console.log(`${TAG} getAccountContractRules network=${NETWORK.name} chain=${NETWORK.chain}`);
   return coordinatorPost<AccountContractRules>(
     "/app/get-account-contract-rules",
     { chain: NETWORK.chain },
@@ -84,33 +90,51 @@ export async function getAccountContractRules(): Promise<AccountContractRules> {
 
 /**
  * Step 3 of the mint flow (after DepositAccount is created on-ledger).
- *
- * Returns the taproot P2TR BTC deposit address for the user's DepositAccount.
- * Address format depends on network:
- *   devnet  → bcrt1p... (regtest)
- *   testnet → tb1p...  (testnet3)
- *   mainnet → bc1p...  (mainnet bech32m)
- *
- * @param depositAccountContractId The contract_id of the user's CBTCDepositAccount.
+ * Returns the taproot P2TR BTC deposit address.
+ *   devnet  → bcrt1p...
+ *   testnet → tb1p...
+ *   mainnet → bc1p...
  */
 export async function getBitcoinAddress(
   depositAccountContractId: string,
 ): Promise<string> {
-  const resp = await coordinatorPost<{ address: string }>(
-    "/app/get-bitcoin-address",
-    { id: depositAccountContractId, chain: NETWORK.chain },
-  );
-  return resp.address;
+  console.log(`${TAG} getBitcoinAddress depositAccountContractId=${depositAccountContractId} chain=${NETWORK.chain}`);
+
+  // The coordinator returns a raw plain-text bitcoin address — NOT JSON.
+  // Cannot use coordinatorPost() which calls res.json().
+  const url = `${NETWORK.coordinatorUrl}/app/get-bitcoin-address`;
+  const body = { id: depositAccountContractId, chain: NETWORK.chain };
+  console.log(`${TAG} POST ${url} body=${JSON.stringify(body)}`);
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+
+  console.log(`${TAG} response status=${res.status}`);
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "<no body>");
+    console.error(`${TAG} coordinator error status=${res.status} body=${text}`);
+    throw new Error(`Coordinator get-bitcoin-address failed (${res.status}): ${text}`);
+  }
+
+  const text = await res.text();
+  const address = text.trim();
+  if (!address) throw new Error("Coordinator returned empty bitcoin address");
+  console.log(`${TAG} bitcoin address=${address}`);
+  return address;
 }
 
 /**
- * Burn flow: fetch the token-standard context contracts required by
- * CBTCWithdrawAccount_Withdraw. Must be called before the withdraw submit.
- *
- * All five are disclosed in the transaction AND referenced by contract_id
- * in choiceArgument.extraArgs.context.values.
+ * Burn flow: fetch the 5 token-standard context contracts.
+ * Must be called before the withdraw submit.
+ * All five are disclosed in the transaction AND referenced in choiceArgument.extraArgs.
  */
 export async function getTokenStandardContracts(): Promise<TokenStandardContracts> {
+  console.log(`${TAG} getTokenStandardContracts network=${NETWORK.name} chain=${NETWORK.chain}`);
   return coordinatorPost<TokenStandardContracts>(
     "/app/get-token-standard-contracts",
     { chain: NETWORK.chain },

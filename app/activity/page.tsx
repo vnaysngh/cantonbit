@@ -3,9 +3,7 @@
 import { useMemo, useState } from "react";
 
 import { ActivityList } from "@/components/ActivityList";
-import { Button } from "@/components/ui/button";
 import { useTransfers } from "@/hooks/useTransfers";
-import { useWallet } from "@/hooks/useWallet";
 import { cn } from "@/lib/utils";
 import type { ActivityKind } from "@/lib/types";
 
@@ -21,7 +19,6 @@ const TABS: { id: Filter; label: string }[] = [
 ];
 
 export default function ActivityPage() {
-  const { isConnected, connect } = useWallet();
   const { activity, isLoading } = useTransfers();
   const [filter, setFilter] = useState<Filter>("all");
 
@@ -29,19 +26,6 @@ export default function ActivityPage() {
     if (filter === "all") return activity;
     return activity.filter((row) => row.kind === filter);
   }, [activity, filter]);
-
-  if (!isConnected) {
-    return (
-      <div className="mx-auto max-w-md py-16 text-center">
-        <p className="mb-4 text-sm text-muted-foreground">
-          Connect your wallet to view activity.
-        </p>
-        <Button onClick={() => connect().catch(console.error)}>
-          Connect Loop wallet
-        </Button>
-      </div>
-    );
-  }
 
   return (
     <div className="space-y-6">

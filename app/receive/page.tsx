@@ -1,24 +1,10 @@
 "use client";
 
 import { AddressQR } from "@/components/AddressQR";
-import { Button } from "@/components/ui/button";
 import { useWallet } from "@/hooks/useWallet";
 
 export default function ReceivePage() {
-  const { isConnected, partyId, connect } = useWallet();
-
-  if (!isConnected || !partyId) {
-    return (
-      <div className="mx-auto max-w-md py-16 text-center">
-        <p className="mb-4 text-sm text-muted-foreground">
-          Connect your wallet to view your receive address.
-        </p>
-        <Button onClick={() => connect().catch(console.error)}>
-          Connect Loop wallet
-        </Button>
-      </div>
-    );
-  }
+  const { partyId } = useWallet();
 
   return (
     <div className="mx-auto max-w-lg space-y-6">
@@ -31,7 +17,7 @@ export default function ReceivePage() {
 
       <AddressQR
         value={partyId}
-        label="Scan with the sender's Loop wallet or copy below."
+        label="Scan or copy the WarpX party ID below to receive cBTC."
         size={224}
       />
     </div>

@@ -9,11 +9,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useBalance } from "@/hooks/useBalance";
-import { useWallet } from "@/hooks/useWallet";
 import { formatBtc, parseBtc } from "@/lib/format";
 
 export default function SendPage() {
-  const { isConnected, connect } = useWallet();
   const { total } = useBalance();
 
   const [recipient, setRecipient] = useState("");
@@ -28,7 +26,7 @@ export default function SendPage() {
   const amountValid = amount !== "" && amountSats > 0n && !overdraft;
   const recipientValid =
     recipient.trim().length > 0 && recipient.includes("::");
-  const canSubmit = isConnected && amountValid && recipientValid && status !== "submitting";
+  const canSubmit = amountValid && recipientValid && status !== "submitting";
 
   const remainingDisplay = useMemo(() => {
     if (amount === "") return total;
@@ -36,24 +34,10 @@ export default function SendPage() {
     return formatBtc(remainingSats);
   }, [amount, overdraft, remainingSats, total]);
 
-  if (!isConnected) {
-    return (
-      <div className="mx-auto max-w-md py-16 text-center">
-        <p className="mb-4 text-sm text-muted-foreground">
-          Connect your wallet to send cBTC.
-        </p>
-        <Button onClick={() => connect().catch(console.error)}>
-          Connect Loop wallet
-        </Button>
-      </div>
-    );
-  }
-
   const submit = async () => {
     setStatus("submitting");
-    setStatusMessage("Open Loop to approve the transfer.");
-    // TODO(real-data): swap for provider.transfer(recipient, amount, NETWORK.instrumentId)
-    // via the Loop SDK once DARs are uploaded.
+    setStatusMessage("Submitting transfer…");
+    // TODO(real-data): swap for real server-side transfer once DARs are uploaded.
     await new Promise((r) => setTimeout(r, 1200));
     setStatus("pending");
     setStatusMessage("Waiting for Canton confirmation…");
@@ -150,7 +134,7 @@ export default function SendPage() {
             disabled={!canSubmit}
             className="w-full"
           >
-            {status === "submitting" ? "Waiting on wallet…" : "Confirm and send"}
+            {status === "submitting" ? "Submitting…" : "Confirm and send"}
           </Button>
         )}
       </div>

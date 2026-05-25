@@ -1,220 +1,117 @@
 /**
  * Mint flow — bridging native BTC into cBTC on Canton.
  *
- * Official reference: https://docs.bitsafe.finance/developers/cbtc-minting-and-burning
- *
- * Steps (per BitSafe docs diagram):
- *   1. GET /app/get-account-contract-rules  → da_rules contract
- *   2. POST /v2/commands/submit-and-wait    → create CBTCDepositAccount (Loop popup)
- *      - actAs: [USER_PARTY_ID]
- *      - templateId: "#cbtc:CBTC.DepositAccount:CBTCDepositAccountRules"
- *      - choice: "CBTCDepositAccountRules_CreateDepositAccount"
- *      - choiceArgument: { owner: USER_PARTY_ID }
- *      - disclosedContracts: [da_rules]
- *   3. GET /app/get-bitcoin-address (id: depositAccountCid) → taproot P2TR address
+ * Steps (per BitSafe docs):
+ *   1. POST /api/mint/account-contract-rules  → da_rules contract (server proxies coordinator)
+ *   2. POST /api/mint/create-deposit-account  → CBTCDepositAccount contract ID
+ *      (m2m JWT + WarpX party as actAs, user partyId as owner)
+ *   3. POST /api/mint/bitcoin-address         → bc1p… taproot address
  *   4. User sends BTC to that address
  *   5. Attestors monitor Bitcoin for 6 confirmations (~60 min)
  *   6. Attestors submit ConfirmDepositAction on Canton
- *   7. cBTC minted to user's party (additional 60–120s after confirmation 6)
+ *   7. cBTC minted to user's party (~60–120s after confirmation 6)
  *
  * Minimum mint amount: 0.001 BTC
- * UTXO limit: 10 per party — warn at 8, hard-block at 10
  */
 
-import { getAccountContractRules, getBitcoinAddress } from "./bitsafe";
-import type { CoordinatorContract } from "./bitsafe";
-import type { LoopProvider } from "@/hooks/useWallet";
+import { NETWORK } from "./constants";
+import type { Holding } from "@/lib/types";
+
+const TAG = "[mint]";
 
 /** Minimum mint amount in satoshis (0.001 BTC). */
 export const MIN_MINT_SATS = 100_000n;
 
-/** Warn user when UTXO count reaches this threshold. */
-export const UTXO_WARN_THRESHOLD = 8;
-
-/** Hard limit on UTXOs per party. */
-export const UTXO_HARD_LIMIT = 10;
-
-const DEPOSIT_ACCOUNT_TEMPLATE_ID =
-  "#cbtc:CBTC.DepositAccount:CBTCDepositAccount";
-
-const DEPOSIT_ACCOUNT_RULES_TEMPLATE_ID =
-  "#cbtc:CBTC.DepositAccount:CBTCDepositAccountRules";
-
-const CREATE_DEPOSIT_ACCOUNT_CHOICE =
-  "CBTCDepositAccountRules_CreateDepositAccount";
-
-export interface DepositAccountSummary {
-  /** The on-ledger contract id of the user's CBTCDepositAccount. */
-  contractId: string;
-  payload: Record<string, unknown>;
-}
+// UTXO_WARN_THRESHOLD lives in lib/constants.ts — single source of truth.
+export { UTXO_WARN_THRESHOLD } from "./constants";
 
 /**
- * Step 1 (read-only): Check if the user already has a CBTCDepositAccount.
- * The deposit account can be reused across sessions — we only create one if
- * none exists. Returns empty array if this is the user's first mint.
+ * Step 1+2: Create a CBTCDepositAccount via server route.
  *
- * Filters by userParty (owner field in the contract payload) so that even
- * if Loop returns contracts for multiple parties, we only get this user's own.
+ * Server route uses m2m JWT + WarpX party (actAs) with the user's partyId as owner.
+ * This bypasses the cantonloop.com DAR vetting issue — the WarpX node has cBTC vetted.
  */
-export async function listDepositAccounts(
-  provider: LoopProvider,
-  userParty: string,
-): Promise<DepositAccountSummary[]> {
-  const contracts = await provider.getActiveContracts({
-    templateId: DEPOSIT_ACCOUNT_TEMPLATE_ID,
+export async function createDepositAccount(partyId: string): Promise<string> {
+  console.log(`${TAG} createDepositAccount partyId=${partyId.slice(0, 30)}...`);
+
+  const res = await fetch("/api/mint/create-deposit-account", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ partyId }),
   });
-  return contracts
-    .map((c) => ({
-      contractId: c.contract_id,
-      payload: c as unknown as Record<string, unknown>,
-    }))
-    .filter((c) => {
-      // Keep only contracts explicitly owned by this party.
-      // Checks both camelCase and snake_case payload shapes.
-      const p = c.payload as Record<string, unknown>;
-      const arg =
-        (p.create_argument as Record<string, unknown> | undefined) ??
-        (p.createArgument as Record<string, unknown> | undefined) ??
-        (p.payload as Record<string, unknown> | undefined) ??
-        p;
-      const owner = arg.owner;
-      return !owner || owner === userParty;
-    });
-}
 
-/**
- * Step 2: Create a CBTCDepositAccount for the user on Canton.
- *
- * Triggers a Loop wallet popup asking the user to approve the transaction.
- * The transaction exercises CBTCDepositAccountRules_CreateDepositAccount with
- * actAs: [userParty] and the da_rules contract re-disclosed.
- *
- * Confirmed shape from BitSafe docs:
- *   POST /v2/commands/submit-and-wait-for-transaction-tree (via Loop)
- *   actAs: [USER_PARTY_ID]
- *   choice: CBTCDepositAccountRules_CreateDepositAccount
- *   choiceArgument: { owner: USER_PARTY_ID }
- *   disclosedContracts: [da_rules from get-account-contract-rules]
- *
- * Returns the new deposit account's contract_id.
- */
-export async function createDepositAccount(
-  provider: LoopProvider,
-  userParty: string,
-): Promise<string> {
-  const rules = await getAccountContractRules();
+  const data = await res.json() as { contractId?: string; error?: string };
+  console.log(`${TAG} create-deposit-account response status=${res.status} contractId=${data.contractId ?? "none"} error=${data.error ?? "none"}`);
 
-  const txResponse = await provider.submitTransaction(
-    {
-      actAs: [userParty],
-      disclosedContracts: [toDisclosed(rules.da_rules)],
-      commands: [
-        {
-          ExerciseCommand: {
-            templateId: DEPOSIT_ACCOUNT_RULES_TEMPLATE_ID,
-            contractId: rules.da_rules.contract_id,
-            choice: CREATE_DEPOSIT_ACCOUNT_CHOICE,
-            choiceArgument: { owner: userParty },
-          },
-        },
-      ],
-    },
-    {
-      message: "Create cBTC deposit account",
-      executionMode: "wait",
-    },
-  );
-
-  const newContractId = extractCreatedContractId(
-    txResponse,
-    DEPOSIT_ACCOUNT_TEMPLATE_ID,
-  );
-  if (!newContractId) {
-    throw new Error(
-      "Deposit account created but contract id not found in transaction response.",
-    );
+  if (!res.ok || !data.contractId) {
+    throw new Error(data.error ?? `Create deposit account failed (${res.status})`);
   }
-  return newContractId;
+
+  return data.contractId;
 }
 
 /**
- * Step 3: Fetch the Bitcoin deposit address from the coordinator.
+ * Step 3: Fetch the Bitcoin deposit address via server route.
+ * Coordinator blocks CORS from browser — must proxy through Next.js server.
  * Returns a taproot P2TR address (bcrt1p / tb1p / bc1p depending on network).
  */
 export async function getDepositAddress(
   depositAccountContractId: string,
 ): Promise<string> {
-  return getBitcoinAddress(depositAccountContractId);
-}
+  console.log(`${TAG} getDepositAddress for contractId=${depositAccountContractId}`);
 
-/* -------------------------- internal helpers -------------------------- */
+  const res = await fetch("/api/mint/bitcoin-address", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ depositAccountContractId }),
+  });
 
-function toDisclosed(c: CoordinatorContract) {
-  return {
-    templateId: c.template_id,
-    contractId: c.contract_id,
-    createdEventBlob: c.created_event_blob,
-    synchronizerId: "",
-  };
+  const data = await res.json() as { address?: string; error?: string };
+  if (!res.ok || !data.address) {
+    throw new Error(data.error ?? `Failed to get bitcoin address (${res.status})`);
+  }
+
+  console.log(`${TAG} bitcoin deposit address=${data.address}`);
+  return data.address;
 }
 
 /**
- * Walk a Loop transaction response looking for a CreatedEvent whose templateId
- * contains the given suffix. Handles the three response shapes Loop may return:
- *
- *   Shape A: { transactionTree: { eventsById: { "0": { CreatedEvent: {...} } } } }
- *   Shape B: { transaction: { events: [ { CreatedEvent: {...} } ] } }
- *   Shape C: { events: [ { templateId, contractId } ] }  (flattened)
+ * Snapshot the user's current cBTC holding balance for mint polling.
+ * Fetches from the server route GET /api/canton/holdings (m2m JWT — no Loop SDK).
+ * Poll every 30s — mint complete when balance > snapshot.
  */
-function extractCreatedContractId(
-  txResponse: unknown,
-  templateSuffix: string,
-): string | null {
-  if (!txResponse || typeof txResponse !== "object") return null;
+export async function snapshotHoldingBalance(): Promise<string> {
+  const partyId = NETWORK.warpxPartyId;
+  const res = await fetch(
+    `/api/canton/holdings?partyId=${encodeURIComponent(partyId)}`,
+  );
 
-  const tree = (txResponse as { transactionTree?: { eventsById?: Record<string, unknown> } })
-    .transactionTree;
-  if (tree?.eventsById) {
-    for (const ev of Object.values(tree.eventsById)) {
-      const cid = matchCreatedEvent(ev, templateSuffix);
-      if (cid) return cid;
-    }
+  const data = (await res.json()) as {
+    holdings?: Holding[];
+    error?: string;
+  };
+
+  if (!res.ok) {
+    throw new Error(data.error ?? `Holdings fetch failed (${res.status})`);
   }
 
-  const events = (txResponse as { transaction?: { events?: unknown[] } })
-    .transaction?.events;
-  if (Array.isArray(events)) {
-    for (const ev of events) {
-      const cid = matchCreatedEvent(ev, templateSuffix);
-      if (cid) return cid;
-    }
+  const holdings = data.holdings ?? [];
+
+  // Filter to unlocked cBTC only (same logic as useBalance).
+  const cbtcUnlocked = holdings.filter(
+    (h) =>
+      h.payload.instrumentId.id === NETWORK.instrumentId.id &&
+      h.payload.instrumentId.admin === NETWORK.instrumentId.admin &&
+      (h.payload.lock === null || h.payload.lock === undefined),
+  );
+
+  let totalSats = 0;
+  for (const h of cbtcUnlocked) {
+    const n = parseFloat(h.payload.amount ?? "0");
+    if (!isNaN(n)) totalSats += Math.round(n * 1e8);
   }
 
-  const flatEvents = (txResponse as { events?: unknown[] }).events;
-  if (Array.isArray(flatEvents)) {
-    for (const ev of flatEvents) {
-      const cid = matchCreatedEvent(ev, templateSuffix);
-      if (cid) return cid;
-    }
-  }
-
-  return null;
-}
-
-function matchCreatedEvent(ev: unknown, templateSuffix: string): string | null {
-  if (!ev || typeof ev !== "object") return null;
-
-  const tagged = (ev as { CreatedEvent?: { templateId?: string; contractId?: string } })
-    .CreatedEvent;
-  if (tagged?.templateId?.includes(templateSuffix) && tagged.contractId) {
-    return tagged.contractId;
-  }
-
-  const flat = ev as { templateId?: string; contractId?: string };
-  if (flat.templateId?.includes(templateSuffix) && flat.contractId) {
-    return flat.contractId;
-  }
-
-  return null;
+  const total = (totalSats / 1e8).toFixed(8);
+  console.log(`${TAG} snapshotHoldingBalance holdings=${cbtcUnlocked.length} total=${total} BTC`);
+  return total;
 }

@@ -3,8 +3,8 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-import { WalletConnectButton } from "./WalletConnectButton";
 import { NETWORK } from "@/lib/constants";
+import { truncatePartyId } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 // cantonbit is a mint/redeem app, not a wallet — Send/Receive screens
@@ -55,7 +55,13 @@ export function TopNav() {
             })}
           </nav>
         </div>
-        <WalletConnectButton />
+        {/* Show the WarpX party identity — no connect/disconnect needed */}
+        <span
+          className="rounded-md bg-muted px-2 py-1 font-mono text-xs"
+          title={NETWORK.warpxPartyId}
+        >
+          {truncatePartyId(NETWORK.warpxPartyId)}
+        </span>
       </div>
     </header>
   );
