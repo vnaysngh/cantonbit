@@ -46,7 +46,8 @@ export interface TokenStandardContracts {
   burn_mint_factory: CoordinatorContract;
   instrument_configuration: CoordinatorContract;
   app_reward_configuration: CoordinatorContract;
-  featured_app_right: CoordinatorContract;
+  /** Optional — not returned by all coordinator deployments (absent on mainnet as of 2026-05). Always check before use. */
+  featured_app_right?: CoordinatorContract;
   issuer_credential: CoordinatorContract;
 }
 

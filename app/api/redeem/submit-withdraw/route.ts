@@ -79,60 +79,34 @@ export async function POST(req: NextRequest) {
 
     const warpxParty = NETWORK.warpxPartyId;
 
-    const buildBody = (commandId: string) => ({
-      applicationId: APPLICATION_ID,
-      workflowId: `cbtc-withdraw-${commandId}`,
-      commandId,
-      // actAs + readAs: WarpX party only — m2m JWT authority.
-      actAs: [warpxParty],
-      readAs: [warpxParty],
-      commands: [
-        {
-          ExerciseCommand: {
-            templateId: WITHDRAW_ACCOUNT_TEMPLATE_ID,
-            contractId: withdrawAccountContractId,
-            choice: WITHDRAW_CHOICE,
-            choiceArgument: {
-              tokens: holdingCids,
-              amount,
-              burnMintFactoryCid: ts.burn_mint_factory.contract_id,
-              extraArgs: {
-                context: {
-                  values: {
-                    "utility.digitalasset.com/instrument-configuration": {
-                      tag: "AV_ContractId",
-                      value: ts.instrument_configuration.contract_id,
-                    },
-                    "utility.digitalasset.com/app-reward-configuration": {
-                      tag: "AV_ContractId",
-                      value: ts.app_reward_configuration.contract_id,
-                    },
-                    "utility.digitalasset.com/featured-app-right": {
-                      tag: "AV_ContractId",
-                      value: ts.featured_app_right.contract_id,
-                    },
-                    "utility.digitalasset.com/issuer-credentials": {
-                      tag: "AV_List",
-                      value: [
-                        {
-                          tag: "AV_ContractId",
-                          value: ts.issuer_credential.contract_id,
-                        },
-                      ],
-                    },
-                  },
-                },
-                meta: {
-                  values: {
-                    "splice.lfdecentralizedtrust.org/reason": "CBTC Burn",
-                  },
-                },
-              },
-            },
-          },
+    // featured_app_right is optional — not returned by mainnet coordinator as of 2026-05.
+    // Include it in extraArgs + disclosedContracts only when present.
+    const hasFeaturedAppRight = !!ts.featured_app_right?.contract_id;
+    console.log(`${TAG} featured_app_right present=${hasFeaturedAppRight}`);
+
+    const buildBody = (commandId: string) => {
+      const contextValues: Record<string, unknown> = {
+        "utility.digitalasset.com/instrument-configuration": {
+          tag: "AV_ContractId",
+          value: ts.instrument_configuration.contract_id,
         },
-      ],
-      disclosedContracts: [
+        "utility.digitalasset.com/app-reward-configuration": {
+          tag: "AV_ContractId",
+          value: ts.app_reward_configuration.contract_id,
+        },
+        "utility.digitalasset.com/issuer-credentials": {
+          tag: "AV_List",
+          value: [{ tag: "AV_ContractId", value: ts.issuer_credential.contract_id }],
+        },
+      };
+      if (hasFeaturedAppRight) {
+        contextValues["utility.digitalasset.com/featured-app-right"] = {
+          tag: "AV_ContractId",
+          value: ts.featured_app_right.contract_id,
+        };
+      }
+
+      const disclosedContracts = [
         {
           templateId: WITHDRAW_ACCOUNT_TEMPLATE_ID,
           contractId: withdrawAccountContractId,
@@ -158,19 +132,52 @@ export async function POST(req: NextRequest) {
           synchronizerId: "",
         },
         {
-          templateId: ts.featured_app_right.template_id,
-          contractId: ts.featured_app_right.contract_id,
-          createdEventBlob: ts.featured_app_right.created_event_blob,
-          synchronizerId: "",
-        },
-        {
           templateId: ts.issuer_credential.template_id,
           contractId: ts.issuer_credential.contract_id,
           createdEventBlob: ts.issuer_credential.created_event_blob,
           synchronizerId: "",
         },
-      ],
-    });
+      ];
+      if (hasFeaturedAppRight) {
+        disclosedContracts.push({
+          templateId: ts.featured_app_right.template_id,
+          contractId: ts.featured_app_right.contract_id,
+          createdEventBlob: ts.featured_app_right.created_event_blob,
+          synchronizerId: "",
+        });
+      }
+
+      return {
+        applicationId: APPLICATION_ID,
+        workflowId: `cbtc-withdraw-${commandId}`,
+        commandId,
+        actAs: [warpxParty],
+        readAs: [warpxParty],
+        commands: [
+          {
+            ExerciseCommand: {
+              templateId: WITHDRAW_ACCOUNT_TEMPLATE_ID,
+              contractId: withdrawAccountContractId,
+              choice: WITHDRAW_CHOICE,
+              choiceArgument: {
+                tokens: holdingCids,
+                amount,
+                burnMintFactoryCid: ts.burn_mint_factory.contract_id,
+                extraArgs: {
+                  context: { values: contextValues },
+                  meta: {
+                    values: {
+                      "splice.lfdecentralizedtrust.org/reason": "CBTC Burn",
+                    },
+                  },
+                },
+              },
+            },
+          },
+        ],
+        disclosedContracts,
+      };
+    };
 
     const url = `${NETWORK.ledgerHost}/v2/commands/submit-and-wait-for-transaction-tree`;
     let commandId = randomUUID();

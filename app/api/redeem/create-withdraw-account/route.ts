@@ -151,7 +151,63 @@ export async function POST(req: NextRequest) {
     }
 
     console.log(`${TAG} success! withdrawAccount contractId=${account.contractId}`);
-    console.log(`${TAG} createdEventBlob length=${account.createdEventBlob.length}`);
+    console.log(`${TAG} createdEventBlob from tx length=${account.createdEventBlob.length}`);
+
+    // The transaction response doesn't include createdEventBlob — fetch it from active-contracts.
+    // It's required for disclosedContracts in the subsequent CBTCWithdrawAccount_Withdraw call.
+    if (!account.createdEventBlob) {
+      console.log(`${TAG} blob empty — fetching from active-contracts...`);
+      try {
+        const ledgerEndRes = await fetch(`${NETWORK.ledgerHost}/v2/state/ledger-end`, {
+          headers: { Authorization: `Bearer ${jwt}` },
+          cache: "no-store",
+        });
+        const { offset } = await ledgerEndRes.json() as { offset?: number };
+
+        const acsRes = await fetch(`${NETWORK.ledgerHost}/v2/state/active-contracts`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
+          body: JSON.stringify({
+            filter: {
+              filtersByParty: {
+                [warpxParty]: {
+                  cumulative: [{
+                    identifierFilter: {
+                      TemplateFilter: {
+                        value: {
+                          templateId: "#cbtc:CBTC.WithdrawAccount:CBTCWithdrawAccount",
+                          includeCreatedEventBlob: true,
+                        },
+                      },
+                    },
+                  }],
+                },
+              },
+            },
+            verbose: false,
+            activeAtOffset: offset ?? 0,
+          }),
+          cache: "no-store",
+        });
+
+        const raw = await acsRes.json() as unknown;
+        const entries = Array.isArray(raw) ? raw : [];
+        for (const entry of entries) {
+          const e = entry as { contractEntry?: { JsActiveContract?: { createdEvent?: { contractId?: string; createdEventBlob?: string } } } };
+          const ev = e.contractEntry?.JsActiveContract?.createdEvent;
+          if (ev?.contractId === account.contractId && ev.createdEventBlob) {
+            account.createdEventBlob = ev.createdEventBlob;
+            console.log(`${TAG} fetched createdEventBlob from ACS, length=${account.createdEventBlob.length}`);
+            break;
+          }
+        }
+      } catch (blobErr) {
+        // Non-fatal — submit-withdraw will fail with MISSING_FIELD but at least we tried
+        console.warn(`${TAG} failed to fetch createdEventBlob from ACS:`, blobErr);
+      }
+    }
+
+    console.log(`${TAG} returning contractId=${account.contractId} blobLength=${account.createdEventBlob.length}`);
     return NextResponse.json(account);
 
   } catch (err) {
