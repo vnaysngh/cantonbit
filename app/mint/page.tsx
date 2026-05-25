@@ -213,9 +213,12 @@ export default function MintPage() {
 
       {stage.kind === "ready" && (
         <div className="space-y-4">
+          <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-300">
+            ⚠️ Send at least <span className="font-semibold">0.001 BTC</span> to this address. Amounts below the minimum will not be processed and cannot be recovered.
+          </div>
           <AddressQR
             value={stage.address}
-            label="Send BTC to this address. Minimum: 0.001 BTC. cBTC appears after 6 Bitcoin confirmations (~60 min) plus attestor processing (~60–120 sec)."
+            label="cBTC appears after 6 Bitcoin confirmations (~60 min) plus attestor processing (~60–120 sec)."
           />
           <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
             <div>Deposit account:</div>
