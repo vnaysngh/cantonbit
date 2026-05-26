@@ -70,7 +70,7 @@ export async function POST(req: NextRequest) {
     console.log(`${TAG} burn_mint_factory contractId=${ts.burn_mint_factory.contract_id}`);
     console.log(`${TAG} instrument_configuration contractId=${ts.instrument_configuration.contract_id}`);
     console.log(`${TAG} app_reward_configuration contractId=${ts.app_reward_configuration.contract_id}`);
-    console.log(`${TAG} featured_app_right contractId=${ts.featured_app_right.contract_id}`);
+    console.log(`${TAG} featured_app_right contractId=${ts.featured_app_right?.contract_id ?? "n/a"}`);
     console.log(`${TAG} issuer_credential contractId=${ts.issuer_credential.contract_id}`);
 
     console.log(`${TAG} fetching JWT from Authentik...`);
@@ -99,7 +99,7 @@ export async function POST(req: NextRequest) {
           value: [{ tag: "AV_ContractId", value: ts.issuer_credential.contract_id }],
         },
       };
-      if (hasFeaturedAppRight) {
+      if (hasFeaturedAppRight && ts.featured_app_right) {
         contextValues["utility.digitalasset.com/featured-app-right"] = {
           tag: "AV_ContractId",
           value: ts.featured_app_right.contract_id,
@@ -138,7 +138,7 @@ export async function POST(req: NextRequest) {
           synchronizerId: "",
         },
       ];
-      if (hasFeaturedAppRight) {
+      if (hasFeaturedAppRight && ts.featured_app_right) {
         disclosedContracts.push({
           templateId: ts.featured_app_right.template_id,
           contractId: ts.featured_app_right.contract_id,

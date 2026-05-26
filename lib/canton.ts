@@ -132,14 +132,17 @@ function unwrapContracts(resp: ActiveContractsResponse): JsActiveContract[] {
 }
 
 function buildInterfaceFilterRequest(
-  partyId: string,
+  _partyId: string,
   interfaceId: string,
   activeAtOffset: number,
 ): ActiveContractsRequest {
+  // Always query as the WarpX party — the m2m JWT only has authority over it.
+  // Filter by owner in the payload after fetching (see getHoldings / getPendingTransfers).
+  const warpxParty = NETWORK.warpxPartyId;
   return {
     filter: {
       filtersByParty: {
-        [partyId]: {
+        [warpxParty]: {
           cumulative: [
             {
               identifierFilter: {
@@ -192,6 +195,8 @@ export async function getHoldings(partyId: string): Promise<Holding[]> {
       HOLDING_INTERFACE_ID,
     );
     if (!payload) continue;
+    // Filter to only holdings owned by the requested party
+    if (payload.owner !== partyId) continue;
     out.push({
       contractId: ev.contractId,
       payload,
@@ -223,6 +228,8 @@ export async function getPendingTransfers(partyId: string): Promise<Transfer[]> 
       TRANSFER_INSTRUCTION_INTERFACE_ID,
     );
     if (!payload) continue;
+    // Filter to only transfers where the user is the receiver
+    if (payload.receiver !== partyId) continue;
     out.push({
       contractId: ev.contractId,
       payload,
