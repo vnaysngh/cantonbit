@@ -137,30 +137,52 @@ interface JsActiveContract {
   };
 }
 
-interface ActiveContractsResponse {
-  // Some Canton versions wrap the array; others return it directly.
-  // We accept both via the helper below.
-  contractEntries?: JsActiveContract[];
-  // Older shape:
-  result?: JsActiveContract[];
+// Canton v2 returns a JSON array. Each entry is one of:
+//   1. { workflowId, contractEntry: { JsActiveContract: {...} } } (current shape)
+//   2. { JsActiveContract: {...} } (legacy shape)
+// Older versions wrapped the array in { contractEntries } or { result }.
+interface ActiveContractEntry {
+  workflowId?: string;
+  contractEntry?: JsActiveContract;
 }
 
+type ActiveContractsResponse =
+  | Array<ActiveContractEntry | JsActiveContract>
+  | { contractEntries?: JsActiveContract[]; result?: JsActiveContract[] };
+
 function unwrapContracts(resp: ActiveContractsResponse): JsActiveContract[] {
-  return resp.contractEntries ?? resp.result ?? [];
+  // Wrapped object shape (legacy)
+  if (!Array.isArray(resp)) {
+    return resp.contractEntries ?? resp.result ?? [];
+  }
+  const out: JsActiveContract[] = [];
+  for (const item of resp) {
+    if (!item) continue;
+    // Current shape: { workflowId, contractEntry: { JsActiveContract } }
+    if ("contractEntry" in item && item.contractEntry) {
+      out.push(item.contractEntry);
+      continue;
+    }
+    // Legacy shape: { JsActiveContract } directly in the array
+    if ("JsActiveContract" in item) {
+      out.push(item as JsActiveContract);
+    }
+  }
+  return out;
 }
 
 function buildInterfaceFilterRequest(
-  _partyId: string,
+  partyId: string,
   interfaceId: string,
   activeAtOffset: number,
 ): ActiveContractsRequest {
-  // Always query as the WarpX party — the m2m JWT only has authority over it.
-  // Filter by owner in the payload after fetching (see getHoldings / getPendingTransfers).
-  const warpxParty = NETWORK.warpxPartyId;
+  // Query as the actual party — the m2m JWT has authority over warpx + all cbtc-user parties.
+  // Contracts owned by a cbtc-user party are NOT visible to warpx (different witness sets),
+  // so we must filter by the target party itself.
   return {
     filter: {
       filtersByParty: {
-        [warpxParty]: {
+        [partyId]: {
           cumulative: [
             {
               identifierFilter: {
@@ -186,7 +208,15 @@ function pickInterfaceView<T>(
   event: JsCreatedEvent,
   interfaceId: string,
 ): T | null {
-  const view = event.interfaceViews?.find((v) => v.interfaceId === interfaceId);
+  // The interfaceId we send uses package-name form (#splice-api-token-holding-v1:Foo:Bar),
+  // but the ledger response uses package-hash form (abc123...:Foo:Bar).
+  // Compare by the qualified name suffix (everything after the first ":").
+  const suffix = interfaceId.split(":").slice(1).join(":");
+  const view = event.interfaceViews?.find((v) => {
+    if (v.interfaceId === interfaceId) return true;
+    const vSuffix = v.interfaceId.split(":").slice(1).join(":");
+    return vSuffix === suffix;
+  });
   if (!view || view.viewStatus?.code) return null;
   return view.viewValue as T;
 }

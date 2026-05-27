@@ -46,7 +46,8 @@ export async function middleware(request: NextRequest) {
     pathname.startsWith("/login") ||
     pathname.startsWith("/auth/callback") ||
     pathname.startsWith("/_next") ||
-    pathname.startsWith("/favicon");
+    pathname.startsWith("/favicon") ||
+    pathname === "/api/mint/process-transfers";
 
   // Unauthenticated → redirect to login
   if (!user && !isPublic) {
