@@ -37,14 +37,18 @@ export async function createDepositAccount(partyId: string): Promise<string> {
   const res = await fetch("/api/mint/create-deposit-account", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ partyId }),
+    body: JSON.stringify({ partyId })
   });
 
-  const data = await res.json() as { contractId?: string; error?: string };
-  console.log(`${TAG} create-deposit-account response status=${res.status} contractId=${data.contractId ?? "none"} error=${data.error ?? "none"}`);
+  const data = (await res.json()) as { contractId?: string; error?: string };
+  console.log(
+    `${TAG} create-deposit-account response status=${res.status} contractId=${data.contractId ?? "none"} error=${data.error ?? "none"}`
+  );
 
   if (!res.ok || !data.contractId) {
-    throw new Error(data.error ?? `Create deposit account failed (${res.status})`);
+    throw new Error(
+      data.error ?? `Create deposit account failed (${res.status})`
+    );
   }
 
   return data.contractId;
@@ -56,19 +60,23 @@ export async function createDepositAccount(partyId: string): Promise<string> {
  * Returns a taproot P2TR address (bcrt1p / tb1p / bc1p depending on network).
  */
 export async function getDepositAddress(
-  depositAccountContractId: string,
+  depositAccountContractId: string
 ): Promise<string> {
-  console.log(`${TAG} getDepositAddress for contractId=${depositAccountContractId}`);
+  console.log(
+    `${TAG} getDepositAddress for contractId=${depositAccountContractId}`
+  );
 
   const res = await fetch("/api/mint/bitcoin-address", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ depositAccountContractId }),
+    body: JSON.stringify({ depositAccountContractId })
   });
 
-  const data = await res.json() as { address?: string; error?: string };
+  const data = (await res.json()) as { address?: string; error?: string };
   if (!res.ok || !data.address) {
-    throw new Error(data.error ?? `Failed to get bitcoin address (${res.status})`);
+    throw new Error(
+      data.error ?? `Failed to get bitcoin address (${res.status})`
+    );
   }
 
   console.log(`${TAG} bitcoin deposit address=${data.address}`);
@@ -83,7 +91,7 @@ export async function getDepositAddress(
 export async function snapshotHoldingBalance(): Promise<string> {
   const partyId = NETWORK.warpxPartyId;
   const res = await fetch(
-    `/api/canton/holdings?partyId=${encodeURIComponent(partyId)}`,
+    `/api/canton/holdings?partyId=${encodeURIComponent(partyId)}`
   );
 
   const data = (await res.json()) as {
@@ -102,7 +110,7 @@ export async function snapshotHoldingBalance(): Promise<string> {
     (h) =>
       h.payload.instrumentId.id === NETWORK.instrumentId.id &&
       h.payload.instrumentId.admin === NETWORK.instrumentId.admin &&
-      (h.payload.lock === null || h.payload.lock === undefined),
+      (h.payload.lock === null || h.payload.lock === undefined)
   );
 
   let totalSats = 0;
@@ -112,6 +120,8 @@ export async function snapshotHoldingBalance(): Promise<string> {
   }
 
   const total = (totalSats / 1e8).toFixed(8);
-  console.log(`${TAG} snapshotHoldingBalance holdings=${cbtcUnlocked.length} total=${total} BTC`);
+  console.log(
+    `${TAG} snapshotHoldingBalance holdings=${cbtcUnlocked.length} total=${total} BTC`
+  );
   return total;
 }

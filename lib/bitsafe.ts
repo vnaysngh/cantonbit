@@ -51,14 +51,13 @@ export interface TokenStandardContracts {
   issuer_credential: CoordinatorContract;
 }
 
-async function coordinatorPost<T>(path: string, body: unknown): Promise<T> {
+async function coordinatorGet<T>(path: string): Promise<T> {
   const url = `${NETWORK.coordinatorUrl}${path}`;
-  console.log(`${TAG} POST ${url} body=${JSON.stringify(body)}`);
+  console.log(`${TAG} GET ${url}`);
 
   const res = await fetch(url, {
-    method: "POST",
+    method: "GET",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
     cache: "no-store",
   });
 
@@ -68,7 +67,7 @@ async function coordinatorPost<T>(path: string, body: unknown): Promise<T> {
     const text = await res.text().catch(() => "<no body>");
     console.error(`${TAG} coordinator error path=${path} status=${res.status} body=${text}`);
     throw new Error(
-      `Coordinator POST ${path} failed (${res.status} ${res.statusText}): ${text}`,
+      `Coordinator GET ${path} failed (${res.status} ${res.statusText}): ${text}`,
     );
   }
 
@@ -82,11 +81,8 @@ async function coordinatorPost<T>(path: string, body: unknown): Promise<T> {
  * Fetches da_rules (mint) and wa_rules (burn) factory contracts.
  */
 export async function getAccountContractRules(): Promise<AccountContractRules> {
-  console.log(`${TAG} getAccountContractRules network=${NETWORK.name} chain=${NETWORK.chain}`);
-  return coordinatorPost<AccountContractRules>(
-    "/app/get-account-contract-rules",
-    { chain: NETWORK.chain },
-  );
+  console.log(`${TAG} getAccountContractRules network=${NETWORK.name}`);
+  return coordinatorGet<AccountContractRules>("/cbtc/v1/account-contract-rules");
 }
 
 /**
@@ -101,16 +97,13 @@ export async function getBitcoinAddress(
 ): Promise<string> {
   console.log(`${TAG} getBitcoinAddress depositAccountContractId=${depositAccountContractId} chain=${NETWORK.chain}`);
 
-  // The coordinator returns a raw plain-text bitcoin address — NOT JSON.
-  // Cannot use coordinatorPost() which calls res.json().
-  const url = `${NETWORK.coordinatorUrl}/app/get-bitcoin-address`;
-  const body = { id: depositAccountContractId, chain: NETWORK.chain };
-  console.log(`${TAG} POST ${url} body=${JSON.stringify(body)}`);
+  // New API: GET /cbtc/v1/bitcoin-address/<contractId> — returns JSON { bitcoin_address: string }
+  const url = `${NETWORK.coordinatorUrl}/cbtc/v1/bitcoin-address/${depositAccountContractId}`;
+  console.log(`${TAG} GET ${url}`);
 
   const res = await fetch(url, {
-    method: "POST",
+    method: "GET",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
     cache: "no-store",
   });
 
@@ -122,8 +115,8 @@ export async function getBitcoinAddress(
     throw new Error(`Coordinator get-bitcoin-address failed (${res.status}): ${text}`);
   }
 
-  const text = await res.text();
-  const address = text.trim();
+  const data = await res.json() as { bitcoin_address?: string };
+  const address = data.bitcoin_address?.trim() ?? "";
   if (!address) throw new Error("Coordinator returned empty bitcoin address");
   console.log(`${TAG} bitcoin address=${address}`);
   return address;
@@ -135,9 +128,6 @@ export async function getBitcoinAddress(
  * All five are disclosed in the transaction AND referenced in choiceArgument.extraArgs.
  */
 export async function getTokenStandardContracts(): Promise<TokenStandardContracts> {
-  console.log(`${TAG} getTokenStandardContracts network=${NETWORK.name} chain=${NETWORK.chain}`);
-  return coordinatorPost<TokenStandardContracts>(
-    "/app/get-token-standard-contracts",
-    { chain: NETWORK.chain },
-  );
+  console.log(`${TAG} getTokenStandardContracts network=${NETWORK.name}`);
+  return coordinatorGet<TokenStandardContracts>("/cbtc/v1/token-standard-contracts");
 }

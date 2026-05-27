@@ -40,6 +40,7 @@ export default function MintPage() {
   // On mount: find the most recent CBTCDepositAccount for this party and recover its
   // bitcoin address. Prevents creating a new contract on every page refresh.
   useEffect(() => {
+    if (!partyId) return; // wait until wallet is connected and partyId is available
     (async () => {
       try {
         const res = await fetch("/api/mint/list-deposit-accounts", {
@@ -47,7 +48,7 @@ export default function MintPage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ partyId }),
         });
-        const data = await res.json() as { accounts?: Array<{ contractId: string }> };
+        const data = await res.json() as { accounts?: Array<{ contractId: string; bitcoinAddress?: string }> };
         const accounts = data.accounts ?? [];
 
         // Use the most recent account (last in array — Canton returns in creation order)
@@ -57,29 +58,34 @@ export default function MintPage() {
           return;
         }
 
-        // Recover the bitcoin address for the most recent deposit account
-        const addrRes = await fetch("/api/mint/bitcoin-address", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ depositAccountContractId: existing.contractId }),
-        });
-        const addrData = await addrRes.json() as { address?: string };
-        if (!addrData.address) {
+        // Use cached bitcoin address if available, otherwise fetch from coordinator
+        let address = existing.bitcoinAddress ?? "";
+        if (!address) {
+          const addrRes = await fetch("/api/mint/bitcoin-address", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ depositAccountContractId: existing.contractId }),
+          });
+          const addrData = await addrRes.json() as { address?: string };
+          address = addrData.address ?? "";
+        }
+
+        if (!address) {
           setStage({ kind: "idle" });
           return;
         }
 
-        existingAccountRef.current = { depositAccountCid: existing.contractId, address: addrData.address };
+        existingAccountRef.current = { depositAccountCid: existing.contractId, address };
         const baseline = await snapshotHoldingBalance();
         baselineRef.current = baseline;
-        setStage({ kind: "ready", depositAccountCid: existing.contractId, address: addrData.address });
+        setStage({ kind: "ready", depositAccountCid: existing.contractId, address });
       } catch {
         // Recovery is best-effort — fall back to idle so user can start fresh
         setStage({ kind: "idle" });
       }
     })();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [partyId]);
 
   const start = useCallback(async () => {
     if (!partyId) return;

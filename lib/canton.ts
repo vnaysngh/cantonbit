@@ -28,6 +28,8 @@ const TRANSFER_INSTRUCTION_TEMPLATE_ID =
 
 /* ---------- low-level fetch helpers ---------- */
 
+const TAG = "[canton]";
+
 async function ledgerFetch<T>(
   path: string,
   init: RequestInit & { jsonBody?: unknown },
@@ -41,6 +43,14 @@ async function ledgerFetch<T>(
     headers.set("content-type", "application/json");
   }
 
+  const method = init.method ?? "GET";
+  console.log(`${TAG} ${method} ${url}`);
+  if (init.jsonBody !== undefined) {
+    const bodyStr = JSON.stringify(init.jsonBody);
+    // Log full body for small payloads, truncate large ones (blobs)
+    console.log(`${TAG} request body (${bodyStr.length} chars): ${bodyStr.length > 2000 ? bodyStr.slice(0, 2000) + "...[truncated]" : bodyStr}`);
+  }
+
   const res = await fetch(url, {
     ...init,
     headers,
@@ -49,14 +59,20 @@ async function ledgerFetch<T>(
     cache: "no-store",
   });
 
+  console.log(`${TAG} response status=${res.status} url=${url}`);
+
   if (!res.ok) {
     const text = await res.text().catch(() => "<no body>");
+    console.error(`${TAG} ERROR ${method} ${path} status=${res.status} body=${text}`);
     throw new Error(
-      `Canton ${init.method ?? "GET"} ${path} failed (${res.status} ${res.statusText}): ${text}`,
+      `Canton ${method} ${path} failed (${res.status} ${res.statusText}): ${text}`,
     );
   }
 
-  return (await res.json()) as T;
+  const data = (await res.json()) as T;
+  const dataStr = JSON.stringify(data);
+  console.log(`${TAG} response body (${dataStr.length} chars): ${dataStr.length > 2000 ? dataStr.slice(0, 2000) + "...[truncated]" : dataStr}`);
+  return data;
 }
 
 /* ---------- public API ---------- */
@@ -73,9 +89,11 @@ interface LedgerEndResponse {
  * DevNet 2026-05-23.
  */
 export async function getLedgerEnd(): Promise<number> {
+  console.log(`${TAG} getLedgerEnd network=${NETWORK.name}`);
   const data = await ledgerFetch<LedgerEndResponse>("/v2/state/ledger-end", {
     method: "GET",
   });
+  console.log(`${TAG} getLedgerEnd offset=${data.offset}`);
   return data.offset;
 }
 
@@ -175,7 +193,9 @@ function pickInterfaceView<T>(
 
 /** POST /v2/state/active-contracts filtered to Holding interface. */
 export async function getHoldings(partyId: string): Promise<Holding[]> {
+  console.log(`${TAG} getHoldings partyId=${partyId.slice(0, 40)}...`);
   const activeAtOffset = await getLedgerEnd();
+  console.log(`${TAG} getHoldings activeAtOffset=${activeAtOffset}`);
   const body = buildInterfaceFilterRequest(
     partyId,
     HOLDING_INTERFACE_ID,
@@ -187,28 +207,42 @@ export async function getHoldings(partyId: string): Promise<Holding[]> {
     { method: "POST", jsonBody: body },
   );
 
+  const allEntries = unwrapContracts(resp);
+  console.log(`${TAG} getHoldings raw entries count=${allEntries.length}`);
+
   const out: Holding[] = [];
-  for (const entry of unwrapContracts(resp)) {
+  for (const entry of allEntries) {
     const ev = entry.JsActiveContract.createdEvent;
     const payload = pickInterfaceView<Holding["payload"]>(
       ev,
       HOLDING_INTERFACE_ID,
     );
-    if (!payload) continue;
+    if (!payload) {
+      console.log(`${TAG} getHoldings skipping contractId=${ev.contractId} (no interface view)`);
+      continue;
+    }
     // Filter to only holdings owned by the requested party
-    if (payload.owner !== partyId) continue;
+    if (payload.owner !== partyId) {
+      console.log(`${TAG} getHoldings skipping contractId=${ev.contractId} owner=${String(payload.owner).slice(0,30)}... (not our party)`);
+      continue;
+    }
+    const p = payload as unknown as Record<string, unknown>;
+    console.log(`${TAG} getHoldings including contractId=${ev.contractId} owner=${String(payload.owner).slice(0,30)}... amount=${JSON.stringify(p.amount ?? p.quantity ?? "?")}`);
     out.push({
       contractId: ev.contractId,
       payload,
       createdEventBlob: ev.createdEventBlob,
     });
   }
+  console.log(`${TAG} getHoldings returning ${out.length} holdings for partyId=${partyId.slice(0,40)}...`);
   return out;
 }
 
 /** POST /v2/state/active-contracts filtered to TransferInstruction interface. */
 export async function getPendingTransfers(partyId: string): Promise<Transfer[]> {
+  console.log(`${TAG} getPendingTransfers partyId=${partyId.slice(0, 40)}...`);
   const activeAtOffset = await getLedgerEnd();
+  console.log(`${TAG} getPendingTransfers activeAtOffset=${activeAtOffset}`);
   const body = buildInterfaceFilterRequest(
     partyId,
     TRANSFER_INSTRUCTION_INTERFACE_ID,
@@ -220,22 +254,32 @@ export async function getPendingTransfers(partyId: string): Promise<Transfer[]> 
     { method: "POST", jsonBody: body },
   );
 
+  const allEntries = unwrapContracts(resp);
+  console.log(`${TAG} getPendingTransfers raw entries count=${allEntries.length}`);
+
   const out: Transfer[] = [];
-  for (const entry of unwrapContracts(resp)) {
+  for (const entry of allEntries) {
     const ev = entry.JsActiveContract.createdEvent;
     const payload = pickInterfaceView<Transfer["payload"]>(
       ev,
       TRANSFER_INSTRUCTION_INTERFACE_ID,
     );
-    if (!payload) continue;
-    // Filter to only transfers where the user is the receiver
-    if (payload.receiver !== partyId) continue;
+    if (!payload) {
+      console.log(`${TAG} getPendingTransfers skipping contractId=${ev.contractId} (no interface view)`);
+      continue;
+    }
+    if (payload.receiver !== partyId) {
+      console.log(`${TAG} getPendingTransfers skipping contractId=${ev.contractId} receiver=${String(payload.receiver).slice(0,30)}... (not our party)`);
+      continue;
+    }
+    console.log(`${TAG} getPendingTransfers including contractId=${ev.contractId}`);
     out.push({
       contractId: ev.contractId,
       payload,
       createdEventBlob: ev.createdEventBlob,
     });
   }
+  console.log(`${TAG} getPendingTransfers returning ${out.length} transfers for partyId=${partyId.slice(0,40)}...`);
   return out;
 }
 

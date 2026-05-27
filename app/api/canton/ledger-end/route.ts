@@ -4,6 +4,8 @@ import { getLedgerEnd } from "@/lib/canton";
 
 export const dynamic = "force-dynamic";
 
+const TAG = "[canton/ledger-end]";
+
 /**
  * GET /api/canton/ledger-end
  *
@@ -12,11 +14,14 @@ export const dynamic = "force-dynamic";
  * handled server-side by getLedgerJwt() inside ledgerFetch.
  */
 export async function GET() {
+  console.log(`${TAG} request received`);
   try {
     const offset = await getLedgerEnd();
+    console.log(`${TAG} offset=${offset}`);
     return NextResponse.json({ offset });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    console.error(`${TAG} error:`, err);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

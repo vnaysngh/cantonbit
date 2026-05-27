@@ -12,8 +12,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 
 import { getLedgerJwt, invalidateLedgerJwtCache } from "@/lib/auth";
-import { getAccountContractRules } from "@/lib/bitsafe";
+import { getAccountContractRules, getBitcoinAddress } from "@/lib/bitsafe";
 import { NETWORK } from "@/lib/constants";
+import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
 
 const APPLICATION_ID = "cbtc-app";
 
@@ -130,11 +131,14 @@ export async function POST(req: NextRequest) {
     console.log(`${TAG} submitting CreateDepositAccount to ledger...`);
     console.log(`${TAG} POST ${url}`);
     console.log(`${TAG} commandId=${commandId}`);
+    const body0 = buildBody(commandId);
+    const body0str = JSON.stringify(body0);
+    console.log(`${TAG} request body (${body0str.length} chars): ${body0str.length > 3000 ? body0str.slice(0, 3000) + "...[truncated]" : body0str}`);
 
     let res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
-      body: JSON.stringify(buildBody(commandId)),
+      body: body0str,
       cache: "no-store",
     });
 
@@ -183,11 +187,13 @@ export async function POST(req: NextRequest) {
     }
 
     const data = await res.json();
+    const dataStr = JSON.stringify(data);
     console.log(`${TAG} raw tx response keys=${Object.keys(data as object).join(",")}`);
+    console.log(`${TAG} raw tx response body (${dataStr.length} chars): ${dataStr.length > 3000 ? dataStr.slice(0, 3000) + "...[truncated]" : dataStr}`);
 
     const contractId = extractDepositAccountContractId(data);
     if (!contractId) {
-      console.error(`${TAG} could not extract contractId from response:`, JSON.stringify(data).slice(0, 1000));
+      console.error(`${TAG} could not extract contractId from response:`, dataStr.slice(0, 2000));
       return NextResponse.json(
         { error: "Deposit account created but contract ID not found in transaction response." },
         { status: 502 },
@@ -195,6 +201,41 @@ export async function POST(req: NextRequest) {
     }
 
     console.log(`${TAG} success! depositAccount contractId=${contractId}`);
+
+    // Save to Supabase — also fetch bitcoin address so it's cached immediately
+    try {
+      const supabase = await createSupabaseServerClient();
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        // Fetch bitcoin address to cache alongside the contract
+        let bitcoinAddress: string | null = null;
+        try {
+          bitcoinAddress = await getBitcoinAddress(contractId);
+          console.log(`${TAG} fetched bitcoin address for Supabase cache: ${bitcoinAddress}`);
+        } catch (addrErr) {
+          console.warn(`${TAG} could not fetch bitcoin address for cache (non-fatal):`, addrErr);
+        }
+
+        const serviceClient = await createSupabaseServiceClient();
+        const { error } = await serviceClient
+          .from("deposit_accounts")
+          .upsert({
+            user_id: user.id,
+            canton_party_id: partyId,
+            deposit_account_contract_id: contractId,
+            bitcoin_address: bitcoinAddress,
+          }, { onConflict: "deposit_account_contract_id", ignoreDuplicates: true });
+
+        if (error) {
+          console.warn(`${TAG} Supabase save failed (non-fatal):`, error.message);
+        } else {
+          console.log(`${TAG} Supabase save ok for contractId=${contractId}`);
+        }
+      }
+    } catch (sbErr) {
+      console.warn(`${TAG} Supabase save failed (non-fatal):`, sbErr);
+    }
+
     return NextResponse.json({ contractId });
 
   } catch (err) {
