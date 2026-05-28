@@ -12,7 +12,7 @@ import { useBalance } from "@/hooks/useBalance";
 import { formatBtc, parseBtc } from "@/lib/format";
 
 export default function SendPage() {
-  const { total } = useBalance();
+  const { total, refetch: refetchBalance } = useBalance();
 
   const [recipient, setRecipient] = useState("");
   const [amount, setAmount] = useState("");
@@ -36,14 +36,36 @@ export default function SendPage() {
 
   const submit = async () => {
     setStatus("submitting");
-    setStatusMessage("Submitting transfer…");
-    // TODO(real-data): swap for real server-side transfer once DARs are uploaded.
-    await new Promise((r) => setTimeout(r, 1200));
-    setStatus("pending");
-    setStatusMessage("Waiting for Canton confirmation…");
-    await new Promise((r) => setTimeout(r, 1200));
-    setStatus("success");
-    setStatusMessage(`Mock update id: 1220mock-${Date.now().toString(16)}`);
+    setStatusMessage("Creating transfer offer…");
+    try {
+      const res = await fetch("/api/transfers/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          recipient: recipient.trim(),
+          amountBtc: amount.trim(),
+        }),
+      });
+      const data = (await res.json()) as {
+        updateId?: string;
+        offerContractId?: string;
+        error?: string;
+      };
+
+      if (!res.ok) {
+        throw new Error(data.error ?? `Transfer failed (${res.status})`);
+      }
+
+      setStatus("success");
+      setStatusMessage(
+        `Offer sent — recipient must accept. Update id: ${data.updateId?.slice(0, 24)}…`,
+      );
+      // Source holdings are locked until accept/expire — reflect that in the UI.
+      refetchBalance();
+    } catch (err) {
+      setStatus("error");
+      setStatusMessage(err instanceof Error ? err.message : String(err));
+    }
   };
 
   const reset = () => {

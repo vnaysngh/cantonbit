@@ -12,8 +12,6 @@ import { useBalance } from "@/hooks/useBalance";
 import { useTransfers } from "@/hooks/useTransfers";
 import { useWallet } from "@/hooks/useWallet";
 
-// Send/Receive intentionally omitted — cantonbit is a mint/redeem app,
-// not a wallet. See note in components/TopNav.tsx.
 const QUICK_ACTIONS = [
   { href: "/mint", label: "Mint", Icon: Coins },
   { href: "/redeem", label: "Redeem", Icon: Flame },

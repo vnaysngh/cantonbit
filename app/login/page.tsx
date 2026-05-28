@@ -66,7 +66,7 @@ export default function LoginPage() {
       <div className="w-full max-w-sm space-y-6">
         <div className="space-y-1 text-center">
           <h1 className="font-serif text-3xl font-semibold tracking-tight">
-            cantonbit
+            Oranj
           </h1>
           <p className="text-sm text-muted-foreground">
             Mint, hold, and transfer cBTC on Canton Network.

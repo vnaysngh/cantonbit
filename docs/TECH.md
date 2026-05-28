@@ -1,4 +1,4 @@
-# cantonbit — Technical Reference
+# Oranj — Technical Reference
 
 Engineer-facing reference for the mint and redeem flows. For the user-facing intro, see [`README.md`](../README.md). For raw API request bodies, see [`YAAK_REFERENCE.md`](./YAAK_REFERENCE.md).
 
@@ -6,7 +6,7 @@ Engineer-facing reference for the mint and redeem flows. For the user-facing int
 
 ## Overview
 
-cantonbit is a Next.js 14+ app (App Router, TypeScript, Tailwind v4, shadcn/ui) that lets users mint and redeem cBTC — a Bitcoin-backed token on Canton Network — by coordinating between three external systems:
+Oranj is a Next.js 14+ app (App Router, TypeScript, Tailwind v4, shadcn/ui) that lets users mint and redeem cBTC — a Bitcoin-backed token on Canton Network — by coordinating between three external systems:
 
 1. **Loop wallet** (`@fivenorth/loop-sdk`) — user's Canton wallet, signs every on-chain action
 2. **DLC.link coordinator** — public HTTP service run by BitSafe, no auth, provides factory contract IDs and BTC addresses
@@ -24,7 +24,7 @@ Browser
 │     └── user transactions: mint, redeem
 │         (Loop signs + submits via Loop's own Canton participant)
 │
-└── fetch → cantonbit Next.js server
+└── fetch → Oranj Next.js server
       ├── /api/auth/token        → Authentik (m2m JWT)
       ├── /api/canton/*          → Five North validator (JWT bearer)
       └── lib/bitsafe.ts         → DLC.link coordinator (no auth)
@@ -38,7 +38,7 @@ lib/mint.ts + lib/redeem.ts
 
 ## The two identities
 
-Every operation in cantonbit uses one of two identities:
+Every operation in Oranj uses one of two identities:
 
 | Identity | How obtained | What it can do | Where used |
 |---|---|---|---|
@@ -51,7 +51,7 @@ The m2m token cannot `actAs` a user's party — it 403s if you try. User-side wr
 
 ## Canton contract model
 
-Every action in cantonbit touches Canton contracts. A contract is an immutable on-ledger record. It has a **contract ID** (long hex, starts with `00...`) that uniquely identifies one instance. You never guess or construct contract IDs — you either fetch them from the coordinator or parse them from transaction responses.
+Every action in Oranj touches Canton contracts. A contract is an immutable on-ledger record. It has a **contract ID** (long hex, starts with `00...`) that uniquely identifies one instance. You never guess or construct contract IDs — you either fetch them from the coordinator or parse them from transaction responses.
 
 ### The two contract IDs in the mint flow
 
@@ -67,7 +67,7 @@ These are the two that confuse people most. Keep them straight:
 #### Contract ID #2 — `CBTCDepositAccount` (per-user)
 
 - **What**: The user's personal deposit account on Canton. Links their party to the bridge.
-- **How you get it**: Doesn't exist until the user creates it (step above). cantonbit parses it from the transaction tree response after creation. On subsequent mints, `listDepositAccounts()` finds the existing one via `getActiveContracts`.
+- **How you get it**: Doesn't exist until the user creates it (step above). Oranj parses it from the transaction tree response after creation. On subsequent mints, `listDepositAccounts()` finds the existing one via `getActiveContracts`.
 - **What you do with it**: Pass as the `id` field to `POST coordinator/app/get-bitcoin-address`. The coordinator returns the BTC address tied to this contract.
 - **When it changes**: Stable after creation. Reused indefinitely.
 
@@ -162,7 +162,7 @@ The burn flow has the exact same structure but with `wa_rules` (withdraw account
 │ Step 5: USER SENDS BTC                          [outside our code]    │
 │                                                                       │
 │ User sends at minimum 0.001 BTC to the address from step 4.          │
-│ Minimum amount enforced by BitSafe, not by cantonbit.                 │
+│ Minimum amount enforced by BitSafe, not by Oranj.                 │
 └──────────────────────────────────────────────────────────────────────┘
               │
               ▼
@@ -324,7 +324,7 @@ The burn flow has the exact same structure but with `wa_rules` (withdraw account
 │ When they see the CBTCWithdrawAccount_Withdraw tx, they send BTC      │
 │ from the bridge reserve to destinationBtcAddress.                     │
 │ Takes minutes to an hour depending on Bitcoin conditions.             │
-│ cantonbit does not track this — check destination on block explorer.  │
+│ Oranj does not track this — check destination on block explorer.  │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -436,7 +436,7 @@ One env var drives everything. Set `NEXT_PUBLIC_NETWORK=devnet|testnet|mainnet` 
 ## Project structure
 
 ```
-cantonbit/
+Oranj/
 ├── app/
 │   ├── page.tsx                  ← Dashboard (balance + navigation)
 │   ├── mint/page.tsx             ← Mint flow state machine

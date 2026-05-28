@@ -121,8 +121,13 @@ export default function MintPage() {
   }, [partyId]);
 
   // Poll every 30s once address is shown.
-  // Mint is complete when currentBalance > baseline.
-  // cBTC arrives ~60-120s after Bitcoin's 6th confirmation (~60 min total).
+  // Flow:
+  //   1. User sends BTC → BitSafe mints cBTC into warpx-mainnet-1 (~60 min, 6 confirms)
+  //   2. We detect the new Holding on warpx (snapshotHoldingBalance > baseline)
+  //   3. Trigger /api/mint/process-transfers — the server runs the two-phase
+  //      TransferFactory_Transfer + TransferInstruction_Accept to move the cBTC
+  //      into the user's party.
+  //   4. Refetch the user balance — UI updates to "minted".
   useEffect(() => {
     if (stage.kind !== "ready") return;
 
@@ -137,6 +142,28 @@ export default function MintPage() {
         if (currentSats > baselineSats) {
           clearInterval(poll);
           const minted = ((currentSats - baselineSats) / 1e8).toFixed(8);
+
+          // Push the new holding from warpx → user party (two-phase transfer).
+          try {
+            const procRes = await fetch("/api/mint/process-transfers", {
+              method: "POST",
+            });
+            const procJson = (await procRes.json()) as {
+              transferred?: number;
+              failed?: number;
+              errors?: string[];
+            };
+            console.log("[mint] processor result:", procJson);
+            if ((procJson.failed ?? 0) > 0) {
+              console.warn(
+                "[mint] processor reported failures:",
+                procJson.errors,
+              );
+            }
+          } catch (procErr) {
+            console.error("[mint] process-transfers call failed:", procErr);
+          }
+
           refetchBalance();
           setStage({ kind: "minted", amount: minted });
         }

@@ -3,6 +3,7 @@ import { Fraunces, Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 
 import { WalletProvider } from "@/hooks/useWallet";
+import { ThemeProvider } from "@/components/ThemeProvider";
 import { TopNav } from "@/components/TopNav";
 
 // Body + UI. Inter ships excellent tabular numerals and is the de-facto
@@ -32,7 +33,7 @@ const jetBrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "cantonbit",
+  title: "Oranj",
   description: "Mint, hold, and transfer cBTC on Canton Network.",
 };
 
@@ -44,15 +45,25 @@ export default function RootLayout({
   return (
     <html
       lang="en"
+      // suppressHydrationWarning needed because next-themes injects the
+      // resolved theme class on <html> before React hydrates.
+      suppressHydrationWarning
       className={`${inter.variable} ${fraunces.variable} ${jetBrainsMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col bg-background text-foreground font-sans">
-        <WalletProvider>
-          <TopNav />
-          <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-8">
-            {children}
-          </main>
-        </WalletProvider>
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="light"
+          enableSystem={false}
+          disableTransitionOnChange
+        >
+          <WalletProvider>
+            <TopNav />
+            <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-8">
+              {children}
+            </main>
+          </WalletProvider>
+        </ThemeProvider>
       </body>
     </html>
   );
