@@ -91,9 +91,16 @@ The bridge looks at your deposit account contract and assigns it a unique Bitcoi
 Open your Bitcoin wallet, paste the address, send at least **0.001 BTC**. That's the minimum the bridge accepts.
 
 ### Step 5 — Wait (~60 minutes + a little more)
-Bitcoin transactions need 6 confirmations before the bridge trusts them. That's roughly 60 minutes. After the 6th confirmation, the bridge's attestor network verifies the transaction — this takes an additional 60–120 seconds. Once complete, cBTC appears in your wallet.
+Bitcoin transactions need 6 confirmations before the bridge trusts them. That's roughly 60 minutes. After the 6th confirmation, the bridge's attestor network verifies the transaction — this takes an additional 60–120 seconds.
 
-Oranj polls your balance every 30 seconds while you're on the mint page. You can also close the tab and come back — the bridge doesn't need Oranj open to complete the mint.
+**Important detail about where the cBTC lands first.** BitSafe does not mint cBTC directly into your personal party. It mints into the validator's holding party ("warpx"), the party that owns the bridge relationship on this node. Oranj then runs a **mint processor** that detects the freshly-minted cBTC on warpx and transfers it to your party automatically. So the mint completes in two stages:
+
+1. **BitSafe → warpx** (the actual mint, after 6 BTC confirmations)
+2. **warpx → you** (Oranj's mint processor delivers it to your party)
+
+You don't do anything for stage 2 — the processor handles it. See [How the mint processor works](#how-the-mint-processor-works) below for the details.
+
+Oranj polls your balance every 30 seconds while you're on the mint page, and the mint processor runs both on-demand (while the page is open) and via a background cron. You can close the tab and come back — the mint still completes.
 
 ### What can go wrong
 
@@ -102,7 +109,39 @@ Oranj polls your balance every 30 seconds while you're on the mint page. You can
 | "Coordinator POST failed (530)" or "Cloudflare 1016" | The DLC.link bridge is temporarily down. Not fixable on your end. |
 | Loop popup appears, then "transaction rejected" | Your party doesn't have a Minter credential from BitSafe, or the cBTC DARs aren't installed on the validator. |
 | Loop popup never appears | Loop wallet isn't connected, or browser pop-ups are blocked. |
-| BTC sent, 6 confirmations shown on a block explorer, but no cBTC after 2 hours | Contact BitSafe with your deposit account contract ID. |
+| BTC confirmed (6 blocks), but balance still 0 | Either BitSafe hasn't minted to warpx yet, or the mint processor hasn't delivered it from warpx to your party yet. Give the processor a moment (it polls / runs on a cron). See [How the mint processor works](#how-the-mint-processor-works). |
+| BTC sent, 6 confirmations shown on a block explorer, but no cBTC after 2 hours | The mint never reached warpx — a bridge issue. Contact BitSafe with your deposit account contract ID. |
+
+---
+
+## How the mint processor works
+
+BitSafe mints cBTC into the validator's **warpx** holding party, not directly into your wallet. The **mint processor** is the piece of Oranj that moves that cBTC from warpx to the right user party. It's the most safety-critical part of the system — it moves real money — so it's worth understanding at a high level.
+
+### What it does
+
+1. **Looks at what cBTC is sitting on warpx right now.** Any cBTC holding owned by warpx is "unfinished work" — it has been minted but not yet delivered to a user.
+2. **Figures out which holdings are real mints.** Not everything on warpx is a fresh mint (some holdings are change/leftovers from other operations). A real mint is identified by its on-ledger signature: the transaction that created the holding also *archived a deposit account*. Only those get transferred.
+3. **Figures out which user each mint belongs to** by looking up the archived deposit account in Oranj's database.
+4. **Transfers the cBTC to that user's party** using a two-phase transfer (create an offer, then accept it on the user's behalf).
+
+### Why it's designed this way ("holding-based")
+
+An earlier version tracked progress with a moving bookmark ("process everything new since offset X"). That could **strand** a mint: if a transfer failed, the bookmark moved past it and the cBTC was never retried. The current design instead treats **"is the cBTC still sitting on warpx?"** as the source of truth. A holding stays visible until it's actually delivered — so nothing can be silently skipped, and re-running the processor is always safe.
+
+### Safety guarantees
+
+The processor is built so that, no matter how many times it runs or how it's interrupted, it never:
+
+- **Creates duplicate transfers.** The created offer is recorded in the database *before* it's accepted, so a retry accepts the existing offer instead of creating a new one. An atomic per-mint "claim" ensures only one worker processes a given mint.
+- **Runs two copies at once.** A lease-based lock means only one processor run executes at a time (the frontend poll and the cron can't collide).
+- **Transfers the wrong amount.** It always transfers the full minted holding — never a partial amount — so no leftover change is created.
+- **Strands a failed mint.** A failed transfer leaves the cBTC on warpx, where the next run sees it again and retries automatically.
+
+### How it's triggered
+
+- **While you're on the mint page:** Oranj calls the processor on a poll, so your mint gets delivered shortly after BitSafe completes it.
+- **Background cron:** [`scripts/process-mints.sh`](scripts/process-mints.sh) can be scheduled (e.g. on Railway) to run the processor independently of any open browser. It authenticates with a `CRON_SECRET` bearer token.
 
 ---
 
@@ -183,12 +222,12 @@ Restart `npm run dev`. All URLs, party IDs, and BTC address format expectations 
 
 ## What this app deliberately does not do
 
-- **Does not send cBTC between parties.** Out of scope for this version.
-- **Does not show transaction history.** The activity tab is a placeholder — the history feed hasn't been built yet.
 - **Does not custody anything.** Oranj doesn't hold your keys. Your Loop wallet does. Your Bitcoin stays in the bridge's reserve, not in Oranj.
 - **Does not show real-time confirmation counts.** It polls your balance every 30 seconds. When the number goes up, mint is done.
 - **Does not validate Bitcoin address formats client-side.** The bridge will reject a wrong-network address. Make sure you're pasting the right format.
 - **Does not work if underlying services are down.** Five North validator, DLC.link coordinator, Loop wallet backend — any of these being unreachable breaks the relevant flow.
+
+> **Note:** Earlier versions of this app could not send cBTC between parties and had no activity history. Both now exist: Send/Receive pages move cBTC between Canton parties, the dashboard shows on-ledger activity, and the mint processor delivers minted cBTC from warpx to user parties. The server-side transfer machinery (used by the mint processor) was originally built for those flows.
 
 ---
 
@@ -210,7 +249,7 @@ Work through these in order when something's broken:
 
 4. **Loop wallet not connected or stale session.** Symptom: clicking anything does nothing. Fix: disconnect and reconnect. If that fails, clear `localStorage` for `localhost:3000` in browser dev tools and reload.
 
-5. **Balance shows 0 after a confirmed mint.** Check that cBTC DARs are installed on the validator: `curl http://localhost:3000/api/canton/packages` should return a count greater than 0. If not, ask Five North to install the DARs.
+5. **Balance shows 0 after a confirmed mint.** Remember minting is two stages: BitSafe mints to the warpx holding party, then Oranj's mint processor delivers it to you. Check, in order: (a) cBTC DARs are installed — `curl http://localhost:3000/api/canton/packages` should return > 0; (b) BitSafe actually minted to warpx (the cBTC has to exist there before it can be delivered); (c) the mint processor ran — it triggers on the mint-page poll and via the cron, but you can force it by re-opening the mint page. If the cBTC is on warpx but not on your party, the processor hasn't delivered it yet. See [`docs/TECH.md`](docs/TECH.md) → "Balance shows 0 after a confirmed mint" for the full diagnosis steps.
 
 ---
 

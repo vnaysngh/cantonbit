@@ -21,17 +21,25 @@ Oranj is a Next.js 14+ app (App Router, TypeScript, Tailwind v4, shadcn/ui) that
 ```
 Browser
 ├── Loop SDK (WebSocket → wss://devnet.cantonloop.com)
-│     └── user transactions: mint, redeem
+│     └── user transactions: redeem, deposit-account create, P2P send
 │         (Loop signs + submits via Loop's own Canton participant)
 │
 └── fetch → Oranj Next.js server
-      ├── /api/auth/token        → Authentik (m2m JWT)
-      ├── /api/canton/*          → Five North validator (JWT bearer)
-      └── lib/bitsafe.ts         → DLC.link coordinator (no auth)
+      ├── /api/auth/token             → Authentik (m2m JWT)
+      ├── /api/canton/*               → Five North validator (JWT bearer)
+      ├── /api/activity               → derive activity from update stream
+      ├── /api/transfers/*            → server-side P2P transfer (m2m)
+      ├── /api/mint/process-transfers → MINT PROCESSOR (m2m, dual auth)
+      └── lib/bitsafe.ts              → DLC.link coordinator (no auth)
 
-lib/mint.ts + lib/redeem.ts
-  → provider.submitTransaction()    (browser, goes to Loop)
-  → coordinator fetch()             (browser or server, goes to DLC.link)
+Mint delivery (server-side, m2m JWT — no Loop, no browser needed):
+  BitSafe attestors  →  mint cBTC onto WARPX party
+  mint-processor     →  warpx → user party  (TransferFactory_Transfer + Accept)
+  state in Supabase  →  mint_transfers, mint_processor_state, deposit_accounts
+
+Triggers for the processor:
+  • mint page poll  (Supabase-session auth)
+  • cron worker     (scripts/process-mints.sh, CRON_SECRET auth)
 ```
 
 ---
@@ -167,23 +175,93 @@ The burn flow has the exact same structure but with `wa_rules` (withdraw account
               │
               ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│ Step 6: ATTESTORS CONFIRM + MINT                [outside our code]    │
+│ Step 6: ATTESTORS CONFIRM + MINT → WARPX        [outside our code]    │
 │                                                                       │
 │ BitSafe attestor network watches Bitcoin for 6 confirmations (~60min).│
 │ After confirmation 6: attestors submit ConfirmDepositAction on Canton.│
 │ Additional 60–120 sec for attestor processing.                        │
-│ cBTC Holding contract created in the user's party.                    │
+│                                                                       │
+│ ⚠ The cBTC Holding is created on the WARPX holding party, NOT the     │
+│   user's party. The transaction also ARCHIVES the CBTCDepositAccount  │
+│   and creates a fresh rolled-forward one. (Archived-DA = mint sig.)   │
 └──────────────────────────────────────────────────────────────────────┘
               │
               ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│ Step 7: CANTONBIT POLLS BALANCE                                       │
+│ Step 7: MINT PROCESSOR DELIVERS WARPX → USER     [lib/mint-processor] │
+│                                                                       │
+│ Oranj's mint processor (server-side, m2m JWT) detects the holding on  │
+│ warpx and transfers it to the user's party via a two-phase transfer.  │
+│ Triggered by: the mint-page poll AND/OR the background cron.          │
+│ See "Mint processor" section below for the full design + guarantees.  │
+└──────────────────────────────────────────────────────────────────────┘
+              │
+              ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ Step 8: ORANJ POLLS BALANCE                                           │
 │                                                                       │
 │ While mint page is open: setInterval(refetchBalance, 30_000)          │
-│ refetchBalance calls: provider.getHolding()                           │
-│ When cBTC balance increases → mint complete, update UI.               │
+│ When cBTC balance increases on the user party → mint complete.        │
 └──────────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Mint processor (warpx → user delivery)
+
+**Source**: [`lib/mint-processor.ts`](../lib/mint-processor.ts) (orchestration + ledger I/O), [`lib/mint-processor-logic.ts`](../lib/mint-processor-logic.ts) (pure decision logic, unit-tested), [`app/api/mint/process-transfers/route.ts`](../app/api/mint/process-transfers/route.ts) (HTTP entry)
+**DB**: Supabase tables `mint_transfers`, `mint_processor_state`, `deposit_accounts` — migrations [`003_mint_processor.sql`](../supabase/migrations/003_mint_processor.sql), [`004_mint_processor_hardening.sql`](../supabase/migrations/004_mint_processor_hardening.sql)
+
+### Why a processor exists
+
+BitSafe mints cBTC into the **warpx holding party** (`NETWORK.warpxPartyId`), not into the user's party. Something must move it from warpx to the user. That something is the processor. It runs server-side under the **m2m JWT**, which on this node has authority over both `warpx-mainnet-1` and all `cbtc-user-*` parties — so it can both create the transfer (as warpx) and accept it (as the user).
+
+### Design: holding-based, not cursor-based
+
+The trigger is **"what cBTC Holdings are currently owned by warpx?"** (an ACS query — `getActiveWarpxHoldings()`), NOT "what's new since offset X". This is deliberate and was a rewrite:
+
+- **Why not a cursor:** a monotonic `last_processed_offset` bookmark moves forward unconditionally. If a transfer failed, the cursor advanced past the mint and the cBTC was stranded forever (this happened in production on 2026-05-27).
+- **Holding-based is un-strandable:** a holding stays in the warpx ACS until it is actually transferred (transfer archives it on warpx). So unfinished work is always visible, and re-running is always safe and idempotent.
+- Offsets are still used, but only as a **lookup key** to find a specific holding's creating transaction — never as the scan trigger.
+
+### Mint classification (the critical filter)
+
+Not every holding on warpx is a fresh mint — some are change/leftovers from transfers or released offers. A holding is a **mint** only if its creating transaction **archived a `CBTCDepositAccount`**. `findMintForHolding()` fetches the holding's creating transaction (via `events-by-contract-id` → that single offset's `/v2/updates`) and checks for an archived DepositAccount. Non-mints are left untouched.
+
+### User resolution
+
+The archived DepositAccount's contract ID maps to a user via Supabase `deposit_accounts`. **Caveat:** after each mint BitSafe archives the old DepositAccount and creates a fresh one whose `createArgument.id` field holds the contract ID of the *original* DA. Our DB stores the original. So we match by **either** the archived CID **or** the rolled-forward `id` (`candidateDaIds`). Without this, second+ mints to the same BTC address become unresolvable "orphans". A coordinator-address fallback (`getBitcoinAddress`) is the last resort.
+
+### Two-phase transfer + state machine
+
+```
+pending → processing → offer_created → transferred
+                                    ↘  failed (any error)
+```
+
+1. **Claim** the row atomically (`claim_mint_transfer` RPC): `pending|failed|offer_created → processing`. Returns null if already owned → skip. Reclaims rows stuck in `processing` > 15 min (crash self-heal).
+2. **Phase 1** (`createTransferOffer`): exercise `TransferFactory_Transfer` (interface-style templateId) as warpx. The created offer's contract ID is extracted **directly from the transaction-tree response** (`extractCreatedOfferCid`), not a follow-up ACS query — this kills a race that previously caused "Phase 1 succeeded but no offer found".
+3. **Persist** the offer CID to `mint_transfers.offer_contract_id` (status `offer_created`) **before** accepting. If the run crashes here, the next run sees the recorded offer and accepts it rather than creating a duplicate.
+4. **Phase 2** (`acceptTransferOffer`): exercise `TransferInstruction_Accept` as the user. cBTC now owned by the user.
+5. Mark `transferred`.
+
+### Concurrency control (two layers)
+
+- **Lease lock** (`try_lock_mint_processor` / `unlock_mint_processor`): a single atomic UPDATE on `mint_processor_state.locked_until`. Only one processor run executes at a time. NOT a `pg_advisory_lock` — advisory locks are session-scoped and don't survive across separate Supabase PostgREST RPC calls (each runs on a different pooled connection). The lease auto-expires (300s) so a crashed run can't deadlock.
+- **Atomic per-holding claim** (`claim_mint_transfer`): even if two runs overlapped, only one can claim a given holding. This is the authoritative duplicate guard.
+
+### Duplicate-offer prevention (defense in depth)
+
+The 2026-05-27 incident created duplicate TransferOffers. Three independent guards now prevent it: (a) offer CID persisted before accept → retries accept, never recreate; (b) atomic claim → one worker per holding; (c) full-amount transfers → no change/fragmentation. Pure decision logic is in `lib/mint-processor-logic.ts` and unit-tested (`npm test`).
+
+### Triggers & auth
+
+- `POST /api/mint/process-transfers` — dual auth: `CRON_SECRET` bearer token (cron) OR Supabase session (frontend poll). The route is in middleware's public list (it does its own auth).
+- Background cron: [`scripts/process-mints.sh`](../scripts/process-mints.sh) (curl + `CRON_SECRET`), schedulable on Railway/etc.
+
+### Known caveat
+
+The cBTC arrives on the user party as a holding the user did not create — fine for balance, but worth noting if reasoning about provenance. Leftover/change holdings on warpx (from manual sends or cancelled offers) are correctly ignored by the mint filter but must be reconciled separately.
 
 ---
 
@@ -438,40 +516,61 @@ One env var drives everything. Set `NEXT_PUBLIC_NETWORK=devnet|testnet|mainnet` 
 ```
 Oranj/
 ├── app/
-│   ├── page.tsx                  ← Dashboard (balance + navigation)
+│   ├── page.tsx                  ← Dashboard (balance + on-ledger activity)
 │   ├── mint/page.tsx             ← Mint flow state machine
 │   ├── redeem/page.tsx           ← Redeem flow state machine
-│   ├── activity/page.tsx         ← Placeholder (history feed not built)
+│   ├── send/page.tsx             ← Send cBTC to another Canton party
+│   ├── receive/page.tsx          ← QR + incoming offers list w/ Accept
 │   └── api/
 │       ├── auth/token/           ← Debug: JWT cache status
-│       └── canton/
-│           ├── ledger-end/       ← Debug: current ledger offset
-│           ├── packages/         ← Debug: installed DAR hashes
-│           └── holdings/         ← Debug: m2m holdings read (limited to app party)
+│       ├── canton/
+│       │   ├── ledger-end/       ← Debug: current ledger offset
+│       │   ├── packages/         ← Debug: installed DAR hashes
+│       │   └── holdings/         ← m2m holdings read for a party
+│       ├── activity/             ← GET on-ledger activity for the user's party
+│       ├── transfers/            ← create / accept / pending (P2P cBTC)
+│       └── mint/
+│           ├── create-deposit-account/   ← create DA on Canton
+│           ├── list-deposit-accounts/    ← recover existing DA
+│           ├── bitcoin-address/          ← coordinator BTC address
+│           └── process-transfers/        ← MINT PROCESSOR entry (dual auth)
 │
 ├── components/
-│   ├── TopNav.tsx                ← Nav: Dashboard, Mint, Redeem, Activity
-│   ├── AddressQR.tsx             ← BTC deposit address + QR code
-│   ├── BalanceBadge.tsx          ← cBTC balance display
-│   ├── PartyIdDisplay.tsx        ← Truncated party ID chip
+│   ├── TopNav.tsx                ← Nav: Dashboard, Mint, Send, Receive, Redeem
+│   ├── ThemeToggle.tsx           ← Light/dark toggle (next-themes)
 │   ├── WalletConnectButton.tsx   ← Loop connect/disconnect
 │   └── ...
 │
 ├── hooks/
 │   ├── useWallet.tsx             ← Loop init, autoConnect, session recovery
-│   ├── useBalance.ts             ← provider.getHolding() + getActiveContracts()
-│   └── useTransfers.ts           ← Stub; returns empty array
+│   ├── useBalance.ts             ← balance + 30s background poll (visibility-aware)
+│   └── useTransfers.ts           ← /api/activity poll (mint/send/receive/redeem rows)
 │
 ├── lib/
-│   ├── constants.ts              ← Network config (single source of truth)
+│   ├── constants.ts              ← Network config (single source of truth; warpxPartyId here)
 │   ├── auth.ts                   ← Authentik m2m JWT with in-memory cache [server-only]
 │   ├── canton.ts                 ← Five North ledger API client [server-only]
-│   ├── bitsafe.ts                ← DLC.link coordinator client (3 endpoints)
-│   ├── mint.ts                   ← Mint flow: listDepositAccounts, createDepositAccount, getDepositAddress
-│   ├── redeem.ts                 ← Redeem flow: listWithdrawAccounts, createWithdrawAccount, submitWithdraw
+│   ├── bitsafe.ts                ← DLC.link coordinator client
+│   ├── mint.ts                   ← Mint UI flow: deposit accounts + BTC address
+│   ├── redeem.ts                 ← Redeem flow: withdraw accounts + burn
+│   ├── transfer.ts               ← Server-side P2P transfer helpers (create/accept/list)
+│   ├── mint-processor.ts         ← MINT PROCESSOR: warpx→user delivery [server-only]
+│   ├── mint-processor-logic.ts   ← Pure decision logic (unit-tested, no DB/network)
+│   ├── mint-processor-logic.test.ts ← node:test unit tests (`npm test`)
+│   ├── activity.ts               ← Derive activity rows from the update stream [server-only]
+│   ├── supabase/                 ← server + browser Supabase clients
 │   ├── format.ts                 ← BTC/satoshi math (BigInt), party ID truncation
 │   ├── types.ts                  ← Shared TypeScript types
 │   └── utils.ts                  ← shadcn cn() helper
+│
+├── supabase/migrations/
+│   ├── 001_party_mappings.sql
+│   ├── 002_deposit_accounts.sql
+│   ├── 003_mint_processor.sql            ← mint_transfers + mint_processor_state
+│   └── 004_mint_processor_hardening.sql  ← state machine, lease lock, atomic claim RPCs
+│
+├── scripts/
+│   └── process-mints.sh          ← Cron worker: curl process-transfers w/ CRON_SECRET
 │
 └── docs/
     ├── TECH.md                   ← This file
@@ -515,11 +614,20 @@ If testnet responds and devnet doesn't → devnet coordinator outage, contact DL
 **This is expected behavior.** User-side reads must go through `provider.getActiveContracts()` via Loop, not through `lib/canton.ts`. The `/api/canton/holdings` route only works for the app's own party.
 
 ### Balance shows 0 after a confirmed mint
-**Check**:
-1. Is the deposit account contract visible? (`GET /api/canton/packages` should show > 0 packages; if the count is 0, DARs aren't installed)
-2. Did the BTC transaction actually get 6 confirmations? Verify on mempool.space or a regtest block explorer.
-3. Has it been at least 2 minutes after confirmation 6? (Attestor processing takes 60–120 sec)
-4. If all of the above are fine, escalate to BitSafe with the deposit account contract ID from the mint page.
+Remember the two stages: BitSafe mints to **warpx**, then the **processor** delivers warpx → user. A 0 balance can fail at either stage.
+
+**Check, in order:**
+1. Did the BTC transaction actually get 6 confirmations? Verify on mempool.space or a regtest block explorer.
+2. Has it been at least 2 minutes after confirmation 6? (Attestor processing takes 60–120 sec.)
+3. **Did BitSafe mint to warpx yet?** Query the warpx party's active Holdings (ACS). If there's a new Holding on warpx, stage 1 is done and the problem is stage 2 (the processor). If not, it's still a bridge/attestor issue → escalate to BitSafe with the deposit account contract ID.
+4. **Did the processor run?** Trigger it: `POST /api/mint/process-transfers` (with `CRON_SECRET` bearer, or from a logged-in browser tab). Check the JSON result — `mintsFound`/`transferred`. Inspect the `mint_transfers` row for this holding: `status` and `error` tell you where it's stuck.
+   - `status=failed`, error "Could not resolve user…" → the deposit account isn't mapped in Supabase `deposit_accounts`, OR it's a subsequent mint and the rolled-forward `id` match failed. Confirm the DA row exists.
+   - `status=offer_created` → Phase 1 done, Phase 2 (accept) didn't complete. Re-run the processor; it accepts the recorded offer (never recreates).
+   - `errors: ["already running (lease held)"]` → another run holds the lease; wait and retry.
+5. If warpx has the Holding but the processor keeps failing, gather the holding contract ID + the `mint_transfers.error` and debug from there.
+
+### Mint processor created/left a pending TransferOffer (cBTC not delivered)
+If a transfer's Phase 1 succeeded but Phase 2 never did, the cBTC sits in a pending TransferOffer to the user. Re-running `process-transfers` is safe and will accept the recorded offer (the offer CID is persisted in `mint_transfers.offer_contract_id` before accept, so no duplicate is created). A holding that ends up back on warpx (e.g. a cancelled offer) is re-seen on the next run because the processor is holding-based.
 
 ### BTC sent, deposit account created, but no cBTC after 2 hours
 This is a bridge-side issue. The on-chain part worked; the attestors didn't pick it up. Gather:
