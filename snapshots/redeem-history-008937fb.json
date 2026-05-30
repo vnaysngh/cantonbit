@@ -1,0 +1,116 @@
+{
+  "party": "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+  "capturedAt": "2026-05-29T08:01:57.859Z",
+  "ledgerOffset": 892054,
+  "events": [
+    {
+      "kind": "BURN",
+      "offset": 879524,
+      "at": "2026-05-28T11:56:12.210699Z",
+      "actingParties": [
+        "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+      ],
+      "amount": "0.0000100000",
+      "numTokens": 1,
+      "package": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3"
+    },
+    {
+      "kind": "REQUEST_CREATED",
+      "offset": 879553,
+      "at": "2026-05-28T12:00:57.613421Z",
+      "cid": "00444786ae508ff004b9666fa7851fe2ebf7d464f65e25a772af7bb3c489cbc965ca1212200fcecb64174f1d501d99b83206d29996d487b00ce46b25e1f2aa7e0560d9e508",
+      "package": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313",
+      "payload": {
+        "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+        "owner": "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+        "destinationBtcAddress": "bc1qqz7grzuntqn5p7cmslmrrag9edux30vaxt4ftg",
+        "amount": "0.0000100000",
+        "btcTxId": "94a596b4d9a031a0ea0de70d724cfc820f33b905c34203b9455c73f4e42a1de9",
+        "sourceAccountId": "<contract-id>"
+      }
+    },
+    {
+      "kind": "REQUEST_CBTCWithdrawRequest_CompleteWithdrawal",
+      "offset": 879590,
+      "at": "2026-05-28T12:08:18.536688Z",
+      "cid": "00444786ae508ff004b9666fa7851fe2ebf7d464f65e25a772af7bb3c489cbc965ca1212200fcecb64174f1d501d99b83206d29996d487b00ce46b25e1f2aa7e0560d9e508",
+      "actingParties": [
+        "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262"
+      ],
+      "package": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313"
+    },
+    {
+      "kind": "BURN",
+      "offset": 879913,
+      "at": "2026-05-28T12:57:15.691115Z",
+      "actingParties": [
+        "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+      ],
+      "amount": "0.0000001000",
+      "numTokens": 1,
+      "package": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3"
+    },
+    {
+      "kind": "BURN",
+      "offset": 880328,
+      "at": "2026-05-28T14:16:30.609092Z",
+      "actingParties": [
+        "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+      ],
+      "amount": "0.0000100000",
+      "numTokens": 1,
+      "package": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3"
+    },
+    {
+      "kind": "REQUEST_CREATED",
+      "offset": 880847,
+      "at": "2026-05-28T15:49:11.316811Z",
+      "cid": "00317f923e9c21b1117c72c5349873f2a8780ab51d5afe4f9f2d7bb470a48f64feca121220450d7acd663641194cf103a17e8ffa917cbf9677ef4b49110b963f595ec2050b",
+      "package": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313",
+      "payload": {
+        "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+        "owner": "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+        "destinationBtcAddress": "bc1qqz7grzuntqn5p7cmslmrrag9edux30vaxt4ftg",
+        "amount": "0.0000101000",
+        "btcTxId": "01408e157e81aec04520d4f12593745103f29ce442a04a63d48abb3308124bfd",
+        "sourceAccountId": "<contract-id>"
+      }
+    },
+    {
+      "kind": "BURN",
+      "offset": 881438,
+      "at": "2026-05-28T17:44:44.749470Z",
+      "actingParties": [
+        "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+      ],
+      "amount": "0.0000479000",
+      "numTokens": 5,
+      "package": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3"
+    },
+    {
+      "kind": "REQUEST_CREATED",
+      "offset": 881468,
+      "at": "2026-05-28T17:49:53.661454Z",
+      "cid": "00e73054e47717018e407fb822927ac2559bad446c6bc228e81e8eb072ec70e184ca121220df445dfe8b70dd3d8c752ab655e0696fc225f4d8b82cba02be6eea35e08c5110",
+      "package": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313",
+      "payload": {
+        "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+        "owner": "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+        "destinationBtcAddress": "bc1qqz7grzuntqn5p7cmslmrrag9edux30vaxt4ftg",
+        "amount": "0.0000479000",
+        "btcTxId": "26caebb3a96c7d85fd568f2c7e5cf3446dbd4082ad70572e29a8164589ccdc21",
+        "sourceAccountId": "<contract-id>"
+      }
+    },
+    {
+      "kind": "REQUEST_CBTCWithdrawRequest_CompleteWithdrawal",
+      "offset": 881511,
+      "at": "2026-05-28T17:57:23.334491Z",
+      "cid": "00e73054e47717018e407fb822927ac2559bad446c6bc228e81e8eb072ec70e184ca121220df445dfe8b70dd3d8c752ab655e0696fc225f4d8b82cba02be6eea35e08c5110",
+      "actingParties": [
+        "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262"
+      ],
+      "package": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313"
+    }
+  ]
+}

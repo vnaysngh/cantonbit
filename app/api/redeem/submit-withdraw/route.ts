@@ -18,14 +18,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 
 import { getLedgerJwt, invalidateLedgerJwtCache } from "@/lib/auth";
-import { getTokenStandardContracts } from "@/lib/bitsafe";
+import { captureStep } from "@/lib/burn-capture";
 import { NETWORK } from "@/lib/constants";
 
 const APPLICATION_ID = "cbtc-app";
-
-// Full package hash required — "#cbtc" alias rejected by v2 Ledger API.
-const WITHDRAW_ACCOUNT_TEMPLATE_ID =
-  "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313:CBTC.WithdrawAccount:CBTCWithdrawAccount";
 
 const WITHDRAW_CHOICE = "CBTCWithdrawAccount_Withdraw";
 
@@ -38,12 +34,14 @@ export async function POST(req: NextRequest) {
     const {
       partyId,
       withdrawAccountContractId,
+      withdrawAccountTemplateId,
       withdrawAccountCreatedEventBlob,
       holdingCids,
       amount,
     } = await req.json() as {
       partyId?: string;
       withdrawAccountContractId?: string;
+      withdrawAccountTemplateId?: string;
       withdrawAccountCreatedEventBlob?: string;
       holdingCids?: string[];
       amount?: string;
@@ -57,130 +55,99 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // The withdraw-account templateId MUST be the exact package the account's
+    // createdEventBlob encodes (the caller reads both as a consistent pair from
+    // the ACS). There is NO safe fallback: previously we defaulted to a
+    // hardcoded f240dd5d package here, which — when paired with a 43a8452a blob
+    // — produced an inconsistent disclosed contract and routed the burn to the
+    // wrong (credential-demanding) package's Withdraw choice. So we now REQUIRE
+    // it and fail loudly rather than guess.
+    if (!withdrawAccountTemplateId) {
+      console.error(`${TAG} missing withdrawAccountTemplateId — refusing to guess the package`);
+      return NextResponse.json(
+        { error: "withdrawAccountTemplateId is required (must match the account's createdEventBlob package)" },
+        { status: 400 },
+      );
+    }
+    const withdrawAccountTpl = withdrawAccountTemplateId;
+
     console.log(`${TAG} partyId=${partyId.slice(0, 30)}...`);
     console.log(`${TAG} withdrawAccountContractId=${withdrawAccountContractId}`);
     console.log(`${TAG} holdingCids count=${holdingCids.length} ids=${holdingCids.map(c => c.slice(0, 15)).join(",")}`);
     console.log(`${TAG} amount=${amount}`);
     console.log(`${TAG} network=${NETWORK.name} ledgerHost=${NETWORK.ledgerHost}`);
-    console.log(`${TAG} coordinatorUrl=${NETWORK.coordinatorUrl}`);
-
-    // Fetch 5 token-standard contracts needed for choiceArgument + disclosures
-    console.log(`${TAG} fetching token-standard contracts from coordinator...`);
-    const ts = await getTokenStandardContracts();
-    console.log(`${TAG} burn_mint_factory contractId=${ts.burn_mint_factory.contract_id}`);
-    console.log(`${TAG} instrument_configuration contractId=${ts.instrument_configuration.contract_id}`);
-    console.log(`${TAG} app_reward_configuration contractId=${ts.app_reward_configuration.contract_id}`);
-    console.log(`${TAG} featured_app_right contractId=${ts.featured_app_right?.contract_id ?? "n/a"}`);
-    console.log(`${TAG} issuer_credential contractId=${ts.issuer_credential.contract_id}`);
 
     console.log(`${TAG} fetching JWT from Authentik...`);
     let jwt = await getLedgerJwt();
     console.log(`${TAG} JWT obtained, length=${jwt.length}`);
 
-    const warpxParty = NETWORK.warpxPartyId;
-
-    // featured_app_right is optional — not returned by mainnet coordinator as of 2026-05.
-    // Include it in extraArgs + disclosedContracts only when present.
-    const hasFeaturedAppRight = !!ts.featured_app_right?.contract_id;
-    console.log(`${TAG} featured_app_right present=${hasFeaturedAppRight}`);
-
+    // IMPORTANT: the CBTCWithdrawAccount_Withdraw choice on the DEPLOYED DAR
+    // (package 43a8452a…) takes ONLY { tokens, amount }. It does NOT accept
+    // `burnMintFactoryCid` or `extraArgs` — those belong to a NEWER DAR version
+    // described by cbtc-lib / Yaak / the BitSafe docs but NOT installed on this
+    // node. Sending them produces `INVALID_ARGUMENT: Unexpected fields:
+    // burnMintFactoryCid extraArgs`. Verified empirically (burned 0.00001 with
+    // the minimal arg → success). So we send the minimal argument and disclose
+    // only the withdraw account itself — no token-standard contracts needed.
     const buildBody = (commandId: string) => {
-      const contextValues: Record<string, unknown> = {
-        "utility.digitalasset.com/instrument-configuration": {
-          tag: "AV_ContractId",
-          value: ts.instrument_configuration.contract_id,
-        },
-        "utility.digitalasset.com/app-reward-configuration": {
-          tag: "AV_ContractId",
-          value: ts.app_reward_configuration.contract_id,
-        },
-        "utility.digitalasset.com/issuer-credentials": {
-          tag: "AV_List",
-          value: [{ tag: "AV_ContractId", value: ts.issuer_credential.contract_id }],
-        },
-      };
-      if (hasFeaturedAppRight && ts.featured_app_right) {
-        contextValues["utility.digitalasset.com/featured-app-right"] = {
-          tag: "AV_ContractId",
-          value: ts.featured_app_right.contract_id,
-        };
-      }
-
-      const disclosedContracts = [
-        {
-          templateId: WITHDRAW_ACCOUNT_TEMPLATE_ID,
-          contractId: withdrawAccountContractId,
-          createdEventBlob: withdrawAccountCreatedEventBlob ?? "",
-          synchronizerId: "",
-        },
-        {
-          templateId: ts.burn_mint_factory.template_id,
-          contractId: ts.burn_mint_factory.contract_id,
-          createdEventBlob: ts.burn_mint_factory.created_event_blob,
-          synchronizerId: "",
-        },
-        {
-          templateId: ts.instrument_configuration.template_id,
-          contractId: ts.instrument_configuration.contract_id,
-          createdEventBlob: ts.instrument_configuration.created_event_blob,
-          synchronizerId: "",
-        },
-        {
-          templateId: ts.app_reward_configuration.template_id,
-          contractId: ts.app_reward_configuration.contract_id,
-          createdEventBlob: ts.app_reward_configuration.created_event_blob,
-          synchronizerId: "",
-        },
-        {
-          templateId: ts.issuer_credential.template_id,
-          contractId: ts.issuer_credential.contract_id,
-          createdEventBlob: ts.issuer_credential.created_event_blob,
-          synchronizerId: "",
-        },
-      ];
-      if (hasFeaturedAppRight && ts.featured_app_right) {
-        disclosedContracts.push({
-          templateId: ts.featured_app_right.template_id,
-          contractId: ts.featured_app_right.contract_id,
-          createdEventBlob: ts.featured_app_right.created_event_blob,
-          synchronizerId: "",
-        });
-      }
-
       return {
         applicationId: APPLICATION_ID,
         workflowId: `cbtc-withdraw-${commandId}`,
         commandId,
-        actAs: [warpxParty],
-        readAs: [warpxParty],
+        // Burn is submitted as the HOLDING OWNER (the user party). cBTC holdings
+        // are signed by [cbtc-network, the user party]; warpx is not a signatory.
+        // Our m2m JWT has authority over cbtc-user-* parties.
+        actAs: [partyId],
+        readAs: [partyId],
         commands: [
           {
             ExerciseCommand: {
-              templateId: WITHDRAW_ACCOUNT_TEMPLATE_ID,
+              templateId: withdrawAccountTpl,
               contractId: withdrawAccountContractId,
               choice: WITHDRAW_CHOICE,
               choiceArgument: {
                 tokens: holdingCids,
                 amount,
-                burnMintFactoryCid: ts.burn_mint_factory.contract_id,
-                extraArgs: {
-                  context: { values: contextValues },
-                  meta: {
-                    values: {
-                      "splice.lfdecentralizedtrust.org/reason": "CBTC Burn",
-                    },
-                  },
-                },
               },
             },
           },
         ],
-        disclosedContracts,
+        disclosedContracts: [
+          {
+            templateId: withdrawAccountTpl,
+            contractId: withdrawAccountContractId,
+            createdEventBlob: withdrawAccountCreatedEventBlob ?? "",
+            synchronizerId: "",
+          },
+        ],
       };
     };
 
     const url = `${NETWORK.ledgerHost}/v2/commands/submit-and-wait-for-transaction-tree`;
     let commandId = randomUUID();
+
+    // ── BURN DIFF LOG ──────────────────────────────────────────────────────
+    // Exact bytes the UI is about to submit, for byte-level comparison against
+    // scripts/working-burn-reference.mjs. The critical invariant: the disclosed
+    // templateId package MUST equal the package the createdEventBlob encodes.
+    const tplPkg = withdrawAccountTpl.split(":")[0];
+    const burnBody = buildBody(commandId);
+    console.log(`${TAG} ===== BURN DIFF LOG =====`);
+    console.log(`${TAG} actAs=${JSON.stringify([partyId])}`);
+    console.log(`${TAG} readAs=${JSON.stringify([partyId])}`);
+    console.log(`${TAG} applicationId=${APPLICATION_ID}`);
+    console.log(`${TAG} choice=${WITHDRAW_CHOICE}`);
+    console.log(`${TAG} withdrawAccount.templateId=${withdrawAccountTpl}`);
+    console.log(`${TAG} withdrawAccount.package=${tplPkg}`);
+    console.log(`${TAG} withdrawAccount.contractId=${withdrawAccountContractId}`);
+    console.log(`${TAG} withdrawAccount.createdEventBlob.length=${(withdrawAccountCreatedEventBlob ?? "").length}`);
+    console.log(`${TAG} withdrawAccount.createdEventBlob.head=${(withdrawAccountCreatedEventBlob ?? "").slice(0, 40)}`);
+    console.log(`${TAG} choiceArgument.amount=${amount}`);
+    console.log(`${TAG} choiceArgument.tokens=${JSON.stringify(holdingCids)}`);
+    console.log(`${TAG} ledgerHost=${NETWORK.ledgerHost}`);
+    console.log(`${TAG} jwt.length=${jwt.length}`);
+    console.log(`${TAG} FULL burn body=${JSON.stringify(burnBody)}`);
+    console.log(`${TAG} =========================`);
 
     console.log(`${TAG} submitting CBTCWithdrawAccount_Withdraw to ledger...`);
     console.log(`${TAG} POST ${url}`);
@@ -234,8 +201,35 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: `Ledger error (${res.status}): ${text}` }, { status: 502 });
     }
 
-    console.log(`${TAG} success! burn submitted for amount=${amount}`);
-    return NextResponse.json({ ok: true });
+    // Parse the burn's updateId — returned to the client and used as the stable
+    // id for this redeem in the (ledger-derived) activity history.
+    let burnUpdateId: string | null = null;
+    let burnTree: unknown = null;
+    try {
+      burnTree = await res.json();
+      const tree = burnTree as {
+        transactionTree?: { updateId?: string; offset?: number };
+        transaction?: { updateId?: string };
+      };
+      burnUpdateId =
+        tree.transactionTree?.updateId ?? tree.transaction?.updateId ?? null;
+    } catch {
+      // response body not JSON / already consumed — non-fatal
+    }
+
+    // FULL CAPTURE: the burn request + response tree (the final, decisive step).
+    await captureStep("burn", {
+      url,
+      request: burnBody,
+      httpStatus: res.status,
+      responseTree: burnTree,
+      updateId: burnUpdateId,
+    });
+
+    console.log(
+      `${TAG} success! burn submitted for amount=${amount} updateId=${burnUpdateId ?? "(unknown)"}`,
+    );
+    return NextResponse.json({ ok: true, burnUpdateId });
 
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

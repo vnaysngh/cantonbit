@@ -13,6 +13,7 @@ import { randomUUID } from "node:crypto";
 
 import { getLedgerJwt, invalidateLedgerJwtCache } from "@/lib/auth";
 import { getAccountContractRules } from "@/lib/bitsafe";
+import { captureReset, captureStep } from "@/lib/burn-capture";
 import { NETWORK } from "@/lib/constants";
 
 const APPLICATION_ID = "cbtc-app";
@@ -53,15 +54,34 @@ export async function POST(req: NextRequest) {
     let jwt = await getLedgerJwt();
     console.log(`${TAG} JWT obtained, length=${jwt.length}`);
 
-    const warpxParty = NETWORK.warpxPartyId;
+    // ── FULL CAPTURE (debug) — start a fresh snapshot for this UI burn. ──
+    await captureReset({ party: partyId, btcAddress: destinationBtcAddress });
+    let jwtClaims: Record<string, unknown> = {};
+    try {
+      jwtClaims = JSON.parse(Buffer.from(jwt.split(".")[1], "base64").toString());
+    } catch { /* ignore */ }
+    await captureStep("auth", {
+      scope: process.env.KEYCLOAK_SCOPE ?? "daml_ledger_api",
+      clientId: process.env.KEYCLOAK_CLIENT_ID,
+      jwtLength: jwt.length,
+      jwtClaims,
+    });
+    await captureStep("coordinator", {
+      wa_rules: rules.wa_rules,
+      da_rules: rules.da_rules,
+    });
 
     const buildBody = (commandId: string) => ({
       applicationId: APPLICATION_ID,
       workflowId: `cbtc-redeem-${commandId}`,
       commandId,
-      // actAs + readAs: WarpX party only — m2m JWT authority, owner must be in actAs.
-      actAs: [warpxParty],
-      readAs: [warpxParty],
+      // The withdraw account must be OWNED BY THE USER, not warpx — the burn
+      // choice (CBTCWithdrawAccount_Withdraw) is exercised by the owner, and the
+      // cBTC holdings being burned are signed by the user party. So owner +
+      // actAs must be the user. Our m2m JWT has authority over cbtc-user-*
+      // parties. Matches the official cbtc-lib reference (act_as: [params.party]).
+      actAs: [partyId],
+      readAs: [partyId],
       commands: [
         {
           ExerciseCommand: {
@@ -70,7 +90,7 @@ export async function POST(req: NextRequest) {
             contractId: rules.wa_rules.contract_id,
             choice: CREATE_WITHDRAW_ACCOUNT_CHOICE,
             choiceArgument: {
-              owner: warpxParty,
+              owner: partyId,
               destinationBtcAddress,
             },
           },
@@ -141,6 +161,12 @@ export async function POST(req: NextRequest) {
     const data = await res.json();
     console.log(`${TAG} raw tx response keys=${Object.keys(data as object).join(",")}`);
 
+    await captureStep("createWithdrawAccount", {
+      request: buildBody(commandId),
+      httpStatus: res.status,
+      responseTree: data,
+    });
+
     const account = extractWithdrawAccount(data);
     if (!account) {
       console.error(`${TAG} could not extract contractId from response:`, JSON.stringify(data).slice(0, 1000));
@@ -153,10 +179,16 @@ export async function POST(req: NextRequest) {
     console.log(`${TAG} success! withdrawAccount contractId=${account.contractId}`);
     console.log(`${TAG} createdEventBlob from tx length=${account.createdEventBlob.length}`);
 
-    // The transaction response doesn't include createdEventBlob — fetch it from active-contracts.
-    // It's required for disclosedContracts in the subsequent CBTCWithdrawAccount_Withdraw call.
-    if (!account.createdEventBlob) {
-      console.log(`${TAG} blob empty — fetching from active-contracts...`);
+    // ALWAYS fetch the authoritative templateId + blob from active-contracts as
+    // a CONSISTENT PAIR. The transaction-tree templateId can lag/differ from the
+    // package the blob actually encodes; if we disclose a templateId that
+    // doesn't match the blob's package, the subsequent burn resolves the
+    // Withdraw choice against the wrong package (the stale f240dd5d one, which
+    // demands credentials) and fails/stalls. The ACS row is the single source
+    // of truth — its templateId and blob always match. (This is exactly what
+    // the working manual burn does: it reads both from the same ACS row.)
+    {
+      console.log(`${TAG} fetching authoritative templateId+blob from active-contracts...`);
       try {
         const ledgerEndRes = await fetch(`${NETWORK.ledgerHost}/v2/state/ledger-end`, {
           headers: { Authorization: `Bearer ${jwt}` },
@@ -170,7 +202,7 @@ export async function POST(req: NextRequest) {
           body: JSON.stringify({
             filter: {
               filtersByParty: {
-                [warpxParty]: {
+                [partyId]: {
                   cumulative: [{
                     identifierFilter: {
                       TemplateFilter: {
@@ -193,21 +225,43 @@ export async function POST(req: NextRequest) {
         const raw = await acsRes.json() as unknown;
         const entries = Array.isArray(raw) ? raw : [];
         for (const entry of entries) {
-          const e = entry as { contractEntry?: { JsActiveContract?: { createdEvent?: { contractId?: string; createdEventBlob?: string } } } };
+          const e = entry as { contractEntry?: { JsActiveContract?: { createdEvent?: { contractId?: string; templateId?: string; createdEventBlob?: string } } } };
           const ev = e.contractEntry?.JsActiveContract?.createdEvent;
-          if (ev?.contractId === account.contractId && ev.createdEventBlob) {
-            account.createdEventBlob = ev.createdEventBlob;
-            console.log(`${TAG} fetched createdEventBlob from ACS, length=${account.createdEventBlob.length}`);
+          if (ev?.contractId === account.contractId) {
+            // Take BOTH from the same ACS row — a guaranteed-consistent pair.
+            // templateId and blob MUST encode the same package or the burn's
+            // disclosed contract is rejected / routed to the wrong package.
+            if (ev.createdEventBlob) account.createdEventBlob = ev.createdEventBlob;
+            if (ev.templateId) account.templateId = ev.templateId;
+            console.log(`${TAG} authoritative from ACS: templateId=${account.templateId} blobLen=${account.createdEventBlob.length}`);
             break;
           }
         }
       } catch (blobErr) {
-        // Non-fatal — submit-withdraw will fail with MISSING_FIELD but at least we tried
-        console.warn(`${TAG} failed to fetch createdEventBlob from ACS:`, blobErr);
+        // Non-fatal — but the burn may fail if we couldn't get the authoritative pair.
+        console.warn(`${TAG} failed to fetch authoritative templateId/blob from ACS:`, blobErr);
       }
     }
 
-    console.log(`${TAG} returning contractId=${account.contractId} blobLength=${account.createdEventBlob.length}`);
+    // ── CREATE DIFF LOG ────────────────────────────────────────────────────
+    // What the UI hands to the burn step. templateId + blob MUST be a consistent
+    // pair from the same ACS row (this is the invariant the working script holds).
+    console.log(`${TAG} ===== CREATE DIFF LOG =====`);
+    console.log(`${TAG} returned.contractId=${account.contractId}`);
+    console.log(`${TAG} returned.templateId=${account.templateId}`);
+    console.log(`${TAG} returned.package=${account.templateId.split(":")[0]}`);
+    console.log(`${TAG} returned.createdEventBlob.length=${account.createdEventBlob.length}`);
+    if (!account.templateId) {
+      console.error(`${TAG} WARNING: templateId is EMPTY — the burn will reject (submit-withdraw now requires it)`);
+    }
+    console.log(`${TAG} ===========================`);
+    await captureStep("fetchAccountFromACS", {
+      foundContractId: account.contractId,
+      templateId: account.templateId,
+      package: account.templateId.split(":")[0],
+      createdEventBlobLength: account.createdEventBlob.length,
+      createdEventBlob: account.createdEventBlob,
+    });
     return NextResponse.json(account);
 
   } catch (err) {
@@ -217,7 +271,7 @@ export async function POST(req: NextRequest) {
   }
 }
 
-function extractWithdrawAccount(data: unknown): { contractId: string; createdEventBlob: string } | null {
+function extractWithdrawAccount(data: unknown): { contractId: string; templateId: string; createdEventBlob: string } | null {
   if (!data || typeof data !== "object") return null;
 
   const txn = (data as { transaction?: { eventsById?: Record<string, unknown> } }).transaction;
@@ -226,14 +280,14 @@ function extractWithdrawAccount(data: unknown): { contractId: string; createdEve
       const created = (ev as { created?: { contractId?: string; templateId?: string; createdEventBlob?: string } }).created;
       if (created?.contractId && created.templateId?.includes("CBTCWithdrawAccount")) {
         console.log(`[redeem/create-withdraw-account] found via transaction.eventsById (template match)`);
-        return { contractId: created.contractId, createdEventBlob: created.createdEventBlob ?? "" };
+        return { contractId: created.contractId, templateId: created.templateId, createdEventBlob: created.createdEventBlob ?? "" };
       }
     }
     for (const ev of Object.values(txn.eventsById)) {
-      const created = (ev as { created?: { contractId?: string; createdEventBlob?: string } }).created;
+      const created = (ev as { created?: { contractId?: string; templateId?: string; createdEventBlob?: string } }).created;
       if (created?.contractId) {
         console.log(`[redeem/create-withdraw-account] found via transaction.eventsById (first created)`);
-        return { contractId: created.contractId, createdEventBlob: created.createdEventBlob ?? "" };
+        return { contractId: created.contractId, templateId: created.templateId ?? "", createdEventBlob: created.createdEventBlob ?? "" };
       }
     }
   }
@@ -247,17 +301,17 @@ function extractWithdrawAccount(data: unknown): { contractId: string; createdEve
         (ev as { CreatedEvent?: { contractId?: string; templateId?: string; createdEventBlob?: string } }).CreatedEvent;
       if (val?.contractId && val.templateId?.includes("CBTCWithdrawAccount") && !val.templateId.includes("Rules")) {
         console.log(`[redeem/create-withdraw-account] found via CreatedTreeEvent.value (template match)`);
-        return { contractId: val.contractId, createdEventBlob: val.createdEventBlob ?? "" };
+        return { contractId: val.contractId, templateId: val.templateId, createdEventBlob: val.createdEventBlob ?? "" };
       }
     }
     // fallback: first created
     for (const ev of Object.values(tree.eventsById)) {
       const val =
-        (ev as { CreatedTreeEvent?: { value?: { contractId?: string; createdEventBlob?: string } } }).CreatedTreeEvent?.value ??
-        (ev as { CreatedEvent?: { contractId?: string; createdEventBlob?: string } }).CreatedEvent;
+        (ev as { CreatedTreeEvent?: { value?: { contractId?: string; templateId?: string; createdEventBlob?: string } } }).CreatedTreeEvent?.value ??
+        (ev as { CreatedEvent?: { contractId?: string; templateId?: string; createdEventBlob?: string } }).CreatedEvent;
       if (val?.contractId) {
         console.log(`[redeem/create-withdraw-account] found via CreatedTreeEvent.value (first created)`);
-        return { contractId: val.contractId, createdEventBlob: val.createdEventBlob ?? "" };
+        return { contractId: val.contractId, templateId: val.templateId ?? "", createdEventBlob: val.createdEventBlob ?? "" };
       }
     }
     // belt-and-suspenders: exerciseResult
@@ -265,7 +319,7 @@ function extractWithdrawAccount(data: unknown): { contractId: string; createdEve
       const exercised = (ev as { ExercisedTreeEvent?: { value?: { exerciseResult?: { withdrawAccountCid?: string } } } }).ExercisedTreeEvent?.value;
       if (exercised?.exerciseResult?.withdrawAccountCid) {
         console.log(`[redeem/create-withdraw-account] found via ExercisedTreeEvent.exerciseResult.withdrawAccountCid`);
-        return { contractId: exercised.exerciseResult.withdrawAccountCid, createdEventBlob: "" };
+        return { contractId: exercised.exerciseResult.withdrawAccountCid, templateId: "", createdEventBlob: "" };
       }
     }
   }

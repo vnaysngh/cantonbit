@@ -15,7 +15,12 @@ import "server-only";
 
 import { getLedgerJwt } from "./auth";
 import { NETWORK } from "./constants";
-import type { ActivityKind, ActivityRow } from "./types";
+import { formatSatoshis } from "./format";
+import {
+  getRedeemHistory,
+  type RedeemHistoryStatus,
+} from "./redeem-history";
+import type { ActivityKind, ActivityRow, ActivityStatus } from "./types";
 
 const TAG = "[activity]";
 
@@ -252,8 +257,8 @@ function sumAmounts(values: Array<string | undefined>): string {
     if (!Number.isFinite(n)) continue;
     satsTotal += BigInt(Math.round(n * 1e8));
   }
-  if (satsTotal === 0n) return "0";
-  return (Number(satsTotal) / 1e8).toFixed(8);
+  // Trimmed decimal string (no trailing zeros), exact BigInt→string.
+  return formatSatoshis(satsTotal);
 }
 
 export async function getActivityForParty(
@@ -272,13 +277,71 @@ export async function getActivityForParty(
   const txns = await fetchUpdates(jwt, partyId, fromOffset, ledgerEnd);
   console.log(`${TAG} fetched ${txns.length} transactions in window`);
 
+  // Reconstruct redeems from the ledger first so we know which transaction
+  // updateIds are burns. A burn transaction also archives a holding, so the
+  // generic classifier can emit a separate (outbound) row for the SAME
+  // updateId — which would collide with the redeem row's id (React duplicate
+  // key). We dedupe by excluding any ledger-scan row whose id is a burn.
+  const redeemRows: ActivityRow[] = [];
+  const burnUpdateIds = new Set<string>();
+  try {
+    const redeems = await getRedeemHistory(partyId);
+    for (const r of redeems) {
+      burnUpdateIds.add(r.id);
+      redeemRows.push({
+        id: r.id,
+        kind: "redeemed",
+        amount: r.amount,
+        counterparty: r.destinationBtcAddress ?? "Bitcoin withdrawal",
+        timestamp: r.burnAt,
+        status: redeemStatusToActivity(r.status),
+        txid: r.btcTxId ?? r.id,
+        btcTxId: r.btcTxId,
+        redeemId: r.id,
+      });
+    }
+  } catch (e) {
+    console.warn(`${TAG} redeem history unavailable:`, e);
+  }
+
   const rows: ActivityRow[] = [];
+  const seen = new Set<string>();
   for (const txn of txns) {
     const row = classifyTransaction(txn, partyId);
-    if (row) rows.push(row);
+    if (!row) continue;
+    // Drop ledger-derived redeem rows (handled authoritatively below), and any
+    // row whose updateId is actually a burn (the burn's holding-archive can
+    // look like an outbound row). Also guard against duplicate updateIds.
+    if (row.kind === "redeemed") continue;
+    if (burnUpdateIds.has(row.id)) continue;
+    if (seen.has(row.id)) continue;
+    seen.add(row.id);
+    rows.push(row);
+  }
+
+  // Append the authoritative redeem rows (ids guaranteed distinct from above).
+  for (const r of redeemRows) {
+    if (seen.has(r.id)) continue;
+    seen.add(r.id);
+    rows.push(r);
   }
 
   // Newest first, cap to limit.
   rows.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
   return rows.slice(0, limit);
+}
+
+/** Map the ledger redeem lifecycle to the activity display status. */
+function redeemStatusToActivity(s: RedeemHistoryStatus): ActivityStatus {
+  switch (s) {
+    case "sent":
+      return "complete";
+    case "broadcasting":
+      return "broadcasting";
+    case "stalled":
+      return "stalled";
+    case "burned":
+    default:
+      return "pending";
+  }
 }

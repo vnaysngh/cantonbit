@@ -8,9 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useBalance } from "@/hooks/useBalance";
 import { useWallet } from "@/hooks/useWallet";
-import { UTXO_WARN_THRESHOLD } from "@/lib/constants";
+import { formatSatoshis } from "@/lib/format";
 import {
-  MIN_MINT_SATS,
   createDepositAccount,
   getDepositAddress,
   snapshotHoldingBalance,
@@ -27,15 +26,13 @@ type Stage =
 
 export default function MintPage() {
   const { partyId } = useWallet();
-  const { total, utxoCount, refetch: refetchBalance } = useBalance();
+  const { total, refetch: refetchBalance } = useBalance();
 
   const [stage, setStage] = useState<Stage>({ kind: "recovering" });
   const baselineRef = useRef<string | null>(null);
   // The most recently recovered/created deposit account — reused across "Mint more" cycles
   // so we never create a new Canton contract unless there are literally zero existing ones.
   const existingAccountRef = useRef<{ depositAccountCid: string; address: string } | null>(null);
-
-  const utxoHigh = utxoCount >= UTXO_WARN_THRESHOLD;
 
   // On mount: find the most recent CBTCDepositAccount for this party and recover its
   // bitcoin address. Prevents creating a new contract on every page refresh.
@@ -76,7 +73,9 @@ export default function MintPage() {
         }
 
         existingAccountRef.current = { depositAccountCid: existing.contractId, address };
-        const baseline = await snapshotHoldingBalance();
+        // Baseline = the USER's current balance. We poll the user party and flip
+        // to "minted" when cBTC lands there (delivered by the server-side cron).
+        const baseline = await snapshotHoldingBalance(partyId);
         baselineRef.current = baseline;
         setStage({ kind: "ready", depositAccountCid: existing.contractId, address });
       } catch {
@@ -84,7 +83,6 @@ export default function MintPage() {
         setStage({ kind: "idle" });
       }
     })();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [partyId]);
 
   const start = useCallback(async () => {
@@ -93,7 +91,7 @@ export default function MintPage() {
     // If we already have a deposit account, reuse it — don't create another Canton contract.
     if (existingAccountRef.current) {
       const { depositAccountCid, address } = existingAccountRef.current;
-      const baseline = await snapshotHoldingBalance();
+      const baseline = await snapshotHoldingBalance(partyId);
       baselineRef.current = baseline;
       setStage({ kind: "ready", depositAccountCid, address });
       return;
@@ -108,7 +106,7 @@ export default function MintPage() {
       const address = await getDepositAddress(depositAccountCid);
 
       existingAccountRef.current = { depositAccountCid, address };
-      const baseline = await snapshotHoldingBalance();
+      const baseline = await snapshotHoldingBalance(partyId);
       baselineRef.current = baseline;
 
       setStage({ kind: "ready", depositAccountCid, address });
@@ -120,20 +118,28 @@ export default function MintPage() {
     }
   }, [partyId]);
 
-  // Poll every 30s once address is shown.
+  // Poll every 30s once the deposit address is shown. READ-ONLY.
+  //
+  // The frontend does NOT trigger the warpx→user transfer. That is the server's
+  // job: the platform-agnostic cron (scripts/process-mints.sh) calls
+  // /api/mint/process-transfers on a schedule, and it is the SOLE writer that
+  // moves cBTC. Having the frontend also trigger it would create two writers
+  // racing for the same work — so the frontend only OBSERVES.
+  //
   // Flow:
-  //   1. User sends BTC → BitSafe mints cBTC into warpx-mainnet-1 (~60 min, 6 confirms)
-  //   2. We detect the new Holding on warpx (snapshotHoldingBalance > baseline)
-  //   3. Trigger /api/mint/process-transfers — the server runs the two-phase
-  //      TransferFactory_Transfer + TransferInstruction_Accept to move the cBTC
-  //      into the user's party.
-  //   4. Refetch the user balance — UI updates to "minted".
+  //   1. User sends BTC → BitSafe mints cBTC into warpx (~60 min, 6 confirms)
+  //   2. The server cron detects it and delivers warpx → user party
+  //   3. Here we poll the USER party balance; when it rises above the baseline,
+  //      the cBTC has landed in the user's wallet → show "minted".
   useEffect(() => {
     if (stage.kind !== "ready") return;
+    if (!partyId) return;
 
     const poll = setInterval(async () => {
       try {
-        const currentBalance = await snapshotHoldingBalance();
+        // Observe the USER's own balance (not warpx). It rises only once the
+        // cron has delivered the mint into the user's party.
+        const currentBalance = await snapshotHoldingBalance(partyId);
         const baseline = baselineRef.current ?? "0";
 
         const currentSats = Math.round(parseFloat(currentBalance) * 1e8);
@@ -141,29 +147,8 @@ export default function MintPage() {
 
         if (currentSats > baselineSats) {
           clearInterval(poll);
-          const minted = ((currentSats - baselineSats) / 1e8).toFixed(8);
-
-          // Push the new holding from warpx → user party (two-phase transfer).
-          try {
-            const procRes = await fetch("/api/mint/process-transfers", {
-              method: "POST",
-            });
-            const procJson = (await procRes.json()) as {
-              transferred?: number;
-              failed?: number;
-              errors?: string[];
-            };
-            console.log("[mint] processor result:", procJson);
-            if ((procJson.failed ?? 0) > 0) {
-              console.warn(
-                "[mint] processor reported failures:",
-                procJson.errors,
-              );
-            }
-          } catch (procErr) {
-            console.error("[mint] process-transfers call failed:", procErr);
-          }
-
+          // Trimmed display (no trailing zeros) — consistent with formatBtc.
+          const minted = formatSatoshis(BigInt(currentSats - baselineSats));
           refetchBalance();
           setStage({ kind: "minted", amount: minted });
         }
@@ -173,7 +158,7 @@ export default function MintPage() {
     }, 30_000);
 
     return () => clearInterval(poll);
-  }, [stage.kind, refetchBalance]);
+  }, [stage.kind, partyId, refetchBalance]);
 
   // "Mint more" / "Try again": reuse existing account if we have one,
   // otherwise go to idle so user can generate a new address.
@@ -187,25 +172,8 @@ export default function MintPage() {
   };
 
   return (
-    <div className="mx-auto max-w-lg space-y-6">
+    <div className="mx-auto max-w-lg space-y-8 py-4">
       <h1 className="text-2xl font-semibold">Mint cBTC</h1>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm font-medium text-muted-foreground">
-            Current balance
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-1">
-          <BalanceBadge amount={total} size="lg" />
-          {utxoCount > 0 && (
-            <p className={utxoHigh ? "text-xs text-amber-600" : "text-xs text-muted-foreground"}>
-              {utxoCount} holding{utxoCount === 1 ? "" : "s"}
-              {utxoHigh && " — consider redeeming some to consolidate"}
-            </p>
-          )}
-        </CardContent>
-      </Card>
 
       {stage.kind === "recovering" && (
         <Card>
@@ -245,33 +213,19 @@ export default function MintPage() {
       )}
 
       {stage.kind === "ready" && (
-        <div className="space-y-4">
-          <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-300">
-            ⚠️ Send at least <span className="font-semibold">0.001 BTC</span> to this address. Amounts below the minimum will not be processed and cannot be recovered.
+        <div className="space-y-8">
+          <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-xs leading-relaxed text-amber-800 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-300">
+            <span aria-hidden className="mt-px shrink-0">⚠️</span>
+            <span>
+              Send at least <span className="font-semibold">0.001 BTC</span> to
+              this address. Amounts below the minimum will not be processed and
+              cannot be recovered.
+            </span>
           </div>
           <AddressQR
             value={stage.address}
             label="cBTC appears after 6 Bitcoin confirmations (~60 min) plus attestor processing (~60–120 sec)."
           />
-          <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-            <div>Deposit account:</div>
-            <div className="mt-1 break-all font-mono">
-              {stage.depositAccountCid}
-            </div>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            Polling for new cBTC every 30 seconds. Keep this page open after
-            sending Bitcoin.
-          </p>
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              onClick={() => refetchBalance()}
-              className="flex-1"
-            >
-              Check balance
-            </Button>
-          </div>
         </div>
       )}
 

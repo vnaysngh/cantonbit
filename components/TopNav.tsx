@@ -9,9 +9,10 @@ import { useState } from "react";
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { OranjLogo } from "@/components/OranjLogo";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { useBalance } from "@/hooks/useBalance";
 import { useWallet } from "@/hooks/useWallet";
 import { NETWORK } from "@/lib/constants";
-import { truncatePartyId } from "@/lib/format";
+import { formatBtc, truncatePartyId } from "@/lib/format";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
 
@@ -20,13 +21,14 @@ const NAV = [
   { href: "/mint", label: "Mint" },
   { href: "/send", label: "Send" },
   { href: "/receive", label: "Receive" },
-  { href: "/redeem", label: "Redeem" },
+  { href: "/redeem", label: "Redeem" }
 ] as const;
 
 export function TopNav() {
   const pathname = usePathname();
   const router = useRouter();
   const { partyId, isLoading } = useWallet();
+  const { total } = useBalance();
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {
@@ -59,9 +61,9 @@ export function TopNav() {
             <span className="font-heading text-2xl font-medium tracking-tight leading-none">
               Oranj
             </span>
-            <span className="rounded-md bg-muted px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+            {/*  <span className="rounded-md bg-muted px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
               {NETWORK.name}
-            </span>
+            </span> */}
           </Link>
           <nav className="hidden items-center gap-1 sm:flex">
             {NAV.map((item) => {
@@ -77,7 +79,7 @@ export function TopNav() {
                     "rounded-md px-3 py-1.5 text-sm transition-colors",
                     active
                       ? "bg-accent text-accent-foreground"
-                      : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+                      : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
                   )}
                 >
                   {item.label}
@@ -94,6 +96,13 @@ export function TopNav() {
             </span>
           ) : partyId ? (
             <>
+              <span
+                className="rounded-md bg-muted px-2 py-1 font-mono text-xs tabular-nums"
+                title="Your cBTC balance"
+              >
+                {formatBtc(total)}{" "}
+                <span className="text-muted-foreground">cBTC</span>
+              </span>
               <button
                 onClick={handleCopy}
                 className="rounded-md bg-muted px-2 py-1 font-mono text-xs hover:bg-accent/50 transition-colors"

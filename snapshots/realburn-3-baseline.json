@@ -1,0 +1,49 @@
+{
+  "capturedAt": "2026-05-29T11:53:11.783Z",
+  "ledgerOffset": 893450,
+  "holdings": [
+    {
+      "cid": "00f1b21f66921fa40a26ad61eaa6e84568522d03c3e919ca8e359fff1b12683265ca121220b6ed52df508c533aed339e67f89f7093ad5fe7ee440378ad13c1d7f7ac01d47b",
+      "amount": "0.0000120000",
+      "lock": "unlocked"
+    }
+  ],
+  "withdrawAccounts": [
+    {
+      "cid": "00d67ac95d25a6aff702b27a8d7a19956c38d9d603ced090a8df830aaaf6b8d22dca12122061ebbeb54eea8cfc7ae738a447ae272996d221733701e6f1583d24f95ad5c8c5",
+      "pkg": "f240dd5d"
+    },
+    {
+      "cid": "001f3e2937ffaec97e768ed93bb18fc51c1658891688a1b60ff8bbabf452fbbf00ca121220e57d41e4a03881a03ed13902df49c7cf43a0c88d12ae7f096d079c104db5d355",
+      "pkg": "f240dd5d"
+    },
+    {
+      "cid": "00341d1ddad130420cb80ada0046433d3e5e782971167247ee698454ef67e85a6bca121220a0e21e2caf9c1b6eca7f857d4be7c33592bd1a3b29e6bd35f2e2eed65e879e78",
+      "pkg": "f240dd5d"
+    },
+    {
+      "cid": "00ea42546d00b665ee63d6a9ab2dd8df3a812c7b3f5e9e968f02439b07e3ca4ad4ca121220a16f623710d28a1df6283a365eb5ee08a4228fe8d37272e95fca6f8db27faba1",
+      "pkg": "f240dd5d"
+    },
+    {
+      "cid": "00291a62af94d34c3192780b4770e793187bb1d19b9c55ea42f3d8321c14bf6d6dca121220eb60e831af083565616a11261154ed192ddfe16be7590d71f86cf8e2f11d2dcb",
+      "pkg": "43a8452a"
+    },
+    {
+      "cid": "009554e5891ccc1686bef8eceb49404f09caec2f171bc65fd506d463cf4e51063eca121220540364a2cf2d0e7548ad0bbfc5c5fcc60bcda613c0c79ec2626f5425fafc335c",
+      "pkg": "43a8452a"
+    },
+    {
+      "cid": "00a03f20718562a9d4c42b4f49bac5218ab05a87caa56780204d720ad863cb442cca12122067403a1449459f4395bb9bd8248b4b3a876ea89edf24e45a20cb252d7b6ac615",
+      "pkg": "43a8452a"
+    }
+  ],
+  "withdrawRequests": [
+    {
+      "cid": "00317f923e9c21b1117c72c5349873f2a8780ab51d5afe4f9f2d7bb470a48f64feca121220450d7acd663641194cf103a17e8ffa917cbf9677ef4b49110b963f595ec2050b",
+      "amount": "0.0000101000",
+      "btcTxId": "01408e157e81aec04520d4f12593745103f29ce442a04a63d48abb3308124bfd"
+    }
+  ],
+  "totalBalance": "0.00001200"
+}

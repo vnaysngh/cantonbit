@@ -11,7 +11,7 @@ import { TopNav } from "@/components/TopNav";
 const inter = Inter({
   variable: "--font-sans",
   subsets: ["latin"],
-  display: "swap",
+  display: "swap"
 });
 
 // Brand serif. Fraunces has a soft, editorial high-end feel and a variable
@@ -21,7 +21,7 @@ const fraunces = Fraunces({
   variable: "--font-serif",
   subsets: ["latin"],
   display: "swap",
-  axes: ["opsz", "SOFT"],
+  axes: ["opsz", "SOFT"]
 });
 
 // Mono for party IDs, contract IDs, hashes, balance digits where we want
@@ -29,16 +29,16 @@ const fraunces = Fraunces({
 const jetBrainsMono = JetBrains_Mono({
   variable: "--font-mono",
   subsets: ["latin"],
-  display: "swap",
+  display: "swap"
 });
 
 export const metadata: Metadata = {
   title: "Oranj",
-  description: "Mint, hold, and transfer cBTC on Canton Network.",
+  description: "Mint, hold, and transfer cBTC on Canton Network."
 };
 
 export default function RootLayout({
-  children,
+  children
 }: Readonly<{
   children: React.ReactNode;
 }>) {

@@ -16,6 +16,7 @@
  */
 
 import { NETWORK } from "./constants";
+import { formatBtc } from "./format";
 import type { Holding } from "@/lib/types";
 
 export { UTXO_WARN_THRESHOLD } from "./constants";
@@ -43,7 +44,7 @@ export interface HoldingSummary {
 export async function findExistingWithdrawAccount(
   partyId: string,
   destinationBtcAddress: string,
-): Promise<{ contractId: string; createdEventBlob: string } | null> {
+): Promise<{ contractId: string; templateId: string; createdEventBlob: string } | null> {
   const res = await fetch("/api/redeem/find-withdraw-account", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -52,6 +53,7 @@ export async function findExistingWithdrawAccount(
 
   const data = await res.json() as {
     contractId?: string | null;
+    templateId?: string;
     createdEventBlob?: string;
     error?: string;
   };
@@ -61,7 +63,11 @@ export async function findExistingWithdrawAccount(
   }
 
   if (!data.contractId) return null;
-  return { contractId: data.contractId, createdEventBlob: data.createdEventBlob ?? "" };
+  return {
+    contractId: data.contractId,
+    templateId: data.templateId ?? "",
+    createdEventBlob: data.createdEventBlob ?? "",
+  };
 }
 
 /**
@@ -73,7 +79,7 @@ export async function findExistingWithdrawAccount(
 export async function createWithdrawAccount(
   partyId: string,
   destinationBtcAddress: string,
-): Promise<{ contractId: string; createdEventBlob: string }> {
+): Promise<{ contractId: string; templateId: string; createdEventBlob: string }> {
   const res = await fetch("/api/redeem/create-withdraw-account", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -82,6 +88,7 @@ export async function createWithdrawAccount(
 
   const data = await res.json() as {
     contractId?: string;
+    templateId?: string;
     createdEventBlob?: string;
     error?: string;
   };
@@ -90,7 +97,11 @@ export async function createWithdrawAccount(
     throw new Error(data.error ?? `Create withdraw account failed (${res.status})`);
   }
 
-  return { contractId: data.contractId, createdEventBlob: data.createdEventBlob ?? "" };
+  return {
+    contractId: data.contractId,
+    templateId: data.templateId ?? "",
+    createdEventBlob: data.createdEventBlob ?? "",
+  };
 }
 
 /**
@@ -158,7 +169,7 @@ export function selectHoldings(
 
   if (accumulated < target) {
     throw new Error(
-      `Insufficient balance: have ${accumulated.toFixed(8)} BTC, need ${amountBtc} BTC. Some holdings may be locked in an in-flight transaction.`,
+      `Insufficient balance: have ${formatBtc(String(accumulated))} BTC, need ${amountBtc} BTC. Some holdings may be locked in an in-flight transaction.`,
     );
   }
 
@@ -173,7 +184,9 @@ export function selectHoldings(
  */
 export async function submitWithdraw(
   partyId: string,
+  destinationBtcAddress: string,
   withdrawAccountContractId: string,
+  withdrawAccountTemplateId: string,
   withdrawAccountCreatedEventBlob: string,
   holdingCids: string[],
   amount: string,
@@ -183,7 +196,9 @@ export async function submitWithdraw(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       partyId,
+      destinationBtcAddress,
       withdrawAccountContractId,
+      withdrawAccountTemplateId,
       withdrawAccountCreatedEventBlob,
       holdingCids,
       amount,
@@ -194,5 +209,91 @@ export async function submitWithdraw(
 
   if (!res.ok || !data.ok) {
     throw new Error(data.error ?? `Submit withdraw failed (${res.status})`);
+  }
+}
+
+/**
+ * Live redeem lifecycle state, derived from the on-ledger CBTCWithdrawRequest.
+ *
+ *   "pending"      — burn done; attestor hasn't created the request yet (or it
+ *                    already completed — the caller disambiguates with `seenRequest`).
+ *   "broadcasting" — attestor created the request and assigned a btcTxId; BTC is
+ *                    on its way (client confirms via the chain).
+ */
+export type RedeemState = "pending" | "broadcasting";
+
+export interface RedeemStatus {
+  state: RedeemState;
+  /** Bitcoin txid the attestor assigned (null until the request exists). */
+  btcTxId: string | null;
+  /** cBTC amount on the request. */
+  amount: string | null;
+  withdrawRequestCid: string | null;
+}
+
+/**
+ * Poll the live redeem status for a party + destination address. Reads the
+ * on-ledger CBTCWithdrawRequest via the server route (m2m JWT).
+ */
+export async function getRedeemStatus(
+  partyId: string,
+  destinationBtcAddress: string,
+): Promise<RedeemStatus> {
+  const res = await fetch("/api/redeem/status", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ partyId, destinationBtcAddress }),
+  });
+
+  const data = await res.json() as RedeemStatus & { error?: string };
+
+  if (!res.ok) {
+    throw new Error(data.error ?? `Redeem status failed (${res.status})`);
+  }
+
+  return {
+    state: data.state,
+    btcTxId: data.btcTxId ?? null,
+    amount: data.amount ?? null,
+    withdrawRequestCid: data.withdrawRequestCid ?? null,
+  };
+}
+
+/**
+ * Check whether a Bitcoin txid is visible on-chain (confirmed or in mempool).
+ * Returns { found, confirmed, blockHeight } — used to turn "broadcasting" into
+ * "sent" once the attestor's transaction actually hits Bitcoin.
+ *
+ * Only meaningful on mainnet/testnet (devnet/regtest has no public explorer).
+ */
+export async function checkBitcoinTx(
+  btcTxId: string,
+): Promise<{ found: boolean; confirmed: boolean; blockHeight: number | null }> {
+  const base =
+    NETWORK.name === "mainnet"
+      ? "https://mempool.space/api"
+      : NETWORK.name === "testnet"
+        ? "https://mempool.space/testnet/api"
+        : null;
+
+  if (!base) return { found: false, confirmed: false, blockHeight: null };
+
+  try {
+    const res = await fetch(`${base}/tx/${encodeURIComponent(btcTxId)}`);
+    if (res.status === 404) {
+      return { found: false, confirmed: false, blockHeight: null };
+    }
+    if (!res.ok) return { found: false, confirmed: false, blockHeight: null };
+    const data = (await res.json()) as {
+      status?: { confirmed?: boolean; block_height?: number };
+    };
+    return {
+      found: true,
+      confirmed: data.status?.confirmed ?? false,
+      blockHeight: data.status?.block_height ?? null,
+    };
+  } catch {
+    // network error talking to the explorer — treat as "not found yet"
+    return { found: false, confirmed: false, blockHeight: null };
   }
 }

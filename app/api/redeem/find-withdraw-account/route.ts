@@ -11,6 +11,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { getLedgerJwt, invalidateLedgerJwtCache } from "@/lib/auth";
+import { getAccountContractRules } from "@/lib/bitsafe";
+import { captureReset, captureStep } from "@/lib/burn-capture";
 import { NETWORK } from "@/lib/constants";
 
 // active-contracts TemplateFilter requires package NAME alias, not hash.
@@ -117,6 +119,22 @@ export async function POST(req: NextRequest) {
 
     const entries = result.entries ?? [];
 
+    // Determine the CURRENT withdraw-account package from the coordinator's
+    // wa_rules. We must only reuse a withdraw account on the SAME package — a
+    // stale older-package account (e.g. f240dd5d) has a different Withdraw
+    // choice that throws "Credential CIDs required" at burn time. If the only
+    // existing account is stale, we ignore it and let the caller create a fresh
+    // one (which will be on the current package).
+    let currentWaPackage: string | null = null;
+    try {
+      const rules = await getAccountContractRules();
+      // template_id is "<packageHash>:CBTC.WithdrawAccount:CBTCWithdrawAccountRules"
+      currentWaPackage = rules.wa_rules.template_id.split(":")[0] || null;
+      console.log(`${TAG} current wa package=${currentWaPackage?.slice(0, 12)}...`);
+    } catch (e) {
+      console.warn(`${TAG} could not fetch current wa package (will not filter by version):`, e);
+    }
+
     for (const entry of entries) {
       // Ledger v2 response: entry.contractEntry.JsActiveContract.createdEvent
       const e = entry as {
@@ -124,6 +142,7 @@ export async function POST(req: NextRequest) {
           JsActiveContract?: {
             createdEvent?: {
               contractId?: string;
+              templateId?: string;
               createArgument?: Record<string, unknown>;
               createdEventBlob?: string;
             };
@@ -132,6 +151,7 @@ export async function POST(req: NextRequest) {
         JsActiveContract?: {
           createdEvent?: {
             contractId?: string;
+            templateId?: string;
             createArgument?: Record<string, unknown>;
             createdEventBlob?: string;
           };
@@ -149,13 +169,54 @@ export async function POST(req: NextRequest) {
       console.log(`${TAG} checking contract=${ev.contractId.slice(0, 20)}... owner=${String(owner).slice(0, 20)}... addr=${addr}`);
 
       if (owner && owner !== partyId) continue;
-      if (addr === destinationBtcAddress) {
-        console.log(`${TAG} found matching withdraw account contractId=${ev.contractId}`);
-        return NextResponse.json({
-          contractId: ev.contractId,
-          createdEventBlob: ev.createdEventBlob ?? "",
-        });
+      if (addr !== destinationBtcAddress) continue;
+
+      // Skip stale-package accounts. The deployed current package's Withdraw
+      // choice takes {tokens, amount}; older packages demand credentials and
+      // fail the burn. Only reuse an account on the current package.
+      const evPackage = ev.templateId?.split(":")[0] ?? "";
+      if (currentWaPackage && evPackage !== currentWaPackage) {
+        console.log(`${TAG} skipping stale-package withdraw account ${ev.contractId.slice(0, 16)} (pkg=${evPackage.slice(0, 12)} != current ${currentWaPackage.slice(0, 12)})`);
+        continue;
       }
+
+      // ── FIND DIFF LOG ──────────────────────────────────────────────────
+      // The UI REUSES this existing account for the burn. Its templateId +
+      // blob must be a consistent pair (both from this ACS row). If the UI
+      // reuses a stale-package account, the burn behaves differently than a
+      // freshly-created one — this log makes that visible.
+      console.log(`${TAG} ===== FIND DIFF LOG (REUSING existing account) =====`);
+      console.log(`${TAG} reuse.contractId=${ev.contractId}`);
+      console.log(`${TAG} reuse.templateId=${ev.templateId}`);
+      console.log(`${TAG} reuse.package=${(ev.templateId ?? "").split(":")[0]}`);
+      console.log(`${TAG} reuse.createdEventBlob.length=${(ev.createdEventBlob ?? "").length}`);
+      console.log(`${TAG} ===================================================`);
+      // FULL CAPTURE: the UI is REUSING this account (create-withdraw-account
+      // won't run), so start the snapshot here with auth + the reused account.
+      await captureReset({ party: partyId, btcAddress: destinationBtcAddress, path: "REUSE existing account" });
+      let jwtClaims: Record<string, unknown> = {};
+      try {
+        jwtClaims = JSON.parse(Buffer.from(jwt.split(".")[1], "base64").toString());
+      } catch { /* ignore */ }
+      await captureStep("auth", {
+        scope: process.env.KEYCLOAK_SCOPE ?? "daml_ledger_api",
+        clientId: process.env.KEYCLOAK_CLIENT_ID,
+        jwtLength: jwt.length,
+        jwtClaims,
+      });
+      await captureStep("fetchAccountFromACS", {
+        foundContractId: ev.contractId,
+        templateId: ev.templateId ?? "",
+        package: (ev.templateId ?? "").split(":")[0],
+        createdEventBlobLength: (ev.createdEventBlob ?? "").length,
+        createdEventBlob: ev.createdEventBlob ?? "",
+        reused: true,
+      });
+      return NextResponse.json({
+        contractId: ev.contractId,
+        templateId: ev.templateId ?? "",
+        createdEventBlob: ev.createdEventBlob ?? "",
+      });
     }
 
     console.log(`${TAG} no matching withdraw account found for btcAddress=${destinationBtcAddress}`);

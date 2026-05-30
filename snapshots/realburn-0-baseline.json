@@ -1,0 +1,42 @@
+{
+  "capturedAt": "2026-05-29T11:28:23.829Z",
+  "ledgerOffset": 893262,
+  "holdings": [
+    {
+      "cid": "00a4c942b325dda72aabec13b8322f0842a23e48381a1a4c4add0b15a9e0b8eb42ca121220146f0e4eb4c31f0e6ab69aea6b641e3e67d2fef63ca9ece8665603252dd788b8",
+      "amount": "0.0000150000",
+      "lock": "unlocked"
+    }
+  ],
+  "withdrawAccounts": [
+    {
+      "cid": "00d67ac95d25a6aff702",
+      "pkg": "f240dd5d"
+    },
+    {
+      "cid": "001f3e2937ffaec97e76",
+      "pkg": "f240dd5d"
+    },
+    {
+      "cid": "00341d1ddad130420cb8",
+      "pkg": "f240dd5d"
+    },
+    {
+      "cid": "00ea42546d00b665ee63",
+      "pkg": "f240dd5d"
+    },
+    {
+      "cid": "0016990d5c2741dbc16f",
+      "pkg": "43a8452a"
+    }
+  ],
+  "withdrawRequests": [
+    {
+      "cid": "00317f923e9c21b1117c",
+      "amount": "0.0000101000",
+      "btcTxId": "01408e157e81aec04520d4f12593745103f29ce442a04a63d48abb3308124bfd",
+      "pkg": "f240dd5d"
+    }
+  ],
+  "totalBalance": "0.00001500"
+}

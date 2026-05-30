@@ -1,0 +1,1469 @@
+{
+  "label": "2-after-delivery",
+  "capturedAt": "2026-05-28T18:53:06.340Z",
+  "ledgerOffset": 881825,
+  "summary": {
+    "warpxHoldings": [],
+    "warpxTotal": "0.00000000",
+    "userHoldings": [
+      {
+        "amount": "0.0000200000",
+        "contractId": "00a9b0c580d85d2e2817d6fae7e7a44ee9b662f40fdc18e9636ef6cda639510afaca121220161cebba850255a232b8f4ac1a39ef36ebaa7b647afb8a865e703f28bebc50cb"
+      }
+    ],
+    "userTotal": "0.00002000"
+  },
+  "raw": {
+    "warpx": [
+      {
+        "workflowId": "",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 767391,
+              "nodeId": 0,
+              "contractId": "00fb22909469b7806ce4c138f44842fec29ea100eec79ac907e9edaeeee2d53a89ca121220d050f7da76654547d18567b19faf4077f5f410d2939c680c8d82fa8e483bbf81",
+              "templateId": "94d88246f69d8a4b69333d1f993e3280deaca19b70511ea7687f01e4328a34a4:Splice.Wallet.Install:WalletAppInstall",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "dsoParty": "DSO::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+                "validatorParty": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "endUserName": "6",
+                "endUserParty": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-19T20:41:48.657734Z",
+              "packageName": "splice-wallet",
+              "representativePackageId": "94d88246f69d8a4b69333d1f993e3280deaca19b70511ea7687f01e4328a34a4",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQI5/Q8EgSDOlmd"
+      },
+      {
+        "workflowId": "",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 767394,
+              "nodeId": 0,
+              "contractId": "00ae4590b687f131d38779c58b20176f009b49b4c45d69bbf7906a07df64ed358eca121220f6385b8fe80f2770bce1286c47d0f2569ab87deb3b12dcd7e8b9352984977f0e",
+              "templateId": "6c5802f86709a0ad4784af81f0bab40f3070b2f58128d8843da1e1784c147802:Splice.Amulet:ValidatorRight",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "dso": "DSO::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+                "user": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "validator": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-19T20:41:52.579323Z",
+              "packageName": "splice-amulet",
+              "representativePackageId": "6c5802f86709a0ad4784af81f0bab40f3070b2f58128d8843da1e1784c147802",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQI6PQ8EgSDOlmd"
+      },
+      {
+        "workflowId": "",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 767397,
+              "nodeId": 0,
+              "contractId": "00ad5bd09af1c3edce65956b074b24065f25c3605cae1df9444aba14eb58548e87ca12122008aaf15a3c6ee63af4ff963da39c40daab2adceaa97322faf1aa28a27f6e09a2",
+              "templateId": "94d88246f69d8a4b69333d1f993e3280deaca19b70511ea7687f01e4328a34a4:Splice.Wallet.Install:WalletAppInstall",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "dsoParty": "DSO::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+                "validatorParty": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "endUserName": "7",
+                "endUserParty": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-19T20:41:54.949284Z",
+              "packageName": "splice-wallet",
+              "representativePackageId": "94d88246f69d8a4b69333d1f993e3280deaca19b70511ea7687f01e4328a34a4",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQI6fQ8EgSDOlmd"
+      },
+      {
+        "workflowId": "",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 767402,
+              "nodeId": 0,
+              "contractId": "00e2e9e808d837f5312670b7d57188be4bdd7a058d3f998c5bab52f2c52c7f2ef3ca121220eaa952f7906bddcf8bf8e263119003f044189d48a361bb08a1cddf0c83b45d77",
+              "templateId": "94d88246f69d8a4b69333d1f993e3280deaca19b70511ea7687f01e4328a34a4:Splice.Wallet.TopUpState:ValidatorTopUpState",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "dso": "DSO::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+                "validator": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "memberId": "PAR::warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+                "migrationId": "4",
+                "lastPurchasedAt": "1970-01-01T00:00:00Z"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-19T20:42:20.336479Z",
+              "packageName": "splice-wallet",
+              "representativePackageId": "94d88246f69d8a4b69333d1f993e3280deaca19b70511ea7687f01e4328a34a4",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQI6/Q8EgSDOlmd"
+      },
+      {
+        "workflowId": "",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 788605,
+              "nodeId": 0,
+              "contractId": "00df5379e4387e76b84eee2d4858485f60fcf073280a98b724eeea1e1d15fa06f3ca12122076302a2be07b35cc8d3ffd0cf1f70368308432c9a869aacfa4cec16466415c63",
+              "templateId": "94d88246f69d8a4b69333d1f993e3280deaca19b70511ea7687f01e4328a34a4:Splice.Wallet.Install:WalletAppInstall",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "dsoParty": "DSO::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+                "validatorParty": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "endUserName": "12",
+                "endUserParty": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-21T09:09:20.078526Z",
+              "packageName": "splice-wallet",
+              "representativePackageId": "94d88246f69d8a4b69333d1f993e3280deaca19b70511ea7687f01e4328a34a4",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQIqpw9EgSDOlmd"
+      },
+      {
+        "workflowId": "",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 843587,
+              "nodeId": 1,
+              "contractId": "00c0f960ed4966a6e23a63265e84276810efecd3096b1e13aacf51b0afd8604c7eca121220c5c9b101da573711efcb857810e02c79dad285961f7c90cb802f8a2728124545",
+              "templateId": "e9a3b7df354dfd2f15c7d015328c34256308c90ba96f86f185dad58ffca8299b:Utility.Credential.App.V0.Service.User:UserService",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "user": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "dso": "DSO::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-25T13:33:53.886773Z",
+              "packageName": "utility-credential-app-v0",
+              "representativePackageId": "e9a3b7df354dfd2f15c7d015328c34256308c90ba96f86f185dad58ffca8299b",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQIy/Y9EgSDOlmd"
+      },
+      {
+        "workflowId": "",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 843593,
+              "nodeId": 3,
+              "contractId": "00bca91447e080bf755cef860f1a91b6273798251298b92fdad71a20522c15d636ca1212208d066116e7056524c5d348d284f9afeae4f28d3befa5ca4bf4e401fd1543a8c9",
+              "templateId": "5a29ead611a0abd5f5b3fc3caf7d0f67c0ff802032ab6d392824aa9060e56d70:Utility.Credential.V0.Credential:Credential",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "issuer": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "holder": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "id": "warpx-minter-1",
+                "description": "CBTC Minter Credential",
+                "validFrom": null,
+                "validUntil": null,
+                "claims": [
+                  {
+                    "subject": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                    "property": "hasCBTCRole",
+                    "value": "Minter"
+                  }
+                ],
+                "observers": {
+                  "map": [
+                    [
+                      "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                      {}
+                    ]
+                  ]
+                }
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [
+                "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e"
+              ],
+              "createdAt": "2026-05-25T13:34:42.605522Z",
+              "packageName": "utility-credential-v0",
+              "representativePackageId": "5a29ead611a0abd5f5b3fc3caf7d0f67c0ff802032ab6d392824aa9060e56d70",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQIz/Y9EgSDOlmd"
+      },
+      {
+        "workflowId": "cbtc-mint-test-bd6ac698-4ce9-41de-a28c-f5e2b6aba985",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 843674,
+              "nodeId": 2,
+              "contractId": "0098c84ebbd071ab35e11bc403be629927a6ab1fd8dcf93e0853a5faf1abc0e242ca12122050eb86970960f5a3dc1951f4703a1c22742656ab89db02d005901f630ec06295",
+              "templateId": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313:CBTC.DepositAccount:CBTCDepositAccount",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "instrument": {
+                  "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "id": "CBTC"
+                },
+                "owner": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "id": null,
+                "lastProcessedBitcoinBlock": "0"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-25T13:45:36.212028Z",
+              "packageName": "cbtc",
+              "representativePackageId": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQI3/Y9EgSDOlmd"
+      },
+      {
+        "workflowId": "cbtc-mint-test-ff0c55db-3a80-4ac9-82d9-0d05797ffe54",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 844181,
+              "nodeId": 2,
+              "contractId": "00bcd55dacc01d661bbafb5e9ca7a7ec2306ee8ef48a2b23d946d7d1c37bb27099ca121220f7ca55fb3c5c2318b707061525ddbb3544876ee23684b6026e4ca572d8865840",
+              "templateId": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313:CBTC.DepositAccount:CBTCDepositAccount",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "instrument": {
+                  "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "id": "CBTC"
+                },
+                "owner": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "id": null,
+                "lastProcessedBitcoinBlock": "0"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-25T14:46:51.066047Z",
+              "packageName": "cbtc",
+              "representativePackageId": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQIsPc9EgSDOlmd"
+      },
+      {
+        "workflowId": "",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 844364,
+              "nodeId": 1,
+              "contractId": "00faf070c3ff078e70e7298a88b561cb69c112318e62a669dd0a46ce41c7441dcbca1212208c8d8e61a6825232e5eaec3ba20058634662849517b810fde9c75eea3f3f1d1f",
+              "templateId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3:CBTC.DepositAccount:CBTCDepositAccount",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "instrument": {
+                  "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "id": "CBTC"
+                },
+                "owner": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "id": null,
+                "lastProcessedBitcoinBlock": "0"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-25T15:09:35.906437Z",
+              "packageName": "cbtc",
+              "representativePackageId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQI0/c9EgSDOlmd"
+      },
+      {
+        "workflowId": "cbtc-mint-cd089d27-2bca-4be2-a5f2-81ca1c58f4b4",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 844369,
+              "nodeId": 1,
+              "contractId": "00867bbdcb96a03e07f7ed2f15c0f8630372f8868d3fd1b18d04ff786ac727e5e9ca121220aa57d1bf6783f88a1993d635d81805823822a1e3c3666cfd9de377ca9a6a3f35",
+              "templateId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3:CBTC.DepositAccount:CBTCDepositAccount",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "instrument": {
+                  "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "id": "CBTC"
+                },
+                "owner": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "id": null,
+                "lastProcessedBitcoinBlock": "0"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-25T15:10:29.458536Z",
+              "packageName": "cbtc",
+              "representativePackageId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQI1fc9EgSDOlmd"
+      },
+      {
+        "workflowId": "cbtc-mint-b8a91d80-1de4-4ee6-a34f-5de30d17de51",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 844377,
+              "nodeId": 1,
+              "contractId": "00e3be0a71d61b3320c7e73e086afa8cf96be97760c5b497145c577b16bfdb281eca121220da323f72677acb77d1e2c95fb334f71f3001eb67da5d9ed3f79ddf6e526fca43",
+              "templateId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3:CBTC.DepositAccount:CBTCDepositAccount",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "instrument": {
+                  "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "id": "CBTC"
+                },
+                "owner": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "id": null,
+                "lastProcessedBitcoinBlock": "0"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-25T15:11:54.800460Z",
+              "packageName": "cbtc",
+              "representativePackageId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQI2Pc9EgSDOlmd"
+      },
+      {
+        "workflowId": "cbtc-redeem-test-1",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 845748,
+              "nodeId": 1,
+              "contractId": "00d905cc043bc534ee248571e338ac971bf6858e16956ff1956469db58e2501a4fca1212206ac3121411fdb6831a1d87f9b1e937ae5795c2e7734882d2abad3930e7d24fb5",
+              "templateId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3:CBTC.WithdrawAccount:CBTCWithdrawAccount",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "instrument": {
+                  "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "id": "CBTC"
+                },
+                "owner": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "id": null,
+                "destinationBtcAddress": "bc1p0nzlfp0nv2hjh2m79fnj2c6nvxa9lshajjxkaa4ux99f3qcgvf4sr7u6k7",
+                "pendingBalance": "0.0000000000"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-25T18:20:45.574005Z",
+              "packageName": "cbtc",
+              "representativePackageId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQIt/k9EgSDOlmd"
+      },
+      {
+        "workflowId": "cbtc-redeem-test-2",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 845758,
+              "nodeId": 1,
+              "contractId": "0070ccecaacbd34dcb2f4514c9e0730df1a4adb5210c7fefc5df2b20a656b3cf64ca121220dba9d28e32c93ec393381cb4795aa67b2ebc088bcabeb08bc0929e6719ff6a67",
+              "templateId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3:CBTC.WithdrawAccount:CBTCWithdrawAccount",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "instrument": {
+                  "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "id": "CBTC"
+                },
+                "owner": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "id": null,
+                "destinationBtcAddress": "bc1p0nzlfp0nv2hjh2m79fnj2c6nvxa9lshajjxkaa4ux99f3qcgvf4sr7u6k7",
+                "pendingBalance": "0.0000000000"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-25T18:22:04.532214Z",
+              "packageName": "cbtc",
+              "representativePackageId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQIuvk9EgSDOlmd"
+      },
+      {
+        "workflowId": "",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 856504,
+              "nodeId": 2,
+              "contractId": "0098f8c68cf8404eaa37636bb1ad4ae6573bd3512322a2bb3ddc8186f6d0a97bc5ca121220fa6777800709b0ba62df910d0723892452b2a65264fa50760537fb9ebb5af126",
+              "templateId": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313:CBTC.DepositAccount:CBTCDepositAccount",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "instrument": {
+                  "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "id": "CBTC"
+                },
+                "owner": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "id": "008cc3f407fde2f9d524e660e858730f6b2da8531a87f1e72c6be214e630cc3c44ca121220237cb997ee5160caf3ae3039ba95b9a1ac179fb414d993109f26d36c67362d5d",
+                "lastProcessedBitcoinBlock": "951136"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-26T15:46:54.895451Z",
+              "packageName": "cbtc",
+              "representativePackageId": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQIw4s+EgSDOlmd"
+      },
+      {
+        "workflowId": "cbtc-mint-00a20821-cd6a-4f8b-9019-77ce1c9ac7fb",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 858727,
+              "nodeId": 1,
+              "contractId": "00b4a7fe0dfb48f6f2f42e395d81d0e906e9816457e8375460b07b744fc2cc0972ca1212200b6b3d3e07ab87949506d6808f70c2151a253974b02f460f199eab064a3f8c99",
+              "templateId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3:CBTC.DepositAccount:CBTCDepositAccount",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "instrument": {
+                  "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "id": "CBTC"
+                },
+                "owner": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "id": null,
+                "lastProcessedBitcoinBlock": "0"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-26T19:40:10.092968Z",
+              "packageName": "cbtc",
+              "representativePackageId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQI948+EgSDOlmd"
+      },
+      {
+        "workflowId": "cbtc-mint-28542968-ac56-4640-90fe-ed6ee207aef9",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 858768,
+              "nodeId": 1,
+              "contractId": "001c2ea9b931eab8c5cdf69c83ed2eecadf91f2cbac9deca9267da42a3ed3ccfa5ca12122046cca41da26216072364d1dd6ea9a3c654191ea45cd0a72f6ab5b7b808986299",
+              "templateId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3:CBTC.DepositAccount:CBTCDepositAccount",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "instrument": {
+                  "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "id": "CBTC"
+                },
+                "owner": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "id": null,
+                "lastProcessedBitcoinBlock": "0"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-26T19:47:16.464135Z",
+              "packageName": "cbtc",
+              "representativePackageId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQIgpA+EgSDOlmd"
+      },
+      {
+        "workflowId": "cbtc-mint-a9ef48d8-3cee-4978-a2f4-f64af65347b5",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 859147,
+              "nodeId": 1,
+              "contractId": "00b37306bc011af8f01ff6bff82fb5db9954a3075c05f1a35da41d942ebda8cad4ca12122039aea3c6fffecba30162bb2e5fa21fb72b3906f18b08208a66d61c4b4a666b51",
+              "templateId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3:CBTC.DepositAccount:CBTCDepositAccount",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "instrument": {
+                  "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "id": "CBTC"
+                },
+                "owner": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "id": null,
+                "lastProcessedBitcoinBlock": "0"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-26T20:31:18.760421Z",
+              "packageName": "cbtc",
+              "representativePackageId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQIxJA+EgSDOlmd"
+      },
+      {
+        "workflowId": "cbtc-mint-0827958b-0ab6-4d45-853c-4c85e297ca1d",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 866801,
+              "nodeId": 1,
+              "contractId": "00075911a6683877edbd9afcc9c22fab972e1c750e7da659277842cea75b28ad56ca12122022349b3c0192f099ebe75c424de7230b0f23080a9a0174ca2f4deca4f7c8fa6d",
+              "templateId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3:CBTC.DepositAccount:CBTCDepositAccount",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "instrument": {
+                  "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "id": "CBTC"
+                },
+                "owner": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "id": null,
+                "lastProcessedBitcoinBlock": "0"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-27T07:40:23.823985Z",
+              "packageName": "cbtc",
+              "representativePackageId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQIo5s+EgSDOlmd"
+      },
+      {
+        "workflowId": "cbtc-mint-95fc2e7a-f0ad-494b-91c0-03188642bb42",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 866916,
+              "nodeId": 1,
+              "contractId": "003ea36f17acd7d85682fbe98ad36456b17316912627f7c7017c5c341d231e98f1ca1212200ca4ca76266ea83c6d0ddd67a4f41b9d14a3c21bcbe2453cb085d720b4f17e68",
+              "templateId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3:CBTC.DepositAccount:CBTCDepositAccount",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "instrument": {
+                  "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "id": "CBTC"
+                },
+                "owner": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "id": null,
+                "lastProcessedBitcoinBlock": "0"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-27T07:58:45.084746Z",
+              "packageName": "cbtc",
+              "representativePackageId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQItps+EgSDOlmd"
+      },
+      {
+        "workflowId": "cbtc-mint-9cb32dfa-e8c9-4406-8bbc-bcd787ce907f",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 866960,
+              "nodeId": 1,
+              "contractId": "00fb13e1ac61a97e82fbc8dd5239fc5c39ab8d42f982fb5f70c0a4183eef5745daca121220249c0127a12846596d017b612a9ec909daa952b3fa039acf78853a3f045d2bdc",
+              "templateId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3:CBTC.DepositAccount:CBTCDepositAccount",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "instrument": {
+                  "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "id": "CBTC"
+                },
+                "owner": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "id": null,
+                "lastProcessedBitcoinBlock": "0"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-27T08:05:18.120111Z",
+              "packageName": "cbtc",
+              "representativePackageId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQIwJs+EgSDOlmd"
+      },
+      {
+        "workflowId": "cbtc-mint-15136f98-206f-4537-b681-b7b1e9267376",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 867455,
+              "nodeId": 1,
+              "contractId": "00033e694ccc750ece4283b558c45152e2782b87b2eb41175e2bfcb3a3bdf7ad95ca121220cfc97d9afd5b88d0f76990cbbb7c4415cf4fd4c8bb8a2bbc21f68ed1fecdeed8",
+              "templateId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3:CBTC.DepositAccount:CBTCDepositAccount",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "instrument": {
+                  "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "id": "CBTC"
+                },
+                "owner": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "id": null,
+                "lastProcessedBitcoinBlock": "0"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-27T08:19:01.177342Z",
+              "packageName": "cbtc",
+              "representativePackageId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQI6pw+EgSDOlmd"
+      },
+      {
+        "workflowId": "",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 869344,
+              "nodeId": 2,
+              "contractId": "0020a181b7d7b35218699a246a9567ba0476a3c63efe665cd9828f630f2e9cec35ca1212201401f95bf7bbb221400bc72442a55622491fe5031c98984dd729e8144e916bf0",
+              "templateId": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313:CBTC.DepositAccount:CBTCDepositAccount",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "instrument": {
+                  "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "id": "CBTC"
+                },
+                "owner": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "id": "0001d5109ad830a1c53469dd7846eae2fbb47c17cfbb2851d9137b0f3221bc1474ca12122038e378a6436bbd95543594e100cef08e689986f4cdc027338506890910cd0a8d",
+                "lastProcessedBitcoinBlock": "951237"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-27T11:19:32.589271Z",
+              "packageName": "cbtc",
+              "representativePackageId": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQIzKA+EgSDOlmd"
+      },
+      {
+        "workflowId": "",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 871765,
+              "nodeId": 0,
+              "contractId": "0047beb513518c01ac0875ea252a20ff1efa8c7797da35dab4f24da3d603f210f0ca121220b89b625fe93e95e24779d0cc0f41d5a7a298e81e6698464e7b3e667ad7de1f9d",
+              "templateId": "7a75ef6e69f69395a4e60919e228528bb8f3881150ccfde3f31bcc73864b18ab:Utility.Registry.App.V0.Model.TransferPreapproval:TransferPreapproval",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "receiver": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "instrumentAdmin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "instrumentAllowances": []
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [
+                "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e"
+              ],
+              "createdAt": "2026-05-27T16:41:16.177188Z",
+              "packageName": "utility-registry-app-v0",
+              "representativePackageId": "7a75ef6e69f69395a4e60919e228528bb8f3881150ccfde3f31bcc73864b18ab",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQIu6Q+EgSDOlmd"
+      },
+      {
+        "workflowId": "",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 879454,
+              "nodeId": 2,
+              "contractId": "0096f1b73d4f53cfee8762762e2846ca0bb633b200a065469df2d72664aed7da0dca121220349bbfc11aed678bf4f164c82bd0b1aa5b0582085f3805e5c2569bc1d647c980",
+              "templateId": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313:CBTC.WithdrawAccount:CBTCWithdrawAccount",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "instrument": {
+                  "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "id": "CBTC"
+                },
+                "owner": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "id": "002daea80ebdb9c3b82793a25daf9a885f793c7778a69d71a62a7fe12bc260f107ca121220b5dbf792ece0a499030e2ca7f54dcac7b97711de00e3cf7fa630ff6c9802ad4f",
+                "destinationBtcAddress": "bc1qqz7grzuntqn5p7cmslmrrag9edux30vaxt4ftg",
+                "pendingBalance": "0.0000000000"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-28T11:45:46.741898Z",
+              "packageName": "cbtc",
+              "representativePackageId": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQIoLA+EgSDOlmd"
+      },
+      {
+        "workflowId": "",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 879902,
+              "nodeId": 2,
+              "contractId": "00039fb0c07bc182feb63b5e83db9ee92c4837da17299f5a67a635129cb803ebdfca1212203fd002b0c5c672679daf4085038ea073525628e75c04e8f426de97b6b0c3eb8d",
+              "templateId": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313:CBTC.WithdrawAccount:CBTCWithdrawAccount",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "instrument": {
+                  "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "id": "CBTC"
+                },
+                "owner": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "id": "0052aff42e3af040c78c4483fae257bd3324e310f9770e4d4729e4f7c6a2665ab7ca121220ff5d2e446670a117fad3b3dc7b7f710f8bdcc12b342c7d326f86404619fbb641",
+                "destinationBtcAddress": "bc1qqz7grzuntqn5p7cmslmrrag9edux30vaxt4ftg",
+                "pendingBalance": "0.0000000000"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-28T12:56:22.268121Z",
+              "packageName": "cbtc",
+              "representativePackageId": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQI6LA+EgSDOlmd"
+      },
+      {
+        "workflowId": "",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 881606,
+              "nodeId": 1,
+              "contractId": "005edb75a962c1a1e5b0e20c0e0bb678f7d82dc193c73a167974ef7df530cab3f9ca1212205f64322d7b48e617fc06944b7082dc6940d70001d790efd2948fa076e4df4adf",
+              "templateId": "6c5802f86709a0ad4784af81f0bab40f3070b2f58128d8843da1e1784c147802:Splice.ValidatorLicense:ValidatorLicense",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "validator": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "sponsor": "Five-North-1::1220520b6d396b91c4b13a1786bd5f317e4240001632d4a628c1c4f53a0b5165ba98",
+                "dso": "DSO::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+                "faucetState": null,
+                "metadata": {
+                  "lastUpdatedAt": "2026-05-26T12:58:15.211856Z",
+                  "version": "0.6.3",
+                  "contactPoint": "nodeadmin@fivenorth.io"
+                },
+                "lastActiveAt": "2026-05-28T18:16:47.210601Z"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "DSO::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc"
+              ],
+              "observers": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "createdAt": "2026-05-28T18:16:47.210601Z",
+              "packageName": "splice-amulet",
+              "representativePackageId": "6c5802f86709a0ad4784af81f0bab40f3070b2f58128d8843da1e1784c147802",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQIgrM+EgSDOlmd"
+      },
+      {
+        "workflowId": "",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 881782,
+              "nodeId": 2,
+              "contractId": "0029f9f7c2ff3b9deb543aa66108664793f3c78a9f12d3cf836aa8ba5608a58de0ca121220d700d1d78ee3cb3b1ebfebe920c12105a126e53ebbe5906aa2742021503cdb25",
+              "templateId": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313:CBTC.DepositAccount:CBTCDepositAccount",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "instrument": {
+                  "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "id": "CBTC"
+                },
+                "owner": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "id": "00b019946a28886daa0b8fe5546dadf3afc4fd507e8665873650f8a869d9e7125aca121220807ce78c81dc8ced5fd415200587195e75d058cccb04c1e3d4f0de688e7e4375",
+                "lastProcessedBitcoinBlock": "951442"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-28T18:48:24.505466Z",
+              "packageName": "cbtc",
+              "representativePackageId": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQInLM+EgSDOlmd"
+      },
+      {
+        "workflowId": "",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 881785,
+              "nodeId": 2,
+              "contractId": "00931c8b1bd7e6d1f6611a7a55b37eddd2fcda819106af7c39457441f3c6b3328cca12122094d7ac05c5fe88bb3d633a35e595941740aa7acdcf6c5913771ede610e3a2ebd",
+              "templateId": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313:CBTC.DepositAccount:CBTCDepositAccount",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "instrument": {
+                  "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "id": "CBTC"
+                },
+                "owner": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "id": "007d7f4b61b39bf7e3a753ad4cf6909b8320e53328092504e977ebf3f9d63b6e9fca121220e0a638afc7543f0a38405a3bfbb6a380b8c61d1119ca550d5abb34ef4b5baef5",
+                "lastProcessedBitcoinBlock": "951442"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-28T18:48:27.303601Z",
+              "packageName": "cbtc",
+              "representativePackageId": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQIorM+EgSDOlmd"
+      }
+    ],
+    "user": [
+      {
+        "workflowId": "",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 879553,
+              "nodeId": 2,
+              "contractId": "00d67ac95d25a6aff702b27a8d7a19956c38d9d603ced090a8df830aaaf6b8d22dca12122061ebbeb54eea8cfc7ae738a447ae272996d221733701e6f1583d24f95ad5c8c5",
+              "templateId": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313:CBTC.WithdrawAccount:CBTCWithdrawAccount",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "instrument": {
+                  "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "id": "CBTC"
+                },
+                "owner": "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "id": "0051ffb75ec1af98af1c6c50679cded3881fac1117fd3fb0caabcbd2a184556a90ca12122034cc3589fde19ba6b20c7fd7526dfc64412fa819284b5262997f494906ea9b96",
+                "destinationBtcAddress": "bc1qqz7grzuntqn5p7cmslmrrag9edux30vaxt4ftg",
+                "pendingBalance": "0.0000000000"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-28T12:00:57.613421Z",
+              "packageName": "cbtc",
+              "representativePackageId": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQItLA+EgSF2Lxy"
+      },
+      {
+        "workflowId": "",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 880847,
+              "nodeId": 1,
+              "contractId": "00317f923e9c21b1117c72c5349873f2a8780ab51d5afe4f9f2d7bb470a48f64feca121220450d7acd663641194cf103a17e8ffa917cbf9677ef4b49110b963f595ec2050b",
+              "templateId": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313:CBTC.WithdrawRequest:CBTCWithdrawRequest",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "owner": "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "destinationBtcAddress": "bc1qqz7grzuntqn5p7cmslmrrag9edux30vaxt4ftg",
+                "amount": "0.0000101000",
+                "btcTxId": "01408e157e81aec04520d4f12593745103f29ce442a04a63d48abb3308124bfd",
+                "sourceAccountId": "<contract-id>"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-28T15:49:11.316811Z",
+              "packageName": "cbtc",
+              "representativePackageId": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQIirI+EgSF2Lxy"
+      },
+      {
+        "workflowId": "",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 880847,
+              "nodeId": 2,
+              "contractId": "001f3e2937ffaec97e768ed93bb18fc51c1658891688a1b60ff8bbabf452fbbf00ca121220e57d41e4a03881a03ed13902df49c7cf43a0c88d12ae7f096d079c104db5d355",
+              "templateId": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313:CBTC.WithdrawAccount:CBTCWithdrawAccount",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "instrument": {
+                  "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "id": "CBTC"
+                },
+                "owner": "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "id": "004ea301dabfe9a14ef343524528c2c70009d716b2d4d600ea6873bd731fef9bc9ca12122068c90789704eab3dbed961887f7b3ef20338385b1c78013556701bbddbce7611",
+                "destinationBtcAddress": "bc1qqz7grzuntqn5p7cmslmrrag9edux30vaxt4ftg",
+                "pendingBalance": "0.0000000000"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-28T15:49:11.316811Z",
+              "packageName": "cbtc",
+              "representativePackageId": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQIi7I+EgSF2Lxy"
+      },
+      {
+        "workflowId": "",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 881468,
+              "nodeId": 2,
+              "contractId": "00341d1ddad130420cb80ada0046433d3e5e782971167247ee698454ef67e85a6bca121220a0e21e2caf9c1b6eca7f857d4be7c33592bd1a3b29e6bd35f2e2eed65e879e78",
+              "templateId": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313:CBTC.WithdrawAccount:CBTCWithdrawAccount",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "instrument": {
+                  "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "id": "CBTC"
+                },
+                "owner": "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "id": "00c386c97445a468867e262eccb72fa66de3b464d5762b9d5a05169401b630e157ca12122088a8573eb8fb34a63474edeb131b2d22344a253b49353061b668c848b0d5fc2c",
+                "destinationBtcAddress": "bc1qqz7grzuntqn5p7cmslmrrag9edux30vaxt4ftg",
+                "pendingBalance": "0.0000000000"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [],
+              "createdAt": "2026-05-28T17:49:53.661454Z",
+              "packageName": "cbtc",
+              "representativePackageId": "f240dd5d1a98079f37c0f93272cf5b28d4523027c42d0003c4c7a530eed6c313",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQI7rI+EgSF2Lxy"
+      },
+      {
+        "workflowId": "cbtc-mint-accept-0672f6d5-a798-4345-8662-caa40fe2191b",
+        "contractEntry": {
+          "JsActiveContract": {
+            "createdEvent": {
+              "offset": 881806,
+              "nodeId": 5,
+              "contractId": "00a9b0c580d85d2e2817d6fae7e7a44ee9b662f40fdc18e9636ef6cda639510afaca121220161cebba850255a232b8f4ac1a39ef36ebaa7b647afb8a865e703f28bebc50cb",
+              "templateId": "8107899ac4723ce986bf7d27416534e576e54b92161e46150a595fb78ff3d3a1:Utility.Registry.Holding.V0.Holding:Holding",
+              "contractKey": null,
+              "contractKeyHash": "",
+              "createArgument": {
+                "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                "provider": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "owner": "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                "instrument": {
+                  "source": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "id": "CBTC",
+                  "scheme": "RegistrarInternalScheme"
+                },
+                "label": "",
+                "amount": "0.0000200000"
+              },
+              "createdEventBlob": "",
+              "interfaceViews": [],
+              "witnessParties": [
+                "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "signatories": [
+                "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+              ],
+              "observers": [
+                "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e"
+              ],
+              "createdAt": "2026-05-28T18:52:09.527921Z",
+              "packageName": "utility-registry-holding-v0",
+              "representativePackageId": "8107899ac4723ce986bf7d27416534e576e54b92161e46150a595fb78ff3d3a1",
+              "acsDelta": true
+            },
+            "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+            "reassignmentCounter": 0
+          }
+        },
+        "streamContinuationToken": "CgQIsLM+EgSF2Lxy"
+      }
+    ]
+  }
+}

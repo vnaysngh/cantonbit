@@ -1,0 +1,12 @@
+{
+  "capturedAt": "2026-05-29T11:54:49.205Z",
+  "ledgerOffset": 893461,
+  "holdings": [],
+  "withdrawRequests": [
+    {
+      "amount": "0.0000101000",
+      "btcTxId": "01408e157e81aec04520d4f12593745103f29ce442a04a63d48abb3308124bfd"
+    }
+  ],
+  "totalBalance": "0.00000000"
+}

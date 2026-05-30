@@ -1,0 +1,186 @@
+[
+  {
+    "update": {
+      "Transaction": {
+        "value": {
+          "updateId": "12208242857a2491151d97d26632f4f83de86dc2497870e564de5ba6b585b771d223",
+          "commandId": "d228cca235d7c43d46987d02da05d6760d6d57ec",
+          "workflowId": "",
+          "effectiveAt": "2026-05-27T15:33:08.865840Z",
+          "events": [
+            {
+              "ArchivedEvent": {
+                "offset": 871281,
+                "nodeId": 4,
+                "contractId": "005950acffb976d23c3ac45db51ba7ea394283d5a50baacae06eac93b19d8c166cca121220a582fbe2ce1dc639e31211db525aa67e867e1615b4ad0b9099d4a9288b778b32",
+                "templateId": "8107899ac4723ce986bf7d27416534e576e54b92161e46150a595fb78ff3d3a1:Utility.Registry.Holding.V0.Holding:Holding",
+                "witnessParties": [
+                  "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+                ],
+                "packageName": "utility-registry-holding-v0",
+                "implementedInterfaces": []
+              }
+            },
+            {
+              "CreatedEvent": {
+                "offset": 871281,
+                "nodeId": 5,
+                "contractId": "002340d0b53e013a1d36366d637ad5e3b9ce537e656f6da66a7e02cee0b4b7e395ca1212204d574fb26f372472f93f63044e22dc11414d0e7b1f7bd2dee0e7aa3f641b7f9d",
+                "templateId": "8107899ac4723ce986bf7d27416534e576e54b92161e46150a595fb78ff3d3a1:Utility.Registry.Holding.V0.Holding:Holding",
+                "contractKey": null,
+                "contractKeyHash": "",
+                "createArgument": {
+                  "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                  "provider": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "owner": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                  "instrument": {
+                    "source": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                    "id": "CBTC",
+                    "scheme": "RegistrarInternalScheme"
+                  },
+                  "label": "",
+                  "amount": "0.0000010000",
+                  "lock": {
+                    "lockers": {
+                      "map": [
+                        [
+                          "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                          {}
+                        ]
+                      ]
+                    },
+                    "context": "testing btc transfer",
+                    "observers": {
+                      "map": [
+                        [
+                          "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                          {}
+                        ]
+                      ]
+                    }
+                  }
+                },
+                "createdEventBlob": "",
+                "interfaceViews": [],
+                "witnessParties": [
+                  "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+                ],
+                "signatories": [
+                  "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+                ],
+                "observers": [
+                  "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                  "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+                ],
+                "createdAt": "2026-05-27T15:33:08.865840Z",
+                "packageName": "utility-registry-holding-v0",
+                "representativePackageId": "8107899ac4723ce986bf7d27416534e576e54b92161e46150a595fb78ff3d3a1",
+                "acsDelta": true
+              }
+            },
+            {
+              "CreatedEvent": {
+                "offset": 871281,
+                "nodeId": 6,
+                "contractId": "00e9bad0afcd472b9fa2f1303ae6eb4491f8444632a6b5cd83a918695b389ab06cca1212209c0b109f6c5b544b7c76f5440f0033f64beeb44f0535260d86f57bff0804f282",
+                "templateId": "8107899ac4723ce986bf7d27416534e576e54b92161e46150a595fb78ff3d3a1:Utility.Registry.Holding.V0.Holding:Holding",
+                "contractKey": null,
+                "contractKeyHash": "",
+                "createArgument": {
+                  "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                  "provider": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "owner": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                  "instrument": {
+                    "source": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                    "id": "CBTC",
+                    "scheme": "RegistrarInternalScheme"
+                  },
+                  "label": "",
+                  "amount": "0.0000080000"
+                },
+                "createdEventBlob": "",
+                "interfaceViews": [],
+                "witnessParties": [
+                  "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+                ],
+                "signatories": [
+                  "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+                ],
+                "observers": [
+                  "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e"
+                ],
+                "createdAt": "2026-05-27T15:33:08.865840Z",
+                "packageName": "utility-registry-holding-v0",
+                "representativePackageId": "8107899ac4723ce986bf7d27416534e576e54b92161e46150a595fb78ff3d3a1",
+                "acsDelta": true
+              }
+            },
+            {
+              "CreatedEvent": {
+                "offset": 871281,
+                "nodeId": 7,
+                "contractId": "00a31ca71cccd1273064140d92f2039590f0979ca51e0267c844aec76c1cd930caca1212201914edadcf50ab143ff95b07fe18df05cd7bb8d3ffba3d02980885d3dc486b3f",
+                "templateId": "7a75ef6e69f69395a4e60919e228528bb8f3881150ccfde3f31bcc73864b18ab:Utility.Registry.App.V0.Model.Transfer:TransferOffer",
+                "contractKey": null,
+                "contractKeyHash": "",
+                "createArgument": {
+                  "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                  "provider": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "transfer": {
+                    "sender": "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                    "receiver": "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                    "amount": "0.0000010000",
+                    "instrumentId": {
+                      "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                      "id": "CBTC"
+                    },
+                    "requestedAt": "2026-05-27T15:33:05.108Z",
+                    "executeBefore": "2026-05-30T15:32:24.661Z",
+                    "inputHoldingCids": [
+                      "002340d0b53e013a1d36366d637ad5e3b9ce537e656f6da66a7e02cee0b4b7e395ca1212204d574fb26f372472f93f63044e22dc11414d0e7b1f7bd2dee0e7aa3f641b7f9d"
+                    ],
+                    "meta": {
+                      "values": {
+                        "splice.lfdecentralizedtrust.org/reason": "testing btc transfer"
+                      }
+                    }
+                  }
+                },
+                "createdEventBlob": "",
+                "interfaceViews": [],
+                "witnessParties": [
+                  "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+                ],
+                "signatories": [
+                  "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                  "warpx-mainnet-1::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+                ],
+                "observers": [
+                  "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                  "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+                ],
+                "createdAt": "2026-05-27T15:33:08.865840Z",
+                "packageName": "utility-registry-app-v0",
+                "representativePackageId": "7a75ef6e69f69395a4e60919e228528bb8f3881150ccfde3f31bcc73864b18ab",
+                "acsDelta": true
+              }
+            }
+          ],
+          "offset": 871281,
+          "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+          "traceContext": {
+            "traceparent": "00-9082b018c684541efcea85cccdd020b8-2fb11f98c5b7ee8b-03",
+            "tracestate": null
+          },
+          "recordTime": "2026-05-27T15:33:08.984590Z",
+          "externalTransactionHash": null,
+          "paidTrafficCost": 9304
+        }
+      }
+    }
+  }
+]

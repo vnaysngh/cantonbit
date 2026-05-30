@@ -1,0 +1,93 @@
+{
+  "party": "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+  "capturedAt": "2026-05-30T07:58:04.946Z",
+  "burns": [
+    {
+      "burnUpdateId": "1220965e7270b9c2...",
+      "burnAt": "2026-05-28T11:56:12",
+      "amount": "0.0000100000",
+      "request": {
+        "at": "2026-05-28T12:00:57",
+        "btcTxId": "94a596b4d9a031a0ea0de70d724cfc820f33b905c34203b9455c73f4e42a1de9"
+      },
+      "completion": "2026-05-28T12:08:18",
+      "status": "✅ COMPLETE end-to-end"
+    },
+    {
+      "burnUpdateId": "1220931e48269d8b...",
+      "burnAt": "2026-05-28T12:57:15",
+      "amount": "0.0000001000",
+      "request": {
+        "at": "2026-05-28T15:49:11",
+        "btcTxId": "01408e157e81aec04520d4f12593745103f29ce442a04a63d48abb3308124bfd"
+      },
+      "completion": "2026-05-28T17:57:23",
+      "status": "✅ COMPLETE end-to-end"
+    },
+    {
+      "burnUpdateId": "122099e8266d1ca8...",
+      "burnAt": "2026-05-28T14:16:30",
+      "amount": "0.0000100000",
+      "request": {
+        "at": "2026-05-28T17:49:53",
+        "btcTxId": "26caebb3a96c7d85fd568f2c7e5cf3446dbd4082ad70572e29a8164589ccdc21"
+      },
+      "completion": "2026-05-29T08:49:49",
+      "status": "✅ COMPLETE end-to-end"
+    },
+    {
+      "burnUpdateId": "12206882a20634ea...",
+      "burnAt": "2026-05-28T17:44:44",
+      "amount": "0.0000479000",
+      "request": {
+        "at": "2026-05-29T08:42:14",
+        "btcTxId": "1cae9818f450378a70fe5c83de59d7635e0330cac44cf6206b9a155c5504fbc0"
+      },
+      "completion": "2026-05-29T12:12:02",
+      "status": "✅ COMPLETE end-to-end"
+    },
+    {
+      "burnUpdateId": "1220cbb2eca5270e...",
+      "burnAt": "2026-05-29T08:36:56",
+      "amount": "0.0000200000",
+      "request": {
+        "at": "2026-05-29T12:01:27",
+        "btcTxId": "722e67eb4036319ff946cb5893f505ddd7026e19270c17bf9b27d43c32ca3e1e"
+      },
+      "completion": null,
+      "status": "⚠️  request created — completion pending (check btcTxId on-chain)"
+    },
+    {
+      "burnUpdateId": "1220133d8c701f03...",
+      "burnAt": "2026-05-29T11:29:11",
+      "amount": "0.0000010000",
+      "request": null,
+      "completion": null,
+      "status": "❌ STUCK at attestor (no request)"
+    },
+    {
+      "burnUpdateId": "122006ff1e116b49...",
+      "burnAt": "2026-05-29T11:32:58",
+      "amount": "0.0000010000",
+      "request": null,
+      "completion": null,
+      "status": "❌ STUCK at attestor (no request)"
+    },
+    {
+      "burnUpdateId": "1220ce4f89fab539...",
+      "burnAt": "2026-05-29T11:39:07",
+      "amount": "0.0000010000",
+      "request": null,
+      "completion": null,
+      "status": "❌ STUCK at attestor (no request)"
+    },
+    {
+      "burnUpdateId": "1220faa458796b2b...",
+      "burnAt": "2026-05-29T11:54:19",
+      "amount": "0.0000120000",
+      "request": null,
+      "completion": null,
+      "status": "❌ STUCK at attestor (no request)"
+    }
+  ]
+}

@@ -15,6 +15,7 @@
  */
 
 import { NETWORK } from "./constants";
+import { formatSatoshis } from "./format";
 import type { Holding } from "@/lib/types";
 
 const TAG = "[mint]";
@@ -84,12 +85,19 @@ export async function getDepositAddress(
 }
 
 /**
- * Snapshot the user's current cBTC holding balance for mint polling.
+ * Snapshot a party's current unlocked cBTC holding balance, for mint polling.
  * Fetches from the server route GET /api/canton/holdings (m2m JWT — no Loop SDK).
- * Poll every 30s — mint complete when balance > snapshot.
+ *
+ * @param partyId  Which party's balance to read. The mint page passes the
+ *   USER's party so it observes cBTC actually LANDING in the user wallet
+ *   (delivered by the server-side cron processor). Defaults to the warpx
+ *   holding party for backward compatibility.
+ *
+ * Poll every 30s — mint complete for this party when balance > snapshot.
  */
-export async function snapshotHoldingBalance(): Promise<string> {
-  const partyId = NETWORK.warpxPartyId;
+export async function snapshotHoldingBalance(
+  partyId: string = NETWORK.warpxPartyId,
+): Promise<string> {
   const res = await fetch(
     `/api/canton/holdings?partyId=${encodeURIComponent(partyId)}`
   );
@@ -119,7 +127,7 @@ export async function snapshotHoldingBalance(): Promise<string> {
     if (!isNaN(n)) totalSats += Math.round(n * 1e8);
   }
 
-  const total = (totalSats / 1e8).toFixed(8);
+  const total = formatSatoshis(BigInt(totalSats));
   console.log(
     `${TAG} snapshotHoldingBalance holdings=${cbtcUnlocked.length} total=${total} BTC`
   );

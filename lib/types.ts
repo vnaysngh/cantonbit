@@ -113,6 +113,21 @@ export interface TransactionTree {
 
 export type ActivityKind = "sent" | "received" | "minted" | "redeemed";
 
+/**
+ * Display status for an activity row.
+ *   complete      — fully settled (mint landed, send/receive done, BTC sent).
+ *   broadcasting  — redeem: cBTC burned, attestor broadcasting BTC.
+ *   pending       — redeem: cBTC burned, attestor hasn't picked it up yet.
+ *   stalled       — redeem: btcTxId assigned but not on-chain past threshold.
+ *   failed        — terminal failure.
+ */
+export type ActivityStatus =
+  | "complete"
+  | "broadcasting"
+  | "pending"
+  | "stalled"
+  | "failed";
+
 export interface ActivityRow {
   id: string;
   kind: ActivityKind;
@@ -122,9 +137,13 @@ export interface ActivityRow {
   counterparty: string;
   /** ISO timestamp. */
   timestamp: string;
-  status: "complete" | "pending" | "failed";
+  status: ActivityStatus;
   /** Canton update id or Bitcoin txid, for display. */
   txid?: string;
+  /** For redeems: the Bitcoin txid the attestor assigned (null until known). */
+  btcTxId?: string | null;
+  /** For redeems: the DB redeem row id, used to link to the detail page. */
+  redeemId?: string;
 }
 
 /* ---------- cBTC ledger-side shapes ---------- */

@@ -44,14 +44,42 @@ export function formatSatoshis(sats: bigint): string {
   return negative ? `-${body}` : body;
 }
 
-/** Display helper: always show 8 decimal places (BTC convention). */
-export function formatBtc(amount: string | bigint): string {
-  const sats = typeof amount === "bigint" ? amount : parseBtc(amount);
+/**
+ * Canonical cBTC amount string for ledger submission: fixed 10 decimal places,
+ * e.g. "0.000001" → "0.0000010000". Matches the format the reference burn
+ * script sends. Uses exact BigInt satoshi math (no float), so an input like
+ * "0.000001" parses to 100 sats and renders padded to 10 dp.
+ *
+ * cBTC carries 8 decimals on-ledger; the extra two trailing zeros are the
+ * scale Canton expects in the choice argument. We always submit this form so
+ * UI and script burns are byte-identical on the amount field.
+ */
+export function toCanonicalAmount(amount: string): string {
+  const sats = parseBtc(amount); // exact: BTC string → satoshi BigInt
   const negative = sats < 0n;
   const abs = negative ? -sats : sats;
-  const whole = (abs / 100_000_000n).toString();
-  const frac = (abs % 100_000_000n).toString().padStart(8, "0");
-  return `${negative ? "-" : ""}${whole}.${frac}`;
+  const whole = abs / 100_000_000n;
+  // 8 dp from satoshis, then pad to 10 dp total (Canton's amount scale).
+  const frac8 = (abs % 100_000_000n).toString().padStart(8, "0");
+  const body = `${whole}.${frac8}00`;
+  return negative ? `-${body}` : body;
+}
+
+/**
+ * Display helper for BTC amounts.
+ *
+ * Formats with up to 8 decimal places (the BTC convention) but trims trailing
+ * zeros so we show the natural, minimal representation:
+ *   "0.00002000" → "0.00002"
+ *   "1.00000000" → "1"
+ *   "0"          → "0"
+ *
+ * Uses integer-satoshi BigInt math (no floats, no precision loss) — same as
+ * the rest of this module. We deliberately do NOT pull in a decimal library:
+ * the BigInt approach is already exact for BTC's fixed 8-dp scale.
+ */
+export function formatBtc(amount: string | bigint): string {
+  return formatSatoshis(typeof amount === "bigint" ? amount : parseBtc(amount));
 }
 
 /** Relative time string for activity rows. */

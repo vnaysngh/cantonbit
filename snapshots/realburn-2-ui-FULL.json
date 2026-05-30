@@ -1,0 +1,229 @@
+{
+  "source": "UI",
+  "capturedAt": "2026-05-29T11:39:06.522Z",
+  "party": "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+  "btcAddress": "bc1qqz7grzuntqn5p7cmslmrrag9edux30vaxt4ftg",
+  "path": "REUSE existing account",
+  "steps": {
+    "auth": {
+      "scope": "daml_ledger_api",
+      "clientId": "validator-mainnet-m2m",
+      "jwtLength": 1351,
+      "jwtClaims": {
+        "iss": "https://auth.warpx.fivenorth.io/application/o/validator-mainnet-m2m/",
+        "sub": "9",
+        "aud": "validator-mainnet-m2m",
+        "exp": 1780083387,
+        "iat": 1780054587,
+        "auth_time": 1780054587,
+        "acr": "goauthentik.io/providers/oauth2/default",
+        "jti": "3jAPovMXpxBPhrZZQMVQ3GdA5DgIKZO016shlpJF",
+        "scope": "daml_ledger_api",
+        "azp": "validator-mainnet-m2m",
+        "uid": "ioKCmIC7yVPAyWRKAxDuz5NkX4CYOzeM6nzpsPyD"
+      }
+    },
+    "fetchAccountFromACS": {
+      "foundContractId": "0016990d5c2741dbc16f7e9a5d7a708f4ba725152bd1b5a8b2a1279ae18efc9474ca1212208e77df153176156d1cebd4a592bcb71cbcd2d34ddf0463a2495f7e9975cf2e24",
+      "templateId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3:CBTC.WithdrawAccount:CBTCWithdrawAccount",
+      "package": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3",
+      "createdEventBlobLength": 1272,
+      "createdEventBlob": "CgMyLjESsgcKRQAWmQ1cJ0HbwW9+ml16cI9LpyUVK9G1qLKhJ5rhjvyUdMoSEiCOd98VMXYVbRzr1KWSvLccvNLTTd8EY6JJX36Zdc8uJBIEY2J0YxpuCkA0M2E4NDUyYTU2Mzg4ZDIyYzYwNThhYmUwM2U5MGRhZGJhZTlhMjBhNjgyNjM0NTY4YjA3YTkzNTMxZGRhMWEzEgRDQlRDEg9XaXRoZHJhd0FjY291bnQaE0NCVENXaXRoZHJhd0FjY291bnQi8wNq8AMKVgpUOlJjYnRjLW5ldHdvcms6OjEyMjA1YWYzYjk0OWEwNDc3NmZjNDhjZGNjMDVhMDYwZjZiZGEyZTQ3MDYzMjkzNWYzNzVkMTA0OWE4NTQ2YTNiMjYyCmwKajpoYXV0aDBfMDA3YzY2NDM1MzhmMmVhZGQzZTU3M2RkMDViOTo6MTIyMDViY2MxMDZlZmEwZWFhN2YxOGRjNDkxZTVjNmY1ZmI5YjBjYzY4ZGMxMTBhZTY2ZjRlZDY0Njc0NzVkN2M3OGUKZgpkamIKVgpUOlJjYnRjLW5ldHdvcms6OjEyMjA1YWYzYjk0OWEwNDc3NmZjNDhjZGNjMDVhMDYwZjZiZGEyZTQ3MDYzMjkzNWYzNzVkMTA0OWE4NTQ2YTNiMjYyCggKBkIEQ0JUQwp4CnY6dGNidGMtdXNlci0wMDg5MzdmYi04YjM4LTQ3OTEtYTllOS1iNGViYzE5YzQ0Mjk6OjEyMjA1MTdiZmQ4NmVmNTczMjYxMDcwNWEzNWI3YjJkNTZlMzYxMTI1NTBkNmEyYjc3ODk3MWRiZDA5OWEzZDM2ZTk5CgQKAlIACi4KLEIqYmMxcXF6N2dyenVudHFuNXA3Y21zbG1ycmFnOWVkdXgzMHZheHQ0ZnRnChAKDjIMMC4wMDAwMDAwMDAwKlJjYnRjLW5ldHdvcms6OjEyMjA1YWYzYjk0OWEwNDc3NmZjNDhjZGNjMDVhMDYwZjZiZGEyZTQ3MDYzMjkzNWYzNzVkMTA0OWE4NTQ2YTNiMjYyKnRjYnRjLXVzZXItMDA4OTM3ZmItOGIzOC00NzkxLWE5ZTktYjRlYmMxOWM0NDI5OjoxMjIwNTE3YmZkODZlZjU3MzI2MTA3MDVhMzViN2IyZDU2ZTM2MTEyNTUwZDZhMmI3Nzg5NzFkYmQwOTlhM2QzNmU5OTku9ncK81IGAEIqCiYKJAgBEiCKm7dpeKjdMCMuWjTc577u3FZHzPoCH8OaKbF4KavYWhAe",
+      "reused": true
+    },
+    "burn": {
+      "url": "https://ledger-api.validator.warpx.fivenorth.io/v2/commands/submit-and-wait-for-transaction-tree",
+      "request": {
+        "applicationId": "cbtc-app",
+        "workflowId": "cbtc-withdraw-8a62104f-4bc3-4e3e-bf1f-00b13f3ecc57",
+        "commandId": "8a62104f-4bc3-4e3e-bf1f-00b13f3ecc57",
+        "actAs": [
+          "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+        ],
+        "readAs": [
+          "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+        ],
+        "commands": [
+          {
+            "ExerciseCommand": {
+              "templateId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3:CBTC.WithdrawAccount:CBTCWithdrawAccount",
+              "contractId": "0016990d5c2741dbc16f7e9a5d7a708f4ba725152bd1b5a8b2a1279ae18efc9474ca1212208e77df153176156d1cebd4a592bcb71cbcd2d34ddf0463a2495f7e9975cf2e24",
+              "choice": "CBTCWithdrawAccount_Withdraw",
+              "choiceArgument": {
+                "tokens": [
+                  "00ed76973cc2b9be8b1c75c062c602e1fb8f0d0317dc5efc61fc9e9cd1c943a493ca121220f66545a6040d86cb6c357e738257843c081476f4d592f44d361258afc64ebe26"
+                ],
+                "amount": "0.000001"
+              }
+            }
+          }
+        ],
+        "disclosedContracts": [
+          {
+            "templateId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3:CBTC.WithdrawAccount:CBTCWithdrawAccount",
+            "contractId": "0016990d5c2741dbc16f7e9a5d7a708f4ba725152bd1b5a8b2a1279ae18efc9474ca1212208e77df153176156d1cebd4a592bcb71cbcd2d34ddf0463a2495f7e9975cf2e24",
+            "createdEventBlob": "CgMyLjESsgcKRQAWmQ1cJ0HbwW9+ml16cI9LpyUVK9G1qLKhJ5rhjvyUdMoSEiCOd98VMXYVbRzr1KWSvLccvNLTTd8EY6JJX36Zdc8uJBIEY2J0YxpuCkA0M2E4NDUyYTU2Mzg4ZDIyYzYwNThhYmUwM2U5MGRhZGJhZTlhMjBhNjgyNjM0NTY4YjA3YTkzNTMxZGRhMWEzEgRDQlRDEg9XaXRoZHJhd0FjY291bnQaE0NCVENXaXRoZHJhd0FjY291bnQi8wNq8AMKVgpUOlJjYnRjLW5ldHdvcms6OjEyMjA1YWYzYjk0OWEwNDc3NmZjNDhjZGNjMDVhMDYwZjZiZGEyZTQ3MDYzMjkzNWYzNzVkMTA0OWE4NTQ2YTNiMjYyCmwKajpoYXV0aDBfMDA3YzY2NDM1MzhmMmVhZGQzZTU3M2RkMDViOTo6MTIyMDViY2MxMDZlZmEwZWFhN2YxOGRjNDkxZTVjNmY1ZmI5YjBjYzY4ZGMxMTBhZTY2ZjRlZDY0Njc0NzVkN2M3OGUKZgpkamIKVgpUOlJjYnRjLW5ldHdvcms6OjEyMjA1YWYzYjk0OWEwNDc3NmZjNDhjZGNjMDVhMDYwZjZiZGEyZTQ3MDYzMjkzNWYzNzVkMTA0OWE4NTQ2YTNiMjYyCggKBkIEQ0JUQwp4CnY6dGNidGMtdXNlci0wMDg5MzdmYi04YjM4LTQ3OTEtYTllOS1iNGViYzE5YzQ0Mjk6OjEyMjA1MTdiZmQ4NmVmNTczMjYxMDcwNWEzNWI3YjJkNTZlMzYxMTI1NTBkNmEyYjc3ODk3MWRiZDA5OWEzZDM2ZTk5CgQKAlIACi4KLEIqYmMxcXF6N2dyenVudHFuNXA3Y21zbG1ycmFnOWVkdXgzMHZheHQ0ZnRnChAKDjIMMC4wMDAwMDAwMDAwKlJjYnRjLW5ldHdvcms6OjEyMjA1YWYzYjk0OWEwNDc3NmZjNDhjZGNjMDVhMDYwZjZiZGEyZTQ3MDYzMjkzNWYzNzVkMTA0OWE4NTQ2YTNiMjYyKnRjYnRjLXVzZXItMDA4OTM3ZmItOGIzOC00NzkxLWE5ZTktYjRlYmMxOWM0NDI5OjoxMjIwNTE3YmZkODZlZjU3MzI2MTA3MDVhMzViN2IyZDU2ZTM2MTEyNTUwZDZhMmI3Nzg5NzFkYmQwOTlhM2QzNmU5OTku9ncK81IGAEIqCiYKJAgBEiCKm7dpeKjdMCMuWjTc577u3FZHzPoCH8OaKbF4KavYWhAe",
+            "synchronizerId": ""
+          }
+        ]
+      },
+      "httpStatus": 200,
+      "responseTree": {
+        "transactionTree": {
+          "updateId": "1220ce4f89fab5397970ed695783a536fad41e1ec376284b0360f04cb9dfb2777a76",
+          "commandId": "8a62104f-4bc3-4e3e-bf1f-00b13f3ecc57",
+          "workflowId": "cbtc-withdraw-8a62104f-4bc3-4e3e-bf1f-00b13f3ecc57",
+          "effectiveAt": "2026-05-29T11:39:07.542915Z",
+          "offset": 893332,
+          "eventsById": {
+            "0": {
+              "ExercisedTreeEvent": {
+                "value": {
+                  "offset": 893332,
+                  "nodeId": 0,
+                  "contractId": "0016990d5c2741dbc16f7e9a5d7a708f4ba725152bd1b5a8b2a1279ae18efc9474ca1212208e77df153176156d1cebd4a592bcb71cbcd2d34ddf0463a2495f7e9975cf2e24",
+                  "templateId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3:CBTC.WithdrawAccount:CBTCWithdrawAccount",
+                  "interfaceId": null,
+                  "choice": "CBTCWithdrawAccount_Withdraw",
+                  "choiceArgument": {
+                    "amount": "0.0000010000",
+                    "tokens": [
+                      "00ed76973cc2b9be8b1c75c062c602e1fb8f0d0317dc5efc61fc9e9cd1c943a493ca121220f66545a6040d86cb6c357e738257843c081476f4d592f44d361258afc64ebe26"
+                    ]
+                  },
+                  "actingParties": [
+                    "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+                  ],
+                  "consuming": true,
+                  "witnessParties": [
+                    "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+                  ],
+                  "lastDescendantNodeId": 4,
+                  "exerciseResult": {
+                    "withdrawAccountCId": "00a03f20718562a9d4c42b4f49bac5218ab05a87caa56780204d720ad863cb442cca12122067403a1449459f4395bb9bd8248b4b3a876ea89edf24e45a20cb252d7b6ac615",
+                    "mintedHoldingCid": "00f1b21f66921fa40a26ad61eaa6e84568522d03c3e919ca8e359fff1b12683265ca121220b6ed52df508c533aed339e67f89f7093ad5fe7ee440378ad13c1d7f7ac01d47b"
+                  },
+                  "packageName": "cbtc",
+                  "implementedInterfaces": [],
+                  "acsDelta": true
+                }
+              }
+            },
+            "2": {
+              "ExercisedTreeEvent": {
+                "value": {
+                  "offset": 893332,
+                  "nodeId": 2,
+                  "contractId": "00ed76973cc2b9be8b1c75c062c602e1fb8f0d0317dc5efc61fc9e9cd1c943a493ca121220f66545a6040d86cb6c357e738257843c081476f4d592f44d361258afc64ebe26",
+                  "templateId": "3d443920585d7e53514839bc2ef4feff5df87adbd047a64b8e266e4b72c85418:Utility.Registry.Holding.V0.Holding:Holding",
+                  "interfaceId": null,
+                  "choice": "Archive",
+                  "choiceArgument": {},
+                  "actingParties": [
+                    "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                    "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+                  ],
+                  "consuming": true,
+                  "witnessParties": [
+                    "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+                  ],
+                  "lastDescendantNodeId": 2,
+                  "exerciseResult": {},
+                  "packageName": "utility-registry-holding-v0",
+                  "implementedInterfaces": [],
+                  "acsDelta": true
+                }
+              }
+            },
+            "3": {
+              "CreatedTreeEvent": {
+                "value": {
+                  "offset": 893332,
+                  "nodeId": 3,
+                  "contractId": "00f1b21f66921fa40a26ad61eaa6e84568522d03c3e919ca8e359fff1b12683265ca121220b6ed52df508c533aed339e67f89f7093ad5fe7ee440378ad13c1d7f7ac01d47b",
+                  "templateId": "3d443920585d7e53514839bc2ef4feff5df87adbd047a64b8e266e4b72c85418:Utility.Registry.Holding.V0.Holding:Holding",
+                  "contractKey": null,
+                  "contractKeyHash": "",
+                  "createArgument": {
+                    "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                    "provider": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                    "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                    "owner": "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                    "instrument": {
+                      "source": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                      "id": "CBTC",
+                      "scheme": "RegistrarInternalScheme"
+                    },
+                    "label": "",
+                    "amount": "0.0000120000"
+                  },
+                  "createdEventBlob": "",
+                  "interfaceViews": [],
+                  "witnessParties": [
+                    "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+                  ],
+                  "signatories": [
+                    "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                    "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+                  ],
+                  "observers": [
+                    "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e"
+                  ],
+                  "createdAt": "2026-05-29T11:39:07.542915Z",
+                  "packageName": "utility-registry-holding-v0",
+                  "representativePackageId": "3d443920585d7e53514839bc2ef4feff5df87adbd047a64b8e266e4b72c85418",
+                  "acsDelta": true
+                }
+              }
+            },
+            "4": {
+              "CreatedTreeEvent": {
+                "value": {
+                  "offset": 893332,
+                  "nodeId": 4,
+                  "contractId": "00a03f20718562a9d4c42b4f49bac5218ab05a87caa56780204d720ad863cb442cca12122067403a1449459f4395bb9bd8248b4b3a876ea89edf24e45a20cb252d7b6ac615",
+                  "templateId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3:CBTC.WithdrawAccount:CBTCWithdrawAccount",
+                  "contractKey": null,
+                  "contractKeyHash": "",
+                  "createArgument": {
+                    "registrar": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                    "operator": "auth0_007c6643538f2eadd3e573dd05b9::12205bcc106efa0eaa7f18dc491e5c6f5fb9b0cc68dc110ae66f4ed6467475d7c78e",
+                    "instrument": {
+                      "admin": "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                      "id": "CBTC"
+                    },
+                    "owner": "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99",
+                    "id": "0016990d5c2741dbc16f7e9a5d7a708f4ba725152bd1b5a8b2a1279ae18efc9474ca1212208e77df153176156d1cebd4a592bcb71cbcd2d34ddf0463a2495f7e9975cf2e24",
+                    "destinationBtcAddress": "bc1qqz7grzuntqn5p7cmslmrrag9edux30vaxt4ftg",
+                    "pendingBalance": "0.0000010000"
+                  },
+                  "createdEventBlob": "",
+                  "interfaceViews": [],
+                  "witnessParties": [
+                    "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+                  ],
+                  "signatories": [
+                    "cbtc-network::12205af3b949a04776fc48cdcc05a060f6bda2e470632935f375d1049a8546a3b262",
+                    "cbtc-user-008937fb-8b38-4791-a9e9-b4ebc19c4429::1220517bfd86ef5732610705a35b7b2d56e36112550d6a2b778971dbd099a3d36e99"
+                  ],
+                  "observers": [],
+                  "createdAt": "2026-05-29T11:39:07.542915Z",
+                  "packageName": "cbtc",
+                  "representativePackageId": "43a8452a56388d22c6058abe03e90dadbae9a20a682634568b07a93531dda1a3",
+                  "acsDelta": true
+                }
+              }
+            }
+          },
+          "synchronizerId": "global-domain::1220b1431ef217342db44d516bb9befde802be7d8899637d290895fa58880f19accc",
+          "traceContext": {
+            "traceparent": "00-f884ab98a73b71e33b29b8afabbfc5c8-de91e706ffb31291-03",
+            "tracestate": null
+          },
+          "recordTime": "2026-05-29T11:39:07.589058Z"
+        }
+      },
+      "updateId": "1220ce4f89fab5397970ed695783a536fad41e1ec376284b0360f04cb9dfb2777a76"
+    }
+  }
+}

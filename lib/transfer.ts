@@ -18,6 +18,7 @@ import "server-only";
 
 import { getLedgerJwt } from "./auth";
 import { NETWORK } from "./constants";
+import { formatSatoshis } from "./format";
 import type { Holding } from "./types";
 
 const TAG = "[transfer]";
@@ -83,7 +84,7 @@ function selectHoldings(holdings: Holding[], amountBtc: string): Holding[] {
   }
   if (acc < target) {
     throw new Error(
-      `Insufficient balance: have ${(Number(acc) / 1e8).toFixed(8)} cBTC, need ${amountBtc} cBTC`,
+      `Insufficient balance: have ${formatSatoshis(acc)} cBTC, need ${amountBtc} cBTC`,
     );
   }
   return picked;
