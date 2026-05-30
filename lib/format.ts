@@ -45,12 +45,12 @@ export function formatSatoshis(sats: bigint): string {
 }
 
 /**
- * Canonical cBTC amount string for ledger submission: fixed 10 decimal places,
+ * Canonical CBTC amount string for ledger submission: fixed 10 decimal places,
  * e.g. "0.000001" → "0.0000010000". Matches the format the reference burn
  * script sends. Uses exact BigInt satoshi math (no float), so an input like
  * "0.000001" parses to 100 sats and renders padded to 10 dp.
  *
- * cBTC carries 8 decimals on-ledger; the extra two trailing zeros are the
+ * CBTC carries 8 decimals on-ledger; the extra two trailing zeros are the
  * scale Canton expects in the choice argument. We always submit this form so
  * UI and script burns are byte-identical on the amount field.
  */

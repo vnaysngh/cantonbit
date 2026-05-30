@@ -1,5 +1,5 @@
 /**
- * Mint processor — detects new cBTC Holdings on the warpx party and
+ * Mint processor — detects new CBTC Holdings on the warpx party and
  * transfers them to the correct user party.
  *
  * Flow:
@@ -107,7 +107,7 @@ interface ActiveHolding {
 }
 
 /**
- * The to-do list: every active cBTC Holding currently OWNED BY WARPX.
+ * The to-do list: every active CBTC Holding currently OWNED BY WARPX.
  *
  * This is the source of truth for "unfinished mint work" — a holding sitting on
  * warpx has not yet reached a user. Unlike an offset cursor, this snapshot can
@@ -522,7 +522,7 @@ async function findNewTransferOfferForReceiver(
 }
 
 /**
- * Phase 2: receiver accepts the TransferInstruction. After this the cBTC is
+ * Phase 2: receiver accepts the TransferInstruction. After this the CBTC is
  * unlocked and owned by the receiver party.
  */
 async function acceptTransferOffer(
@@ -700,7 +700,7 @@ export async function processMintTransfers(): Promise<MintProcessorResult> {
  * The actual processing body. Runs only while the global lease lock is held.
  *
  * HOLDING-BASED design (offset-independent):
- *   1. The to-do list = all active cBTC Holdings owned by warpx (ACS query).
+ *   1. The to-do list = all active CBTC Holdings owned by warpx (ACS query).
  *      A holding on warpx = unfinished work; once transferred it's archived and
  *      leaves the list. Nothing can be stranded by a moving cursor.
  *   2. For each holding, classify it: is its creating transaction a MINT (it
@@ -894,7 +894,7 @@ async function runProcessorLocked(
         .update({ status: "transferred", error: null, updated_at: new Date().toISOString() })
         .eq("holding_contract_id", holdingContractId);
       result.transferred++;
-      console.log(`${TAG} ✅ transferred ${amount} cBTC to ${cantonPartyId.slice(0, 30)}...`);
+      console.log(`${TAG} ✅ transferred ${amount} CBTC to ${cantonPartyId.slice(0, 30)}...`);
     } catch (transferErr) {
       const errMsg = transferErr instanceof Error ? transferErr.message : String(transferErr);
       console.error(`${TAG} transfer failed:`, errMsg);

@@ -1,5 +1,5 @@
 /**
- * Mint flow — bridging native BTC into cBTC on Canton.
+ * Mint flow — bridging native BTC into CBTC on Canton.
  *
  * Steps (per BitSafe docs):
  *   1. POST /api/mint/account-contract-rules  → da_rules contract (server proxies coordinator)
@@ -9,7 +9,7 @@
  *   4. User sends BTC to that address
  *   5. Attestors monitor Bitcoin for 6 confirmations (~60 min)
  *   6. Attestors submit ConfirmDepositAction on Canton
- *   7. cBTC minted to user's party (~60–120s after confirmation 6)
+ *   7. CBTC minted to user's party (~60–120s after confirmation 6)
  *
  * Minimum mint amount: 0.001 BTC
  */
@@ -30,7 +30,7 @@ export { UTXO_WARN_THRESHOLD } from "./constants";
  * Step 1+2: Create a CBTCDepositAccount via server route.
  *
  * Server route uses m2m JWT + WarpX party (actAs) with the user's partyId as owner.
- * This bypasses the cantonloop.com DAR vetting issue — the WarpX node has cBTC vetted.
+ * This bypasses the cantonloop.com DAR vetting issue — the WarpX node has CBTC vetted.
  */
 export async function createDepositAccount(partyId: string): Promise<string> {
   console.log(`${TAG} createDepositAccount partyId=${partyId.slice(0, 30)}...`);
@@ -85,11 +85,11 @@ export async function getDepositAddress(
 }
 
 /**
- * Snapshot a party's current unlocked cBTC holding balance, for mint polling.
+ * Snapshot a party's current unlocked CBTC holding balance, for mint polling.
  * Fetches from the server route GET /api/canton/holdings (m2m JWT — no Loop SDK).
  *
  * @param partyId  Which party's balance to read. The mint page passes the
- *   USER's party so it observes cBTC actually LANDING in the user wallet
+ *   USER's party so it observes CBTC actually LANDING in the user wallet
  *   (delivered by the server-side cron processor). Defaults to the warpx
  *   holding party for backward compatibility.
  *
@@ -113,7 +113,7 @@ export async function snapshotHoldingBalance(
 
   const holdings = data.holdings ?? [];
 
-  // Filter to unlocked cBTC only (same logic as useBalance).
+  // Filter to unlocked CBTC only (same logic as useBalance).
   const cbtcUnlocked = holdings.filter(
     (h) =>
       h.payload.instrumentId.id === NETWORK.instrumentId.id &&

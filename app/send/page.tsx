@@ -77,7 +77,7 @@ export default function SendPage() {
 
   return (
     <div className="mx-auto max-w-lg space-y-6">
-      <h1 className="text-2xl font-semibold">Send cBTC</h1>
+      <h1 className="text-2xl font-semibold">Send CBTC</h1>
 
       <Card>
         <CardHeader>
@@ -138,7 +138,7 @@ export default function SendPage() {
                 : "text-xs text-muted-foreground"
             }
           >
-            Remaining after send: {remainingDisplay} cBTC
+            Remaining after send: {remainingDisplay} CBTC
           </div>
         </div>
       </div>

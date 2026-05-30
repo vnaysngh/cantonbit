@@ -1,24 +1,73 @@
 "use client";
 
+import { cn } from "@/lib/utils";
+
 /**
- * Oranj logomark — a single orange with a small green leaf nub on top.
+ * Oranj logomark — a broken ring with a currency-style vertical stem inside.
  *
- * Designed to function as the literal letter "O" in the wordmark
- * "Oranj" — paired with the text "ranj" it reads as the full name.
+ * The arc is an open circle with a gap at the bottom-right, and two thin
+ * horizontal crossbars on the centred stem — abstractly financial, not a
+ * literal Bitcoin symbol. Inherits `currentColor` so it works on both
+ * light and dark backgrounds automatically.
  *
- * Scales cleanly from 16px favicon to hero size.
+ * Pairs with the "Oranj" wordmark in TopNav. Scales cleanly from 16px up.
  */
-export function OranjLogo({ className }: { className?: string }) {
+export function OranjLogo({
+  className,
+  size = 28,
+}: {
+  className?: string;
+  size?: number;
+}) {
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 80 80"
+      viewBox="0 0 32 32"
       fill="none"
-      aria-label="Oranj"
-      className={className}
+      width={size}
+      height={size}
+      aria-hidden="true"
+      className={cn("shrink-0", className)}
     >
-      <circle cx="40" cy="42" r="30" fill="#F97316" />
-      <path d="M 44 12 Q 52 6 50 16 Q 46 17 44 12 Z" fill="#10B981" />
+      {/*
+        Broken ring: strokeDasharray creates an arc that runs ~290° with a
+        gap at the bottom-right. strokeLinecap="round" softens both ends.
+        r=10 → circumference ≈ 62.8. We want ~53 px arc, 10 px gap.
+      */}
+      <circle
+        cx="16"
+        cy="16"
+        r="10"
+        stroke="currentColor"
+        strokeWidth="2.8"
+        strokeLinecap="round"
+        strokeDasharray="53 10"
+        strokeDashoffset="-3"
+      />
+      {/* Vertical stem — centred inside the ring */}
+      <line
+        x1="16" y1="9.5"
+        x2="16" y2="22.5"
+        stroke="currentColor"
+        strokeWidth="2.4"
+        strokeLinecap="round"
+      />
+      {/* Upper crossbar */}
+      <line
+        x1="12.5" y1="13.5"
+        x2="19.5" y2="13.5"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+      {/* Lower crossbar */}
+      <line
+        x1="12.5" y1="18.5"
+        x2="19.5" y2="18.5"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
     </svg>
   );
 }

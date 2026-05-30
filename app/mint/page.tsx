@@ -74,7 +74,7 @@ export default function MintPage() {
 
         existingAccountRef.current = { depositAccountCid: existing.contractId, address };
         // Baseline = the USER's current balance. We poll the user party and flip
-        // to "minted" when cBTC lands there (delivered by the server-side cron).
+        // to "minted" when CBTC lands there (delivered by the server-side cron).
         const baseline = await snapshotHoldingBalance(partyId);
         baselineRef.current = baseline;
         setStage({ kind: "ready", depositAccountCid: existing.contractId, address });
@@ -123,14 +123,14 @@ export default function MintPage() {
   // The frontend does NOT trigger the warpx→user transfer. That is the server's
   // job: the platform-agnostic cron (scripts/process-mints.sh) calls
   // /api/mint/process-transfers on a schedule, and it is the SOLE writer that
-  // moves cBTC. Having the frontend also trigger it would create two writers
+  // moves CBTC. Having the frontend also trigger it would create two writers
   // racing for the same work — so the frontend only OBSERVES.
   //
   // Flow:
-  //   1. User sends BTC → BitSafe mints cBTC into warpx (~60 min, 6 confirms)
+  //   1. User sends BTC → BitSafe mints CBTC into warpx (~60 min, 6 confirms)
   //   2. The server cron detects it and delivers warpx → user party
   //   3. Here we poll the USER party balance; when it rises above the baseline,
-  //      the cBTC has landed in the user's wallet → show "minted".
+  //      the CBTC has landed in the user's wallet → show "minted".
   useEffect(() => {
     if (stage.kind !== "ready") return;
     if (!partyId) return;
@@ -173,7 +173,7 @@ export default function MintPage() {
 
   return (
     <div className="mx-auto max-w-lg space-y-8 py-4">
-      <h1 className="text-2xl font-semibold">Mint cBTC</h1>
+      <h1 className="text-2xl font-semibold">Mint CBTC</h1>
 
       {stage.kind === "recovering" && (
         <Card>
@@ -189,7 +189,7 @@ export default function MintPage() {
             Generate a Bitcoin deposit address. Send at least{" "}
             <span className="font-medium text-foreground">0.001 BTC</span>{" "}
             (minimum). After 6 Bitcoin confirmations (~60 min) and attestor
-            verification (~60–120 sec), cBTC will appear in your balance.
+            verification (~60–120 sec), CBTC will appear in your balance.
           </p>
           <Button
             onClick={() => start().catch(console.error)}
@@ -224,7 +224,7 @@ export default function MintPage() {
           </div>
           <AddressQR
             value={stage.address}
-            label="cBTC appears after 6 Bitcoin confirmations (~60 min) plus attestor processing (~60–120 sec)."
+            label="CBTC appears after 6 Bitcoin confirmations (~60 min) plus attestor processing (~60–120 sec)."
           />
         </div>
       )}
@@ -232,18 +232,18 @@ export default function MintPage() {
       {stage.kind === "minted" && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-green-600">cBTC received!</CardTitle>
+            <CardTitle className="text-green-600">CBTC received!</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
             <p className="text-sm text-muted-foreground">
               <span className="font-medium text-foreground">
-                {stage.amount} cBTC
+                {stage.amount} CBTC
               </span>{" "}
               has been minted to your party.
             </p>
             <BalanceBadge amount={total} size="lg" />
             <Button onClick={reset} className="w-full">
-              Mint more cBTC
+              Mint more CBTC
             </Button>
           </CardContent>
         </Card>

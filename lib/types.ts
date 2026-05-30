@@ -19,7 +19,7 @@ export interface InstrumentId {
 export interface HoldingPayload {
   owner: string;
   instrumentId: InstrumentId;
-  /** Decimal amount as a string. cBTC is denominated in BTC units. */
+  /** Decimal amount as a string. CBTC is denominated in BTC units. */
   amount: string;
   /** Optional lock metadata if the holding is locked. */
   lock?: Record<string, unknown> | null;
@@ -116,8 +116,8 @@ export type ActivityKind = "sent" | "received" | "minted" | "redeemed";
 /**
  * Display status for an activity row.
  *   complete      — fully settled (mint landed, send/receive done, BTC sent).
- *   broadcasting  — redeem: cBTC burned, attestor broadcasting BTC.
- *   pending       — redeem: cBTC burned, attestor hasn't picked it up yet.
+ *   broadcasting  — redeem: CBTC burned, attestor broadcasting BTC.
+ *   pending       — redeem: CBTC burned, attestor hasn't picked it up yet.
  *   stalled       — redeem: btcTxId assigned but not on-chain past threshold.
  *   failed        — terminal failure.
  */
@@ -144,9 +144,13 @@ export interface ActivityRow {
   btcTxId?: string | null;
   /** For redeems: the DB redeem row id, used to link to the detail page. */
   redeemId?: string;
+  /** For mints: the id (delivery updateId or pending deposit account cid), used to link to the detail page. */
+  mintId?: string;
+  /** For mints: the BTC deposit address. */
+  bitcoinAddress?: string | null;
 }
 
-/* ---------- cBTC ledger-side shapes ---------- */
+/* ---------- CBTC ledger-side shapes ---------- */
 
 /**
  * On-ledger CBTCDepositAccount contract — the user's bridge-side container

@@ -3,8 +3,9 @@ import { Fraunces, Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 
 import { WalletProvider } from "@/hooks/useWallet";
+import { AppShell } from "@/components/AppShell";
+import { QueryProvider } from "@/components/QueryProvider";
 import { ThemeProvider } from "@/components/ThemeProvider";
-import { TopNav } from "@/components/TopNav";
 
 // Body + UI. Inter ships excellent tabular numerals and is the de-facto
 // premium-fintech sans (Stripe, Linear, Vercel, GitHub).
@@ -34,7 +35,7 @@ const jetBrainsMono = JetBrains_Mono({
 
 export const metadata: Metadata = {
   title: "Oranj",
-  description: "Mint, hold, and transfer cBTC on Canton Network."
+  description: "Mint, hold, and transfer CBTC on Canton Network."
 };
 
 export default function RootLayout({
@@ -57,12 +58,11 @@ export default function RootLayout({
           enableSystem={false}
           disableTransitionOnChange
         >
-          <WalletProvider>
-            <TopNav />
-            <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-8">
-              {children}
-            </main>
-          </WalletProvider>
+          <QueryProvider>
+            <WalletProvider>
+              <AppShell>{children}</AppShell>
+            </WalletProvider>
+          </QueryProvider>
         </ThemeProvider>
       </body>
     </html>

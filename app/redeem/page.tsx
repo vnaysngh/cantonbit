@@ -57,7 +57,7 @@ function btcExplorerTxUrl(txId: string): string | null {
 
 /**
  * Live progress of a submitted redeem, tracked on the success screen.
- *   burned        — cBTC destroyed on Canton; attestor hasn't acted yet.
+ *   burned        — CBTC destroyed on Canton; attestor hasn't acted yet.
  *   broadcasting  — attestor created the withdraw request + assigned a btcTxId.
  *   sent          — that btcTxId is now visible on the Bitcoin chain.
  *   stalled       — a btcTxId was assigned but never appeared on-chain (attestor
@@ -256,7 +256,7 @@ export default function RedeemPage() {
 
   return (
     <div className="mx-auto max-w-lg space-y-6">
-      <h1 className="text-2xl font-semibold">Redeem cBTC</h1>
+      <h1 className="text-2xl font-semibold">Redeem CBTC</h1>
 
       <Card>
         <CardHeader>
@@ -288,7 +288,7 @@ export default function RedeemPage() {
               <Input
                 id="amount"
                 inputMode="decimal"
-                placeholder="0.00100000"
+                placeholder="0.00"
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
                 className="font-mono"
@@ -305,7 +305,7 @@ export default function RedeemPage() {
               )}
               {!belowMin && !overdraft && amount !== "" && (
                 <p className="text-xs text-muted-foreground">
-                  Remaining after burn: {remainingDisplay} cBTC
+                  Remaining after burn: {remainingDisplay} CBTC
                 </p>
               )}
             </div>
@@ -314,7 +314,7 @@ export default function RedeemPage() {
               <Label htmlFor="btc-address">Bitcoin destination address</Label>
               <Input
                 id="btc-address"
-                placeholder="bcrt1… (devnet) · tb1… (testnet) · bc1… (mainnet)"
+                placeholder="bc1q…"
                 value={btcAddress}
                 onChange={(e) => setBtcAddress(e.target.value)}
                 className="font-mono text-sm"
@@ -347,7 +347,7 @@ export default function RedeemPage() {
               "Creating your withdraw account on Canton…"}
             {stage.kind === "burning" && (
               <>
-                Burning {amount} cBTC…
+                Burning {amount} CBTC…
                 <div className="mt-2 text-xs">
                   Using {stage.holdingsUsed.length} holding
                   {stage.holdingsUsed.length === 1 ? "" : "s"}.
@@ -377,8 +377,8 @@ export default function RedeemPage() {
             <ol className="space-y-3">
               <RedeemStep
                 done
-                title={`Burned ${formatBtc(stage.burnedAmount)} cBTC`}
-                detail="Your cBTC was destroyed on Canton."
+                title={`Burned ${formatBtc(stage.burnedAmount)} CBTC`}
+                detail="Your CBTC was destroyed on Canton."
               />
               <RedeemStep
                 done={
@@ -451,7 +451,7 @@ export default function RedeemPage() {
             {stage.progress === "stalled" && (
               <p className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-300">
                 The bridge assigned a Bitcoin transaction but it hasn&apos;t been
-                broadcast yet. Your cBTC is burned and the redemption is recorded
+                broadcast yet. Your CBTC is burned and the redemption is recorded
                 on Canton — this is a delay on the bridge&apos;s side. If it
                 doesn&apos;t clear soon, contact{" "}
                 <a href="mailto:support@bitsafe.finance" className="underline">

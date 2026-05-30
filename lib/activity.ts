@@ -5,7 +5,7 @@
  * Why server-side: the m2m JWT can read as any cbtc-user party on this
  * validator, and we don't want to expose the JWT to the browser.
  *
- * Why scan vs. index: cBTC volume is low enough that scanning the last
+ * Why scan vs. index: CBTC volume is low enough that scanning the last
  * 24h of updates on demand is fine. If the user has thousands of mints
  * we'll need to add Supabase-backed indexing — but until then this avoids
  * the complexity of an indexer.
@@ -16,6 +16,10 @@ import "server-only";
 import { getLedgerJwt } from "./auth";
 import { NETWORK } from "./constants";
 import { formatSatoshis } from "./format";
+import {
+  getMintHistory,
+  type MintHistoryStatus,
+} from "./mint-history";
 import {
   getRedeemHistory,
   type RedeemHistoryStatus,
@@ -274,19 +278,36 @@ export async function getActivityForParty(
   const ledgerEnd = await fetchLedgerEnd(jwt);
   const fromOffset = Math.max(0, ledgerEnd - ACTIVITY_OFFSET_WINDOW);
 
-  const txns = await fetchUpdates(jwt, partyId, fromOffset, ledgerEnd);
+  // PERF: the 3 ledger scans (generic classifier + redeem history + mint
+  // history) all hit /v2/updates with the same party filter at roughly the
+  // same offset window. Running them in parallel cuts the wall-clock cost
+  // from ~3x a single scan down to ~1x the slowest scan.
+  console.log(`${TAG} fetching activity + redeem + mint history in parallel`);
+  const [txnsResult, redeemsResult, mintsResult] = await Promise.allSettled([
+    fetchUpdates(jwt, partyId, fromOffset, ledgerEnd),
+    getRedeemHistory(partyId),
+    getMintHistory(partyId),
+  ]);
+  const txns =
+    txnsResult.status === "fulfilled" ? txnsResult.value : [];
+  if (txnsResult.status === "rejected") {
+    console.warn(`${TAG} ledger updates fetch failed:`, txnsResult.reason);
+  }
   console.log(`${TAG} fetched ${txns.length} transactions in window`);
 
-  // Reconstruct redeems from the ledger first so we know which transaction
-  // updateIds are burns. A burn transaction also archives a holding, so the
-  // generic classifier can emit a separate (outbound) row for the SAME
-  // updateId — which would collide with the redeem row's id (React duplicate
-  // key). We dedupe by excluding any ledger-scan row whose id is a burn.
+  // Reconstruct redeems AND mints from the ledger first so we know which
+  // transaction updateIds are burns / mint-accepts. These transactions also
+  // touch holdings, so the generic classifier can emit a separate (outbound or
+  // inbound) row for the SAME updateId — which collides with the redeem/mint
+  // row's id (React duplicate key). We dedupe by excluding any ledger-scan
+  // row whose id matches one of those authoritative rows.
   const redeemRows: ActivityRow[] = [];
+  const mintRows: ActivityRow[] = [];
   const burnUpdateIds = new Set<string>();
-  try {
-    const redeems = await getRedeemHistory(partyId);
-    for (const r of redeems) {
+  const mintDeliveryUpdateIds = new Set<string>();
+
+  if (redeemsResult.status === "fulfilled") {
+    for (const r of redeemsResult.value) {
       burnUpdateIds.add(r.id);
       redeemRows.push({
         id: r.id,
@@ -300,8 +321,33 @@ export async function getActivityForParty(
         redeemId: r.id,
       });
     }
-  } catch (e) {
-    console.warn(`${TAG} redeem history unavailable:`, e);
+  } else {
+    console.warn(`${TAG} redeem history unavailable:`, redeemsResult.reason);
+  }
+
+  if (mintsResult.status === "fulfilled") {
+    const mints = mintsResult.value;
+    for (const m of mints) {
+      if (m.deliveryUpdateId) mintDeliveryUpdateIds.add(m.deliveryUpdateId);
+      // Use the mint's delivery timestamp as the primary; for pending, use the
+      // deposit-account creation time so it sorts in correctly.
+      const timestamp = m.deliveredAt ?? m.depositAccountCreatedAt ?? "";
+      mintRows.push({
+        id: m.id,
+        kind: "minted",
+        // Pending mints don't have an on-ledger amount yet; show "0" so the
+        // row still formats. The detail page distinguishes pending properly.
+        amount: m.amount ?? "0",
+        counterparty: m.bitcoinAddress ?? "Bitcoin deposit",
+        timestamp,
+        status: mintStatusToActivity(m.status),
+        txid: m.deliveryUpdateId ?? m.depositAccountContractId ?? m.id,
+        mintId: m.id,
+        bitcoinAddress: m.bitcoinAddress,
+      });
+    }
+  } else {
+    console.warn(`${TAG} mint history unavailable:`, mintsResult.reason);
   }
 
   const rows: ActivityRow[] = [];
@@ -309,21 +355,26 @@ export async function getActivityForParty(
   for (const txn of txns) {
     const row = classifyTransaction(txn, partyId);
     if (!row) continue;
-    // Drop ledger-derived redeem rows (handled authoritatively below), and any
-    // row whose updateId is actually a burn (the burn's holding-archive can
-    // look like an outbound row). Also guard against duplicate updateIds.
-    if (row.kind === "redeemed") continue;
+    // Drop ledger-derived redeem/mint rows (we handle those authoritatively
+    // below). Also guard against any leftover updateId collisions and dupes.
+    if (row.kind === "redeemed" || row.kind === "minted") continue;
     if (burnUpdateIds.has(row.id)) continue;
+    if (mintDeliveryUpdateIds.has(row.id)) continue;
     if (seen.has(row.id)) continue;
     seen.add(row.id);
     rows.push(row);
   }
 
-  // Append the authoritative redeem rows (ids guaranteed distinct from above).
+  // Append the authoritative redeem + mint rows (ids guaranteed distinct).
   for (const r of redeemRows) {
     if (seen.has(r.id)) continue;
     seen.add(r.id);
     rows.push(r);
+  }
+  for (const m of mintRows) {
+    if (seen.has(m.id)) continue;
+    seen.add(m.id);
+    rows.push(m);
   }
 
   // Newest first, cap to limit.
@@ -341,6 +392,17 @@ function redeemStatusToActivity(s: RedeemHistoryStatus): ActivityStatus {
     case "stalled":
       return "stalled";
     case "burned":
+    default:
+      return "pending";
+  }
+}
+
+/** Map the mint lifecycle to the activity display status. */
+function mintStatusToActivity(s: MintHistoryStatus): ActivityStatus {
+  switch (s) {
+    case "minted":
+      return "complete";
+    case "pending":
     default:
       return "pending";
   }

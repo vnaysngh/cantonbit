@@ -74,8 +74,13 @@ export function ActivityList({
         const Icon = ICONS[row.kind];
         const isInbound = row.kind === "received" || row.kind === "minted";
         const statusMeta = STATUS_META[row.status];
-        // Redeems have a detail page; clicking the row opens the full breakdown.
-        const href = row.redeemId ? `/activity/${row.redeemId}` : null;
+        // Redeems and mints both have a detail page; clicking the row opens
+        // the full breakdown.
+        const href = row.redeemId
+          ? `/activity/${row.redeemId}`
+          : row.mintId
+            ? `/activity/${row.mintId}`
+            : null;
 
         const inner = (
           <>

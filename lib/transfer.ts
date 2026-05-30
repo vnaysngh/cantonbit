@@ -1,5 +1,5 @@
 /**
- * cBTC transfer flow — server-side TransferFactory / TransferInstruction helpers.
+ * CBTC transfer flow — server-side TransferFactory / TransferInstruction helpers.
  *
  * Two phases:
  *   1. Sender creates a TransferInstruction (the offer) via TransferFactory_Transfer
@@ -84,7 +84,7 @@ function selectHoldings(holdings: Holding[], amountBtc: string): Holding[] {
   }
   if (acc < target) {
     throw new Error(
-      `Insufficient balance: have ${formatSatoshis(acc)} cBTC, need ${amountBtc} cBTC`,
+      `Insufficient balance: have ${formatSatoshis(acc)} CBTC, need ${amountBtc} CBTC`,
     );
   }
   return picked;

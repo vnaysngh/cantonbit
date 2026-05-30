@@ -32,7 +32,7 @@ export interface NetworkConfig {
   /**
    * WarpX-hosted party ID used as actAs for mint/burn operations.
    * This party lives directly on the WarpX node (not cantonloop.com),
-   * so the m2m JWT has authority over it and cBTC DARs are already vetted.
+   * so the m2m JWT has authority over it and CBTC DARs are already vetted.
    */
   warpxPartyId: string;
   /**

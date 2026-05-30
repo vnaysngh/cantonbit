@@ -64,6 +64,9 @@ interface RequestEvent {
   btcTxId: string | null;
   destination: string | null;
   offset: number;
+  /** The CBTCWithdrawRequest contractId created in this same tx — lets us
+   *  cheaply tell if it was later archived (= CompleteWithdrawal ran = BTC sent). */
+  requestCid: string | null;
 }
 
 /**
@@ -73,13 +76,12 @@ interface RequestEvent {
 export async function getRedeemHistory(
   partyId: string,
 ): Promise<RedeemHistoryItem[]> {
-  const { burns, requests, completeCount } = await scanTree(partyId);
-  void completeCount;
+  const { burns, requests, completedRequestCids } = await scanTree(partyId);
 
   // Correlate: for each burn (oldest first), claim the earliest still-unused
   // request with the same amount that occurred at/after the burn.
   const usedRequest = new Set<number>(); // request index
-  const items: RedeemHistoryItem[] = [];
+  const items: Array<RedeemHistoryItem & { _requestCid: string | null }> = [];
 
   const burnsAsc = [...burns].sort((a, b) => a.offset - b.offset);
   const reqAsc = [...requests].sort((a, b) => a.offset - b.offset);
@@ -109,32 +111,53 @@ export async function getRedeemHistory(
       requestAt: matched?.at ?? null,
       completedAt: null,
       btcTxId: matched?.btcTxId ?? null,
-      // Provisional status; refined by on-chain check below.
+      // Provisional; refined below using on-ledger archive (fast) or on-chain
+      // check (slow, only when archive evidence is missing).
       status: matched ? "broadcasting" : "burned",
+      _requestCid: matched?.requestCid ?? null,
     });
   }
 
-  // Refine status with on-chain truth for any item that has a btcTxId.
-  await Promise.all(
-    items.map(async (item) => {
-      if (!item.btcTxId) return;
-      const chain = await bitcoinTxOnChain(item.btcTxId);
-      if (chain.found) {
-        item.status = "sent";
-        item.completedAt = item.requestAt; // best-effort; on-chain confirms it
-        return;
-      }
-      // Assigned but not on-chain → broadcasting, or stalled past threshold.
-      const since = item.requestAt
-        ? new Date(item.requestAt).getTime()
-        : Date.now();
-      item.status = Date.now() - since > STALL_AFTER_MS ? "stalled" : "broadcasting";
-    }),
+  // Status refinement:
+  // 1. ARCHIVE PATH (fast): if the request's contractId is in
+  //    completedRequestCids, CompleteWithdrawal ran on Canton — that's the
+  //    canonical "BTC was sent" signal. No mempool round-trip needed.
+  // 2. CHAIN PATH (slow, mempool.space): only for requests that have a btcTxId
+  //    but no archive (still in flight). This is what tells "broadcasting"
+  //    apart from "stalled".
+  const chainProbes: Array<Promise<void>> = [];
+  for (const item of items) {
+    if (item._requestCid && completedRequestCids.has(item._requestCid)) {
+      item.status = "sent";
+      item.completedAt = item.requestAt; // best-effort; on-chain timestamp not needed
+      continue;
+    }
+    if (!item.btcTxId) continue; // no request yet — nothing to probe
+    chainProbes.push(
+      bitcoinTxOnChain(item.btcTxId).then((chain) => {
+        if (chain.found) {
+          item.status = "sent";
+          item.completedAt = item.requestAt;
+          return;
+        }
+        const since = item.requestAt
+          ? new Date(item.requestAt).getTime()
+          : Date.now();
+        item.status =
+          Date.now() - since > STALL_AFTER_MS ? "stalled" : "broadcasting";
+      }),
+    );
+  }
+  await Promise.all(chainProbes);
+
+  // Strip the internal _requestCid before returning.
+  const out: RedeemHistoryItem[] = items.map(
+    ({ _requestCid, ...rest }) => (void _requestCid, rest),
   );
 
   // Newest first.
-  items.sort((a, b) => (a.burnAt < b.burnAt ? 1 : -1));
-  return items;
+  out.sort((a, b) => (a.burnAt < b.burnAt ? 1 : -1));
+  return out;
 }
 
 /** Find a single redeem by its burn updateId (for the detail page). */
@@ -150,7 +173,12 @@ export async function getRedeemById(
 async function scanTree(partyId: string): Promise<{
   burns: BurnEvent[];
   requests: RequestEvent[];
-  completeCount: number;
+  /** Set of CBTCWithdrawRequest contractIds that have been archived (via
+   *  CompleteWithdrawal). Membership is the canonical "BTC was sent" signal —
+   *  saves a mempool.space round-trip per completed redeem. */
+  completedRequestCids: Set<string>;
+  /** Map of request offset → completion timestamp (best-effort, for UI). */
+  completedAtByOffset: Map<number, string>;
 }> {
   const run = async (token: string) => {
     const endRes = await fetch(`${NETWORK.ledgerHost}/v2/state/ledger-end`, {
@@ -214,7 +242,12 @@ async function scanTree(partyId: string): Promise<{
 
   const burns: BurnEvent[] = [];
   const requests: RequestEvent[] = [];
-  let completeCount = 0;
+  const completedRequestCids = new Set<string>();
+  const completedAtByOffset = new Map<number, string>();
+  // Side table: the CreatedTreeEvent for the CBTCWithdrawRequest in the same
+  // tx as the CreateWithdrawRequest exercise — gives us the request contractId
+  // so we can later check whether it was archived (= sent).
+  // Captured during the same loop below.
 
   for (const u of result.arr ?? []) {
     const tx = (
@@ -222,6 +255,13 @@ async function scanTree(partyId: string): Promise<{
     ).update?.TransactionTree?.value;
     if (!tx) continue;
     const events = tx.eventsById ? Object.values(tx.eventsById) : [];
+
+    // First pass: identify the choice exercises in this tx.
+    let createReqAt: string | null = null;
+    let createReqOffset: number | null = null;
+    let createReqArg: Record<string, unknown> | null = null;
+    let archivedReqCid: string | null = null;
+
     for (const ev of events) {
       const ex = (ev as { ExercisedTreeEvent?: { value?: ExercisedTree } })
         .ExercisedTreeEvent?.value;
@@ -236,22 +276,52 @@ async function scanTree(partyId: string): Promise<{
           offset: tx.offset,
         });
       } else if (ex.choice === "CBTCWithdrawAccount_CreateWithdrawRequest") {
-        requests.push({
-          at: tx.effectiveAt,
-          amount: (arg.amount as string | undefined) ?? null,
-          btcTxId: (arg.btcTxId as string | undefined) ?? null,
-          destination: (arg.destinationBtcAddress as string | undefined) ?? null,
-          offset: tx.offset,
-        });
+        createReqAt = tx.effectiveAt;
+        createReqOffset = tx.offset;
+        createReqArg = arg;
       } else if (ex.choice === "CBTCWithdrawRequest_CompleteWithdrawal") {
-        completeCount += 1;
+        // ex.contractId is the CBTCWithdrawRequest being archived.
+        archivedReqCid = ex.contractId ?? null;
       }
+    }
+
+    // Second pass for this same tx: capture the new CBTCWithdrawRequest's
+    // contractId from CreatedTreeEvent so we can index it.
+    if (createReqAt !== null && createReqOffset !== null && createReqArg) {
+      let requestCid: string | null = null;
+      for (const ev of events) {
+        const cr = (ev as { CreatedTreeEvent?: { value?: CreatedTree } })
+          .CreatedTreeEvent?.value;
+        if (
+          cr?.templateId?.includes(
+            "CBTC.WithdrawRequest:CBTCWithdrawRequest",
+          ) &&
+          cr.contractId
+        ) {
+          requestCid = cr.contractId;
+          break;
+        }
+      }
+      requests.push({
+        at: createReqAt,
+        amount: (createReqArg.amount as string | undefined) ?? null,
+        btcTxId: (createReqArg.btcTxId as string | undefined) ?? null,
+        destination:
+          (createReqArg.destinationBtcAddress as string | undefined) ?? null,
+        offset: createReqOffset,
+        requestCid,
+      });
+    }
+
+    if (archivedReqCid) {
+      completedRequestCids.add(archivedReqCid);
+      completedAtByOffset.set(tx.offset, tx.effectiveAt);
     }
   }
 
-  // The CreateWithdrawRequest choiceArgument only carries btcTxId — not amount
-  // or destination. Backfill those from the request's created CBTCWithdrawRequest
-  // node in the same transaction (it has registrar/owner/amount/btcTxId).
+  // The CreateWithdrawRequest choiceArgument only carries btcTxId — not
+  // amount/destination. Backfill those from the new CBTCWithdrawRequest's
+  // createArgument (it has registrar/owner/amount/btcTxId/destinationBtcAddress).
   for (const u of result.arr ?? []) {
     const tx = (
       u as { update?: { TransactionTree?: { value?: TreeTx } } }
@@ -260,11 +330,12 @@ async function scanTree(partyId: string): Promise<{
     for (const ev of tx.eventsById ? Object.values(tx.eventsById) : []) {
       const cr = (ev as { CreatedTreeEvent?: { value?: CreatedTree } })
         .CreatedTreeEvent?.value;
-      if (!cr?.templateId?.includes("CBTC.WithdrawRequest:CBTCWithdrawRequest")) {
+      if (
+        !cr?.templateId?.includes("CBTC.WithdrawRequest:CBTCWithdrawRequest")
+      ) {
         continue;
       }
       const a = cr.createArgument ?? {};
-      // Attach to the request from this same tx (match by offset).
       const r = requests.find((x) => x.offset === tx.offset);
       if (r) {
         if (r.amount == null) r.amount = (a.amount as string) ?? null;
@@ -276,7 +347,7 @@ async function scanTree(partyId: string): Promise<{
     }
   }
 
-  return { burns, requests, completeCount };
+  return { burns, requests, completedRequestCids, completedAtByOffset };
 }
 
 interface TreeTx {
@@ -287,9 +358,11 @@ interface TreeTx {
 }
 interface ExercisedTree {
   choice?: string;
+  contractId?: string;
   choiceArgument?: Record<string, unknown>;
 }
 interface CreatedTree {
+  contractId?: string;
   templateId?: string;
   createArgument?: Record<string, unknown>;
 }

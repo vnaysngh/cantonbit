@@ -1,5 +1,5 @@
 /**
- * Redeem (burn) flow — bridging cBTC back to native BTC.
+ * Redeem (burn) flow — bridging CBTC back to native BTC.
  *
  * Official reference: https://docs.bitsafe.finance/developers/cbtc-minting-and-burning
  *
@@ -30,7 +30,7 @@ export interface WithdrawAccountSummary {
 
 export interface HoldingSummary {
   contractId: string;
-  /** Decimal-string cBTC amount. */
+  /** Decimal-string CBTC amount. */
   amount: string | null;
   payload: Record<string, unknown>;
 }
@@ -105,7 +105,7 @@ export async function createWithdrawAccount(
 }
 
 /**
- * List the user's spendable cBTC holdings via the server route GET /api/canton/holdings.
+ * List the user's spendable CBTC holdings via the server route GET /api/canton/holdings.
  * Uses m2m JWT on the WarpX party — no Loop SDK needed.
  * Filters out locked holdings (in-flight transfers).
  */
@@ -129,7 +129,7 @@ export async function listSpendableHoldings(
 
   return holdings
     .filter((h) => {
-      // Keep only unlocked cBTC holdings.
+      // Keep only unlocked CBTC holdings.
       const isCbtc =
         h.payload.instrumentId.id === NETWORK.instrumentId.id &&
         h.payload.instrumentId.admin === NETWORK.instrumentId.admin;
@@ -226,7 +226,7 @@ export interface RedeemStatus {
   state: RedeemState;
   /** Bitcoin txid the attestor assigned (null until the request exists). */
   btcTxId: string | null;
-  /** cBTC amount on the request. */
+  /** CBTC amount on the request. */
   amount: string | null;
   withdrawRequestCid: string | null;
 }

@@ -21,7 +21,7 @@ export function BalanceBadge({
   amount,
   size = "md",
   className,
-  unit = "cBTC",
+  unit = "CBTC",
 }: Props) {
   return (
     <span

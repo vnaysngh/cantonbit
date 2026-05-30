@@ -111,15 +111,15 @@ export default function ReceivePage() {
   return (
     <div className="mx-auto max-w-lg space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold">Receive cBTC</h1>
+        <h1 className="text-2xl font-semibold">Receive CBTC</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Share this Canton party ID with anyone sending you cBTC.
+          Share this Canton party ID with anyone sending you CBTC.
         </p>
       </div>
 
       <AddressQR
         value={partyId}
-        label="Scan or copy the Canton party ID below to receive cBTC."
+        label="Scan or copy the Canton party ID below to receive CBTC."
         size={224}
       />
 
@@ -147,7 +147,7 @@ export default function ReceivePage() {
           <Card key={o.contractId}>
             <CardHeader className="pb-2">
               <CardTitle className="text-base font-medium">
-                {o.amountBtc} cBTC
+                {o.amountBtc} CBTC
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">

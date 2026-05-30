@@ -128,6 +128,21 @@ JWT: expires every 8 hours — auto-refresh is non-negotiable
 Party IDs: always truncate for display (first 8...last 8 chars)
 Amounts: always display in BTC units, never satoshis
 
+## Active investigations / known issues
+
+**Burn (cBTC→BTC) intermittently stalls on the BitSafe attestor side.** Some
+burns complete in 5–15 min; others stall at "request created, BTC not
+broadcast" or "no request created at all." Investigation conclusion: the user
+code is byte-identical UI vs. script (proven by snapshot diff); the variance is
+100% BitSafe's attestor.
+
+**Read `docs/burn-investigation-2026-05-29.md` BEFORE forming any new theory
+about the burn flow.** It contains the full audit trail of theories tested and
+disproven (amount, package, UI-vs-script, auth), the contract-id chain that
+links the 4-step lifecycle, the list of stuck burns, the on-disk evidence
+(snapshots), and the BitSafe escalation status (`docs/bitsafe-stuck-withdrawal.md`).
+Do NOT re-litigate the disproven theories.
+
 ## Key resources
 
 Token Standard API docs:

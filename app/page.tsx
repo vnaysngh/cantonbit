@@ -5,12 +5,10 @@ import { Coins, Flame } from "lucide-react";
 
 import { ActivityList } from "@/components/ActivityList";
 import { BalanceBadge } from "@/components/BalanceBadge";
-import { PartyIdDisplay } from "@/components/PartyIdDisplay";
 import { UTXOWarning } from "@/components/UTXOWarning";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useBalance } from "@/hooks/useBalance";
 import { useTransfers } from "@/hooks/useTransfers";
-import { useWallet } from "@/hooks/useWallet";
 
 const QUICK_ACTIONS = [
   { href: "/mint", label: "Mint", Icon: Coins },
@@ -18,7 +16,6 @@ const QUICK_ACTIONS = [
 ] as const;
 
 export default function DashboardPage() {
-  const { partyId } = useWallet();
   const {
     total,
     utxoCount,
@@ -51,16 +48,6 @@ export default function DashboardPage() {
             <div className="h-12 w-48 animate-pulse rounded bg-muted" />
           ) : (
             <BalanceBadge amount={total} size="xl" />
-          )}
-          {partyId && (
-            <div className="text-xs text-muted-foreground">
-              {utxoCount >= 0 && (
-                <>
-                  Holding {utxoCount} UTXO{utxoCount === 1 ? "" : "s"} ·{" "}
-                </>
-              )}
-              <PartyIdDisplay partyId={partyId} />
-            </div>
           )}
         </CardContent>
       </Card>
