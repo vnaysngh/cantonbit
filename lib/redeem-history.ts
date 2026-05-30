@@ -244,10 +244,31 @@ async function scanTree(partyId: string): Promise<{
   const requests: RequestEvent[] = [];
   const completedRequestCids = new Set<string>();
   const completedAtByOffset = new Map<number, string>();
-  // Side table: the CreatedTreeEvent for the CBTCWithdrawRequest in the same
-  // tx as the CreateWithdrawRequest exercise — gives us the request contractId
-  // so we can later check whether it was archived (= sent).
-  // Captured during the same loop below.
+  // Map from CBTCWithdrawAccount contractId → destinationBtcAddress.
+  // The burn choice arg no longer carries the address (it was stripped to
+  // minimal {tokens, amount}), so we recover it from the WithdrawAccount's
+  // own createArgument, matched via the exercised contractId.
+  const withdrawAccountDestination = new Map<string, string>();
+
+  // First pass: collect all CBTCWithdrawAccount created events so we can
+  // look up destinationBtcAddress by contractId when we see the burn.
+  for (const u of result.arr ?? []) {
+    const tx = (
+      u as { update?: { TransactionTree?: { value?: TreeTx } } }
+    ).update?.TransactionTree?.value;
+    if (!tx) continue;
+    for (const ev of tx.eventsById ? Object.values(tx.eventsById) : []) {
+      const cr = (ev as { CreatedTreeEvent?: { value?: CreatedTree } })
+        .CreatedTreeEvent?.value;
+      if (
+        cr?.templateId?.includes("CBTC.WithdrawAccount:CBTCWithdrawAccount") &&
+        cr.contractId
+      ) {
+        const dest = (cr.createArgument?.destinationBtcAddress as string | undefined) ?? null;
+        if (dest) withdrawAccountDestination.set(cr.contractId, dest);
+      }
+    }
+  }
 
   for (const u of result.arr ?? []) {
     const tx = (
@@ -268,11 +289,17 @@ async function scanTree(partyId: string): Promise<{
       if (!ex) continue;
       const arg = ex.choiceArgument ?? {};
       if (ex.choice === "CBTCWithdrawAccount_Withdraw") {
+        // Recover destination from the withdraw account contract (ex.contractId
+        // is the CBTCWithdrawAccount being consumed) since the choiceArgument
+        // only carries {tokens, amount}.
+        const destination =
+          (arg.destinationBtcAddress as string | undefined) ??
+          (ex.contractId ? withdrawAccountDestination.get(ex.contractId) ?? null : null);
         burns.push({
           updateId: tx.updateId,
           at: tx.effectiveAt,
           amount: (arg.amount as string | undefined) ?? "0",
-          destination: (arg.destinationBtcAddress as string | undefined) ?? null,
+          destination,
           offset: tx.offset,
         });
       } else if (ex.choice === "CBTCWithdrawAccount_CreateWithdrawRequest") {

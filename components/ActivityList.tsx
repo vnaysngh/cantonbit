@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowDownLeft, ArrowUpRight, Coins, Flame } from "lucide-react";
+import { ArrowDownLeft, ArrowUpRight, Flame, Pickaxe } from "lucide-react";
 import Link from "next/link";
 
 import { BalanceBadge } from "./BalanceBadge";
@@ -12,7 +12,7 @@ import { cn } from "@/lib/utils";
 const ICONS = {
   sent: ArrowUpRight,
   received: ArrowDownLeft,
-  minted: Coins,
+  minted: Pickaxe,
   redeemed: Flame,
 } as const;
 
@@ -72,7 +72,7 @@ export function ActivityList({
     <ul className="divide-y rounded-md border">
       {rows.map((row, idx) => {
         const Icon = ICONS[row.kind];
-        const isInbound = row.kind === "received" || row.kind === "minted";
+        const isInbound = row.kind === "received" || row.kind === "minted"; // used for amount sign
         const statusMeta = STATUS_META[row.status];
         // Redeems and mints both have a detail page; clicking the row opens
         // the full breakdown.
@@ -88,9 +88,10 @@ export function ActivityList({
               <div
                 className={cn(
                   "flex h-9 w-9 shrink-0 items-center justify-center rounded-full",
-                  isInbound
-                    ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
-                    : "bg-muted text-muted-foreground",
+                  row.kind === "minted" && "bg-blue-500/10 text-blue-400",
+                  row.kind === "received" && "bg-emerald-500/10 text-emerald-500",
+                  row.kind === "redeemed" && "bg-red-500/10 text-red-500",
+                  row.kind === "sent" && "bg-muted text-muted-foreground",
                 )}
               >
                 <Icon className="h-4 w-4" />

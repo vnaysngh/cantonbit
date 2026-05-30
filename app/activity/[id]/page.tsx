@@ -5,18 +5,20 @@ import {
   ArrowLeft,
   ArrowUpRight,
   Check,
-  Copy as CopyIcon,
+  Clock,
+  Copy as CopyIcon
 } from "lucide-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
-import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { NETWORK } from "@/lib/constants";
 import { formatBtc } from "@/lib/format";
 import type { ActivityRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
+
+/* ─── Types ─── */
 
 type RedeemStatus = "burned" | "broadcasting" | "sent" | "stalled";
 type MintStatus = "pending" | "minted";
@@ -27,9 +29,16 @@ interface RedeemDetail {
   amount: string;
   btcTxId: string | null;
   status: RedeemStatus;
+  /** burn timestamp — API returns this as both `createdAt` (legacy) and `burnAt` */
   createdAt: string;
+  /** alias: the API (RedeemHistoryItem) uses burnAt; we normalise below */
+  burnAt?: string;
   requestSeenAt: string | null;
+  /** alias: API uses requestAt */
+  requestAt?: string | null;
   btcConfirmedAt: string | null;
+  /** alias: API uses completedAt */
+  completedAt?: string | null;
 }
 
 interface MintDetail {
@@ -47,76 +56,95 @@ type ActivityDetail =
   | { kind: "redeem"; redeem: RedeemDetail }
   | { kind: "mint"; mint: MintDetail };
 
-function btcExplorerTxUrl(txId: string | null | undefined): string | null {
+/* ─── Helpers ─── */
+
+function explorerTxUrl(txId: string | null | undefined): string | null {
   if (!txId) return null;
   const id = encodeURIComponent(txId.trim());
-  switch (NETWORK.name) {
-    case "mainnet":
-      return `https://mempool.space/tx/${id}`;
-    case "testnet":
-      return `https://mempool.space/testnet/tx/${id}`;
-    default:
-      return null;
-  }
+  if (NETWORK.name === "mainnet") return `https://mempool.space/tx/${id}`;
+  if (NETWORK.name === "testnet")
+    return `https://mempool.space/testnet/tx/${id}`;
+  return null;
 }
 
-function btcExplorerAddressUrl(address: string | null | undefined): string | null {
+function explorerAddrUrl(address: string | null | undefined): string | null {
   if (!address) return null;
-  const addr = encodeURIComponent(address.trim());
-  switch (NETWORK.name) {
-    case "mainnet":
-      return `https://mempool.space/address/${addr}`;
-    case "testnet":
-      return `https://mempool.space/testnet/address/${addr}`;
-    default:
-      return null;
-  }
+  const a = encodeURIComponent(address.trim());
+  if (NETWORK.name === "mainnet") return `https://mempool.space/address/${a}`;
+  if (NETWORK.name === "testnet")
+    return `https://mempool.space/testnet/address/${a}`;
+  return null;
 }
 
-function fmtTime(iso: string | null): string {
-  if (!iso) return "—";
+function fmtFull(iso: string | null): string {
+  if (!iso) return "";
   const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, {
+    weekday: "short",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
 }
 
-const REDEEM_TITLE: Record<RedeemStatus, string> = {
-  burned: "Redemption in progress",
-  broadcasting: "Redemption in progress",
-  sent: "Bitcoin sent",
-  stalled: "Taking longer than expected",
-};
+function fmtShort(iso: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
+}
+
+/* ─── Page ─── */
 
 export default function ActivityDetailPage() {
   const { id } = useParams<{ id: string }>();
   const queryClient = useQueryClient();
 
-  // PERF: seed the detail page from the activity-feed cache, so when the user
-  // clicks a row they came from /activity the page renders an immediate
-  // skeleton with what we already know (amount, kind, status, btcTxId,
-  // bitcoinAddress) — no waiting for the full /api/activity/[id] re-scan.
-  // The real fetch still runs in the background and fills in the rest.
   const placeholder = (): ActivityDetail | undefined => {
-    // The feed query is keyed ["activity", partyId] but we don't know the
-    // party here. Find ANY cached "activity" entry containing this id.
     const cached = queryClient.getQueriesData<ActivityRow[]>({
-      queryKey: ["activity"],
+      queryKey: ["activity"]
     });
     for (const [, rows] of cached) {
       const row = rows?.find((r) => r.id === id);
       if (!row) continue;
       if (row.kind === "redeemed") {
+        // Map activity status back to RedeemStatus. "pending" = burned (submitted,
+        // waiting for bridge); "broadcasting" / "stalled" pass through unchanged.
+        const redeemStatus: RedeemStatus =
+          row.status === "complete"
+            ? "sent"
+            : row.status === "broadcasting"
+              ? "broadcasting"
+              : row.status === "stalled"
+                ? "stalled"
+                : "burned";
+        // counterparty is "Bitcoin withdrawal" when we didn't capture the BTC
+        // address from the ledger — treat that as null so the detail page doesn't
+        // show a fake address.
+        const btcAddr =
+          row.counterparty && row.counterparty !== "Bitcoin withdrawal"
+            ? row.counterparty
+            : null;
         return {
           kind: "redeem",
           redeem: {
             id: row.id,
-            destinationBtcAddress: row.counterparty ?? null,
+            destinationBtcAddress: btcAddr,
             amount: row.amount,
             btcTxId: row.btcTxId ?? null,
-            status: row.status === "complete" ? "sent" : (row.status as RedeemStatus),
+            status: redeemStatus,
             createdAt: row.timestamp,
             requestSeenAt: null,
-            btcConfirmedAt: null,
-          },
+            btcConfirmedAt: null
+          }
         };
       }
       if (row.kind === "minted") {
@@ -130,64 +158,74 @@ export default function ActivityDetailPage() {
             depositAccountContractId: null,
             deliveredAt: row.timestamp,
             deliveryUpdateId: row.id,
-            status: row.status === "complete" ? "minted" : "pending",
-          },
+            status: row.status === "complete" ? "minted" : "pending"
+          }
         };
       }
     }
     return undefined;
   };
 
-  // React Query: stale-while-revalidate. If we've fetched this id before in
-  // the session, the cached detail renders instantly while the background
-  // refetch refreshes the status (useful for pending redeems).
   const { data, error, isLoading } = useQuery({
     queryKey: ["activity-detail", id],
     enabled: !!id,
-    // Cached-row seed: instant first paint with what we already know.
     placeholderData: placeholder,
     queryFn: async (): Promise<ActivityDetail> => {
       const res = await fetch(`/api/activity/${id}`);
-      const json = (await res.json()) as
-        | { kind: "redeem"; redeem: RedeemDetail }
-        | { kind: "mint"; mint: MintDetail }
-        | { error?: string };
-      if (!res.ok || !("kind" in json)) {
+      const json = (await res.json()) as ActivityDetail | { error?: string };
+      if (!res.ok || !("kind" in json))
         throw new Error(
-          ("error" in json && json.error) || "Activity not found.",
+          ("error" in json && json.error) || "Activity not found."
         );
-      }
       return json;
-    },
+    }
   });
-  const detail = data ?? null;
+
+  // Normalise field-name aliases: the API (RedeemHistoryItem) uses burnAt /
+  // requestAt / completedAt; the page interface uses createdAt / requestSeenAt /
+  // btcConfirmedAt. Coerce here so the views always get the right names.
+  const rawDetail = data ?? null;
+  const detail: ActivityDetail | null = rawDetail
+    ? rawDetail.kind === "redeem"
+      ? {
+          kind: "redeem",
+          redeem: {
+            ...rawDetail.redeem,
+            createdAt:
+              rawDetail.redeem.createdAt ??
+              (rawDetail.redeem as unknown as { burnAt?: string }).burnAt ??
+              "",
+            requestSeenAt:
+              rawDetail.redeem.requestSeenAt ??
+              (rawDetail.redeem as unknown as { requestAt?: string | null })
+                .requestAt ??
+              null,
+            btcConfirmedAt:
+              rawDetail.redeem.btcConfirmedAt ??
+              (rawDetail.redeem as unknown as { completedAt?: string | null })
+                .completedAt ??
+              null
+          }
+        }
+      : rawDetail
+    : null;
   const errorMsg = error instanceof Error ? error.message : null;
-  // With placeholderData seeded, isLoading is true only on the very first
-  // visit (no feed cached). After that, the page renders instantly.
   const loading = isLoading && !detail;
 
   return (
-    <div className="mx-auto max-w-lg space-y-6">
+    <div className="mx-auto max-w-4xl space-y-8">
       <Link
         href="/activity"
-        className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
       >
         <ArrowLeft className="h-4 w-4" /> Back to activity
       </Link>
 
-      {/* Hide the title until we know the kind — otherwise the fallback flashes
-          the wrong word (e.g. "Redemption" briefly before resolving to "Mint"). */}
-      {detail && (
-        <h1 className="text-2xl font-semibold tracking-tight">
-          {detail.kind === "mint" ? "Mint" : "Redemption"}
-        </h1>
-      )}
-
-      {loading && <DetailSkeleton />}
+      {loading && <PageSkeleton />}
 
       {!loading && errorMsg && (
         <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
+          <CardContent className="py-16 text-center text-sm text-muted-foreground">
             {errorMsg}
           </CardContent>
         </Card>
@@ -196,75 +234,68 @@ export default function ActivityDetailPage() {
       {!loading && detail?.kind === "redeem" && (
         <RedeemView redeem={detail.redeem} />
       )}
-
       {!loading && detail?.kind === "mint" && <MintView mint={detail.mint} />}
     </div>
   );
 }
 
-/* ─────────────────────────── skeleton ─────────────────────────── */
+/* ─── Skeleton ─── */
 
-/**
- * A real card-shaped skeleton, not an empty grey box. Mirrors the layout of
- * the actual detail card so the layout shift on load is invisible.
- */
-function DetailSkeleton() {
+function PageSkeleton() {
   return (
-    <Card>
-      <CardContent className="space-y-6 py-6">
-        <div className="space-y-2">
-          <div className="h-3 w-20 animate-pulse rounded bg-muted" />
-          <div className="h-7 w-44 animate-pulse rounded bg-muted" />
-        </div>
-        <div className="grid grid-cols-2 gap-6">
-          <div className="space-y-2">
-            <div className="h-3 w-16 animate-pulse rounded bg-muted" />
-            <div className="h-5 w-24 animate-pulse rounded bg-muted" />
-          </div>
-          <div className="space-y-2">
-            <div className="h-3 w-28 animate-pulse rounded bg-muted" />
-            <div className="h-5 w-full animate-pulse rounded bg-muted" />
-          </div>
-        </div>
-        <div className="space-y-4">
-          {[0, 1, 2, 3].map((i) => (
-            <div key={i} className="flex items-start gap-3">
-              <div className="mt-0.5 h-5 w-5 shrink-0 animate-pulse rounded-full bg-muted" />
-              <div className="flex-1 space-y-1.5">
-                <div className="h-4 w-2/3 animate-pulse rounded bg-muted" />
-                <div className="h-3 w-1/2 animate-pulse rounded bg-muted" />
+    <div className="space-y-6">
+      <div className="space-y-3">
+        <div className="h-5 w-28 animate-pulse rounded-full bg-muted" />
+        <div className="h-12 w-64 animate-pulse rounded bg-muted" />
+        <div className="h-4 w-48 animate-pulse rounded bg-muted" />
+      </div>
+      <div className="grid gap-6 lg:grid-cols-[1fr_380px]">
+        <Card>
+          <CardContent className="space-y-6 py-6 px-6">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="flex gap-4">
+                <div className="h-6 w-6 shrink-0 animate-pulse rounded-full bg-muted mt-0.5" />
+                <div className="flex-1 space-y-2">
+                  <div className="h-4 w-2/3 animate-pulse rounded bg-muted" />
+                  <div className="h-3 w-1/2 animate-pulse rounded bg-muted" />
+                </div>
               </div>
-            </div>
+            ))}
+          </CardContent>
+        </Card>
+        <div className="space-y-3">
+          {[0, 1].map((i) => (
+            <Card key={i}>
+              <CardContent className="py-4 px-4 space-y-2">
+                <div className="h-3 w-20 animate-pulse rounded bg-muted" />
+                <div className="h-4 w-full animate-pulse rounded bg-muted" />
+              </CardContent>
+            </Card>
           ))}
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }
 
-/* ─────────────────────────── reusable bits ─────────────────────────── */
+/* ─── Shared sub-components ─── */
 
-/** Status badge shown above the card title. Replaces the old colored title. */
-function StatusBadge({
-  label,
-  tone,
-}: {
-  label: string;
-  tone: "success" | "info" | "warning" | "neutral";
-}) {
-  const classes = {
+type BadgeTone = "success" | "info" | "warning" | "neutral";
+
+function Badge({ label, tone }: { label: string; tone: BadgeTone }) {
+  const cls: Record<BadgeTone, string> = {
     success:
-      "bg-green-500/10 text-green-700 dark:bg-green-500/15 dark:text-green-400",
-    info: "bg-blue-500/10 text-blue-700 dark:bg-blue-500/15 dark:text-blue-400",
+      "bg-green-500/10 text-green-600 dark:text-green-400 border border-green-500/20",
+    info: "bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20",
     warning:
-      "bg-amber-500/10 text-amber-700 dark:bg-amber-500/15 dark:text-amber-400",
-    neutral: "bg-muted text-muted-foreground",
-  }[tone];
+      "bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20",
+    neutral: "bg-muted text-muted-foreground border border-border"
+  };
   return (
     <span
       className={cn(
-        "inline-flex h-6 items-center rounded-full px-2.5 text-[11px] font-medium",
-        classes,
+        "inline-flex h-6 items-center rounded-full px-3 text-[11px] font-medium tracking-wide",
+        cls[tone]
       )}
     >
       {label}
@@ -272,12 +303,30 @@ function StatusBadge({
   );
 }
 
-/** Field that shows a long identifier with a copy button + optional external link. */
-function IdentifierField({
+function DetailCard({
+  label,
+  children
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <Card>
+      <CardContent className="py-4 px-4">
+        <p className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+          {label}
+        </p>
+        {children}
+      </CardContent>
+    </Card>
+  );
+}
+
+function CopyableField({
   label,
   value,
   href,
-  hrefLabel,
+  hrefLabel
 }: {
   label: string;
   value: string;
@@ -289,190 +338,283 @@ function IdentifierField({
     try {
       await navigator.clipboard.writeText(value);
       setCopied(true);
-      setTimeout(() => setCopied(false), 1200);
+      setTimeout(() => setCopied(false), 1500);
     } catch {
       /* ignore */
     }
   };
   return (
-    <div className="space-y-2 rounded-xl border bg-muted/30 p-3">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-          {label}
-        </span>
+    <DetailCard label={label}>
+      <div className="flex items-start gap-2">
+        <p className="flex-1 break-all font-mono text-xs leading-relaxed">
+          {value}
+        </p>
         <button
           type="button"
           onClick={copy}
-          className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          aria-label="Copy"
+          className="shrink-0 inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
         >
           {copied ? (
             <>
-              <Check className="h-3.5 w-3.5" /> Copied
+              <Check className="h-3 w-3" />
+              Copied
             </>
           ) : (
             <>
-              <CopyIcon className="h-3.5 w-3.5" /> Copy
+              <CopyIcon className="h-3 w-3" />
+              Copy
             </>
           )}
         </button>
       </div>
-      <p className="break-all font-mono text-[11px] leading-relaxed">{value}</p>
       {href && (
         <a
           href={href}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 text-xs font-medium text-foreground/80 hover:text-foreground"
+          className="mt-2 inline-flex items-center gap-1 text-[11px] font-medium text-blue-500 hover:underline"
         >
-          {hrefLabel ?? "Open"} <ArrowUpRight className="h-3.5 w-3.5" />
+          {hrefLabel ?? "Open"} <ArrowUpRight className="h-3 w-3" />
         </a>
       )}
-    </div>
+    </DetailCard>
   );
 }
 
-/* ─────────────────────────── REDEEM VIEW ─────────────────────────── */
+/* ─── Timeline step ─── */
+
+function Step({
+  done = false,
+  active = false,
+  error = false,
+  last = false,
+  title,
+  detail,
+  time
+}: {
+  done?: boolean;
+  active?: boolean;
+  error?: boolean;
+  last?: boolean;
+  title: string;
+  detail: string;
+  time?: string;
+}) {
+  const dot = error
+    ? "border border-amber-500/50 text-amber-500"
+    : done
+      ? "border border-green-500/40 bg-green-500/10 text-green-500"
+      : active
+        ? "border border-foreground/40 text-foreground"
+        : "border border-border/40 text-muted-foreground/20";
+
+  return (
+    <li className="flex gap-4">
+      <div className="flex flex-col items-center">
+        <span
+          className={cn(
+            "flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px]",
+            dot
+          )}
+        >
+          {done ? (
+            <Check className="h-3 w-3" strokeWidth={2} />
+          ) : error ? (
+            "!"
+          ) : active ? (
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
+          ) : null}
+        </span>
+        {!last && <div className="mt-1 w-px flex-1 bg-border min-h-[28px]" />}
+      </div>
+      <div className={cn("flex-1 pb-6", last && "pb-0")}>
+        <div className="flex items-start justify-between gap-6">
+          <div className="space-y-0.5">
+            <p
+              className={cn(
+                "text-sm font-semibold leading-snug",
+                !(done || active || error) && "text-muted-foreground/40"
+              )}
+            >
+              {title}
+            </p>
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              {detail}
+            </p>
+          </div>
+          {time && (
+            <p className="shrink-0 text-[11px] tabular-nums text-muted-foreground whitespace-nowrap">
+              {time}
+            </p>
+          )}
+        </div>
+      </div>
+    </li>
+  );
+}
+
+/* ─── REDEEM VIEW ─── */
 
 function RedeemView({ redeem }: { redeem: RedeemDetail }) {
-  const tone =
+  const tone: BadgeTone =
     redeem.status === "sent"
       ? "success"
       : redeem.status === "stalled"
         ? "warning"
         : "info";
+  const statusLabel = {
+    burned: "Redemption in progress",
+    broadcasting: "Broadcasting to Bitcoin",
+    sent: "Bitcoin sent",
+    stalled: "Stalled — bridge delay"
+  }[redeem.status];
+
+  // Always show the details column — even pending redeems have a destination address and initiated time.
+  const hasDetails = true;
 
   return (
-    <Card>
-      <CardContent className="space-y-6 py-6">
-        {/* Header: status pill + headline amount. */}
-        <div className="space-y-3">
-          <StatusBadge label={REDEEM_TITLE[redeem.status]} tone={tone} />
-          <div className="flex items-baseline gap-2">
-            <span className="text-4xl font-semibold tracking-tight tabular-nums">
-              {formatBtc(redeem.amount)}
-            </span>
-            <span className="text-sm font-medium text-muted-foreground">
-              CBTC
-            </span>
-          </div>
-          {redeem.destinationBtcAddress && (
-            <div className="text-xs text-muted-foreground">
-              to{" "}
-              <span className="break-all font-mono text-foreground/80">
-                {redeem.destinationBtcAddress}
-              </span>
-            </div>
-          )}
+    <div className="space-y-8">
+      {/* Header */}
+      <div className="space-y-2">
+        <Badge label={statusLabel} tone={tone} />
+        <div className="flex items-baseline gap-2">
+          <h1 className="text-5xl font-bold tabular-nums tracking-tight">
+            {formatBtc(redeem.amount)}
+          </h1>
+          <span className="text-2xl font-medium text-muted-foreground">
+            CBTC
+          </span>
         </div>
-
-        {/* Step timeline. */}
-        <ol className="space-y-4">
-          <Step
-            done
-            title={`Burned ${formatBtc(redeem.amount)} CBTC`}
-            detail="Destroyed on Canton."
-            time={fmtTime(redeem.createdAt)}
-          />
-          <Step
-            done={redeem.status !== "burned"}
-            active={redeem.status === "burned"}
-            title="Bridge prepared transaction"
-            detail={
-              redeem.status === "burned"
-                ? "Waiting for the bridge to pick up your redemption…"
-                : "The bridge assigned a Bitcoin transaction."
-            }
-            time={fmtTime(redeem.requestSeenAt)}
-          />
-          <Step
-            done={redeem.status === "sent"}
-            active={redeem.status === "broadcasting"}
-            error={redeem.status === "stalled"}
-            title="Bitcoin broadcast"
-            detail={
-              redeem.status === "sent"
-                ? "Confirmed on the Bitcoin network."
-                : redeem.status === "stalled"
-                  ? "The transaction hasn't appeared on-chain yet."
-                  : "Broadcasting to the Bitcoin network…"
-            }
-            time={fmtTime(redeem.btcConfirmedAt)}
-          />
-        </ol>
-
-        {redeem.btcTxId && (
-          <IdentifierField
-            label="Bitcoin transaction"
-            value={redeem.btcTxId}
-            href={btcExplorerTxUrl(redeem.btcTxId)}
-            hrefLabel="View on mempool.space"
-          />
-        )}
-
-        {(() => {
-          const url = btcExplorerAddressUrl(redeem.destinationBtcAddress);
-          return url ? (
-            <a
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground"
-            >
-              Track destination address <ArrowUpRight className="h-3.5 w-3.5" />
-            </a>
-          ) : null;
-        })()}
-
-        {redeem.status === "stalled" && (
-          <p className="rounded-xl border border-amber-300/60 bg-amber-50 px-3 py-3 text-xs leading-relaxed text-amber-900 dark:border-amber-700/40 dark:bg-amber-950/30 dark:text-amber-200">
-            The bridge assigned a Bitcoin transaction but it hasn&apos;t been
-            broadcast yet. Your CBTC is burned and the redemption is recorded on
-            Canton — this is a delay on the bridge&apos;s side. If it
-            doesn&apos;t clear soon, contact{" "}
-            <a
-              href="mailto:support@bitsafe.finance"
-              className="font-medium underline"
-            >
-              support@bitsafe.finance
-            </a>
-            .
+        {redeem.createdAt && (
+          <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
+            <Clock className="h-3.5 w-3.5 shrink-0" />{" "}
+            {fmtFull(redeem.createdAt)}
           </p>
         )}
+      </div>
 
-        <Link href="/activity" className="block">
-          <Button variant="outline" className="w-full">
-            Back to activity
-          </Button>
-        </Link>
-      </CardContent>
-    </Card>
+      {/* Body */}
+      <div
+        className={cn("grid gap-6", hasDetails && "lg:grid-cols-[1fr_380px]")}
+      >
+        {/* Timeline */}
+        <Card>
+          <CardContent className="py-6 px-6">
+            <p className="mb-6 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+              Timeline
+            </p>
+            <ol className="space-y-0">
+              <Step
+                done
+                title={`Burned ${formatBtc(redeem.amount)} CBTC`}
+                detail="Destroyed on Canton ledger."
+                time={fmtShort(redeem.createdAt)}
+                last={false}
+              />
+              <Step
+                done={redeem.status !== "burned"}
+                active={redeem.status === "burned"}
+                title="Bridge picked up redemption"
+                detail={
+                  redeem.status === "burned"
+                    ? "Waiting for the bridge to assign a Bitcoin transaction…"
+                    : "Bridge assigned a Bitcoin transaction."
+                }
+                time={fmtShort(redeem.requestSeenAt)}
+                last={false}
+              />
+              <Step
+                done={redeem.status === "sent"}
+                active={redeem.status === "broadcasting"}
+                error={redeem.status === "stalled"}
+                title="Bitcoin broadcast"
+                detail={
+                  redeem.status === "sent"
+                    ? "Confirmed on the Bitcoin network."
+                    : redeem.status === "stalled"
+                      ? "Transaction assigned but not yet on-chain."
+                      : "Broadcasting to the Bitcoin network…"
+                }
+                time={fmtShort(redeem.btcConfirmedAt)}
+                last
+              />
+            </ol>
+          </CardContent>
+        </Card>
+
+        {/* Details column */}
+        {hasDetails && (
+          <div className="space-y-3">
+            {redeem.createdAt && (
+              <DetailCard label="Initiated">
+                <p className="text-sm font-medium">
+                  {fmtFull(redeem.createdAt)}
+                </p>
+              </DetailCard>
+            )}
+            {redeem.destinationBtcAddress && (
+              <DetailCard label="Destination address">
+                <p className="break-all font-mono text-xs leading-relaxed">
+                  {redeem.destinationBtcAddress}
+                </p>
+                {(() => {
+                  const url = explorerAddrUrl(redeem.destinationBtcAddress);
+                  return url ? (
+                    <a
+                      href={url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="mt-2 inline-flex items-center gap-1 text-[11px] font-medium text-blue-500 hover:underline"
+                    >
+                      Track on mempool.space{" "}
+                      <ArrowUpRight className="h-3 w-3" />
+                    </a>
+                  ) : null;
+                })()}
+              </DetailCard>
+            )}
+            {redeem.btcTxId && (
+              <CopyableField
+                label="Bitcoin transaction ID"
+                value={redeem.btcTxId}
+                href={explorerTxUrl(redeem.btcTxId)}
+                hrefLabel="View on mempool.space"
+              />
+            )}
+            {redeem.status === "stalled" && (
+              <Card className="border-amber-400/30 bg-amber-50 dark:bg-amber-950/20">
+                <CardContent className="py-4 px-4 text-xs leading-relaxed text-amber-800 dark:text-amber-300">
+                  Your CBTC is burned and recorded on Canton. This is a delay on
+                  the bridge side. Contact{" "}
+                  <a
+                    href="mailto:support@bitsafe.finance"
+                    className="font-semibold underline"
+                  >
+                    support@bitsafe.finance
+                  </a>{" "}
+                  if it doesn&apos;t resolve.
+                </CardContent>
+              </Card>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
-/* ─────────────────────────── MINT VIEW ─────────────────────────── */
+/* ─── MINT VIEW ─── */
 
-/**
- * A summary of what mempool.space knows about the deposit address.
- * Fetched once on the detail page (not the activity feed) so we don't pay the
- * mempool round-trip per row.
- */
-interface BtcAddressInfo {
-  /** First incoming tx to the deposit address — likely the user's deposit. */
+interface BtcInfo {
   txid: string | null;
-  /** Block height the deposit tx confirmed in. Null = unconfirmed. */
   blockHeight: number | null;
-  /** Total BTC sent to the address. */
   receivedBtc: number | null;
-  /** Current Bitcoin tip height (for confirmation count). */
   tipHeight: number | null;
 }
 
-const CONFIRMATIONS_REQUIRED = 6;
+const CONFS_REQUIRED = 6;
 
-async function fetchBtcAddressInfo(
-  address: string,
-): Promise<BtcAddressInfo | null> {
+async function fetchBtcInfo(address: string): Promise<BtcInfo | null> {
   const base =
     NETWORK.name === "mainnet"
       ? "https://mempool.space/api"
@@ -480,12 +622,11 @@ async function fetchBtcAddressInfo(
         ? "https://mempool.space/testnet/api"
         : null;
   if (!base) return null;
-
   try {
     const [addrRes, tipRes, txsRes] = await Promise.all([
       fetch(`${base}/address/${encodeURIComponent(address)}`),
       fetch(`${base}/blocks/tip/height`),
-      fetch(`${base}/address/${encodeURIComponent(address)}/txs`),
+      fetch(`${base}/address/${encodeURIComponent(address)}/txs`)
     ]);
     if (!addrRes.ok || !tipRes.ok) return null;
     const addr = (await addrRes.json()) as {
@@ -496,27 +637,24 @@ async function fetchBtcAddressInfo(
     const receivedSat =
       (addr.chain_stats?.funded_txo_sum ?? 0) +
       (addr.mempool_stats?.funded_txo_sum ?? 0);
-
     let txid: string | null = null;
     let blockHeight: number | null = null;
     if (txsRes.ok) {
       const txs = (await txsRes.json()) as Array<{
         txid: string;
-        status?: { confirmed?: boolean; block_height?: number };
+        status?: { block_height?: number };
       }>;
-      // Pick the OLDEST incoming tx (the original deposit), not the most recent.
       const oldest = [...txs].reverse()[0];
       if (oldest) {
         txid = oldest.txid;
         blockHeight = oldest.status?.block_height ?? null;
       }
     }
-
     return {
       txid,
       blockHeight,
       receivedBtc: receivedSat > 0 ? receivedSat / 1e8 : null,
-      tipHeight: Number.isFinite(tipHeight) ? tipHeight : null,
+      tipHeight: Number.isFinite(tipHeight) ? tipHeight : null
     };
   } catch {
     return null;
@@ -524,20 +662,20 @@ async function fetchBtcAddressInfo(
 }
 
 function MintView({ mint }: { mint: MintDetail }) {
-  const [btc, setBtc] = useState<BtcAddressInfo | null>(null);
+  const [btc, setBtc] = useState<BtcInfo | null>(null);
   const [btcLoading, setBtcLoading] = useState(false);
 
   useEffect(() => {
     if (!mint.bitcoinAddress) return;
     let cancelled = false;
-    // Microtask defer so we don't setState synchronously in the effect body.
     void Promise.resolve().then(() => {
       if (cancelled) return;
       setBtcLoading(true);
-      void fetchBtcAddressInfo(mint.bitcoinAddress!).then((info) => {
-        if (cancelled) return;
-        setBtc(info);
-        setBtcLoading(false);
+      void fetchBtcInfo(mint.bitcoinAddress!).then((info) => {
+        if (!cancelled) {
+          setBtc(info);
+          setBtcLoading(false);
+        }
       });
     });
     return () => {
@@ -545,214 +683,189 @@ function MintView({ mint }: { mint: MintDetail }) {
     };
   }, [mint.bitcoinAddress]);
 
-  const confirmations =
+  const confs =
     btc?.blockHeight && btc?.tipHeight
       ? Math.max(0, btc.tipHeight - btc.blockHeight + 1)
       : 0;
   const btcSeen = !!btc?.txid;
-  const confirmedEnough = confirmations >= CONFIRMATIONS_REQUIRED;
+  const confirmed = confs >= CONFS_REQUIRED;
   const delivered = mint.status === "minted";
+  const isOrphan = !mint.depositAccountContractId;
 
-  const title = delivered
+  const statusLabel = delivered
     ? "CBTC received"
     : btcSeen
-      ? confirmedEnough
-        ? "Waiting for delivery to your wallet"
-        : `Confirming on Bitcoin (${confirmations}/${CONFIRMATIONS_REQUIRED})`
+      ? confirmed
+        ? "Waiting for delivery"
+        : `Confirming on Bitcoin (${confs}/${CONFS_REQUIRED})`
       : "Awaiting Bitcoin deposit";
+  const tone: BadgeTone = delivered ? "success" : btcSeen ? "info" : "neutral";
+  const timestamp = mint.deliveredAt ?? mint.depositAccountCreatedAt;
 
-  const tone = delivered ? "success" : btcSeen ? "info" : "neutral";
+  const hasDetails = !!(mint.deliveredAt || mint.bitcoinAddress || btc?.txid);
 
   return (
-    <Card>
-      <CardContent className="space-y-6 py-6">
-        {/* Header. */}
-        <div className="space-y-3">
-          <StatusBadge label={title} tone={tone} />
-          <div className="flex items-baseline gap-2">
-            <span className="text-4xl font-semibold tracking-tight tabular-nums">
-              {mint.amount ? formatBtc(mint.amount) : "—"}
-            </span>
-            <span className="text-sm font-medium text-muted-foreground">
-              CBTC
-            </span>
-          </div>
-          {mint.bitcoinAddress && (
-            <div className="text-xs text-muted-foreground">
-              from{" "}
-              <span className="break-all font-mono text-foreground/80">
-                {mint.bitcoinAddress}
-              </span>
-            </div>
-          )}
+    <div className="space-y-8">
+      {/* Header */}
+      <div className="space-y-2">
+        <Badge label={statusLabel} tone={tone} />
+        <div className="flex items-baseline gap-2">
+          <h1 className="text-5xl font-bold tabular-nums tracking-tight">
+            {mint.amount ? formatBtc(mint.amount) : "—"}
+          </h1>
+          <span className="text-2xl font-medium text-muted-foreground">
+            CBTC
+          </span>
         </div>
-
-        {/* Timeline (full or orphan). */}
-        {mint.depositAccountContractId ? (
-          <ol className="space-y-4">
-            <Step
-              done={!!mint.depositAccountCreatedAt}
-              title="Deposit account created"
-              detail="A Bitcoin deposit address was issued for you on Canton."
-              time={fmtTime(mint.depositAccountCreatedAt)}
-            />
-            <Step
-              done={btcSeen || delivered}
-              active={!btcSeen && !delivered}
-              title="Bitcoin received at deposit address"
-              detail={
-                btcLoading
-                  ? "Checking the Bitcoin chain…"
-                  : btcSeen
-                    ? btc?.receivedBtc
-                      ? `${btc.receivedBtc.toFixed(8)} BTC seen at the deposit address.`
-                      : "Deposit detected."
-                    : delivered
-                      ? "BTC was received and bridged."
-                      : "Send BTC to the deposit address above."
-              }
-              time={btc?.blockHeight ? `block ${btc.blockHeight}` : "—"}
-            />
-            <Step
-              done={confirmedEnough || delivered}
-              active={btcSeen && !confirmedEnough && !delivered}
-              title="6 confirmations on Bitcoin"
-              detail={
-                delivered
-                  ? "Confirmed."
-                  : btcSeen
-                    ? confirmedEnough
-                      ? "Confirmed. The bridge can now release CBTC."
-                      : `${confirmations} of ${CONFIRMATIONS_REQUIRED} confirmations. ~10 minutes each.`
-                    : "Will start counting once your BTC is in a block."
-              }
-              time="—"
-            />
-            <Step
-              done={delivered}
-              active={confirmedEnough && !delivered}
-              title="CBTC delivered to your wallet"
-              detail={
-                delivered
-                  ? `${mint.amount ? formatBtc(mint.amount) + " " : ""}CBTC is in your wallet.`
-                  : "Bridging onto Canton and into your wallet."
-              }
-              time={fmtTime(mint.deliveredAt)}
-            />
-          </ol>
-        ) : (
-          // Orphan: only show what we actually know.
-          <ol className="space-y-4">
-            <Step
-              done
-              title="CBTC delivered to your wallet"
-              detail={`${mint.amount ? formatBtc(mint.amount) + " " : ""}CBTC was minted to your wallet.`}
-              time={fmtTime(mint.deliveredAt)}
-            />
-          </ol>
-        )}
-
-        {!mint.depositAccountContractId && (
-          <p className="rounded-xl border bg-muted/30 px-3 py-3 text-xs leading-relaxed text-muted-foreground">
-            The original Bitcoin deposit happened outside our recent activity
-            window, so the deposit-side timeline isn&apos;t shown. The CBTC
-            mint to your wallet is the on-ledger record below.
+        {timestamp && (
+          <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
+            <Clock className="h-3.5 w-3.5 shrink-0" /> {fmtFull(timestamp)}
           </p>
         )}
+      </div>
 
-        {btc?.txid && (
-          <IdentifierField
-            label="Bitcoin deposit transaction"
-            value={btc.txid}
-            href={btcExplorerTxUrl(btc.txid)}
-            hrefLabel="View on mempool.space"
-          />
-        )}
-
-        {(() => {
-          const url = btcExplorerAddressUrl(mint.bitcoinAddress);
-          return url ? (
-            <a
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground"
-            >
-              Track the deposit address <ArrowUpRight className="h-3.5 w-3.5" />
-            </a>
-          ) : null;
-        })()}
-
-        <Link href="/activity" className="block">
-          <Button variant="outline" className="w-full">
-            Back to activity
-          </Button>
-        </Link>
-      </CardContent>
-    </Card>
-  );
-}
-
-/* ─────────────────────────── shared step UI ─────────────────────────── */
-
-function Step({
-  done = false,
-  active = false,
-  error = false,
-  title,
-  detail,
-  time,
-}: {
-  done?: boolean;
-  active?: boolean;
-  error?: boolean;
-  title: string;
-  detail: string;
-  time: string;
-}) {
-  const indicatorClass = error
-    ? "bg-amber-500 text-white"
-    : done
-      ? "bg-green-500 text-white"
-      : active
-        ? "bg-foreground text-background"
-        : "bg-muted text-muted-foreground/40 border border-border";
-
-  return (
-    <li className="flex items-start gap-3">
-      <span
-        aria-hidden
-        className={cn(
-          "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full",
-          indicatorClass,
-        )}
+      {/* Body */}
+      <div
+        className={cn("grid gap-6", hasDetails && "lg:grid-cols-[1fr_380px]")}
       >
-        {done ? (
-          <Check className="h-3 w-3" strokeWidth={3} />
-        ) : error ? (
-          <span className="text-[11px] font-bold leading-none">!</span>
-        ) : active ? (
-          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
-        ) : null}
-      </span>
-      <span className="flex-1 space-y-0.5">
-        <span className="flex items-baseline justify-between gap-2">
-          <span
-            className={cn(
-              "text-sm font-medium leading-tight",
-              !(done || active || error) && "text-muted-foreground/60",
+        {/* Timeline */}
+        <Card>
+          <CardContent className="py-6 px-6">
+            <p className="mb-6 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+              Timeline
+            </p>
+            {isOrphan ? (
+              <ol className="space-y-0">
+                <Step
+                  done
+                  title="Bitcoin received"
+                  detail={
+                    btc?.receivedBtc
+                      ? `${btc.receivedBtc.toFixed(8)} BTC deposited.`
+                      : "BTC was received."
+                  }
+                  time={
+                    btc?.blockHeight ? `block ${btc.blockHeight}` : undefined
+                  }
+                  last={false}
+                />
+                <Step
+                  done
+                  title={`${CONFS_REQUIRED} Bitcoin confirmations`}
+                  detail="Confirmed on the Bitcoin network."
+                  last={false}
+                />
+                <Step
+                  done
+                  title="CBTC delivered to your wallet"
+                  detail={`${mint.amount ? formatBtc(mint.amount) + " " : ""}CBTC minted to your wallet.`}
+                  time={fmtShort(mint.deliveredAt)}
+                  last
+                />
+              </ol>
+            ) : (
+              <ol className="space-y-0">
+                <Step
+                  done={!!mint.depositAccountCreatedAt}
+                  title="Deposit account created"
+                  detail="A Bitcoin deposit address was issued for you on Canton."
+                  time={fmtShort(mint.depositAccountCreatedAt)}
+                  last={false}
+                />
+                <Step
+                  done={btcSeen || delivered}
+                  active={!btcSeen && !delivered}
+                  title="Bitcoin received"
+                  detail={
+                    btcLoading
+                      ? "Checking the Bitcoin chain…"
+                      : btcSeen
+                        ? btc?.receivedBtc
+                          ? `${btc.receivedBtc.toFixed(8)} BTC seen at deposit address.`
+                          : "Deposit detected."
+                        : delivered
+                          ? "BTC was received."
+                          : "Send BTC to your deposit address."
+                  }
+                  time={
+                    btc?.blockHeight ? `block ${btc.blockHeight}` : undefined
+                  }
+                  last={false}
+                />
+                <Step
+                  done={confirmed || delivered}
+                  active={btcSeen && !confirmed && !delivered}
+                  title={`${CONFS_REQUIRED} Bitcoin confirmations`}
+                  detail={
+                    delivered
+                      ? "Confirmed."
+                      : btcSeen
+                        ? confirmed
+                          ? "Confirmed. Bridge releasing CBTC."
+                          : `${confs} of ${CONFS_REQUIRED} — ~10 min each.`
+                        : "Starts once your BTC is in a block."
+                  }
+                  last={false}
+                />
+                <Step
+                  done={delivered}
+                  active={confirmed && !delivered}
+                  title="CBTC delivered to your wallet"
+                  detail={
+                    delivered
+                      ? `${mint.amount ? formatBtc(mint.amount) + " " : ""}CBTC is in your wallet.`
+                      : "Bridging onto Canton…"
+                  }
+                  time={fmtShort(mint.deliveredAt)}
+                  last
+                />
+              </ol>
             )}
-          >
-            {title}
-          </span>
-          <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
-            {time}
-          </span>
-        </span>
-        <span className="block text-xs leading-relaxed text-muted-foreground">
-          {detail}
-        </span>
-      </span>
-    </li>
+          </CardContent>
+        </Card>
+
+        {/* Details column */}
+        {hasDetails && (
+          <div className="space-y-3">
+            {mint.deliveredAt && (
+              <DetailCard label="Delivered at">
+                <p className="text-sm font-medium">
+                  {fmtFull(mint.deliveredAt)}
+                </p>
+              </DetailCard>
+            )}
+            {mint.bitcoinAddress && (
+              <DetailCard label="Bitcoin deposit address">
+                <p className="break-all font-mono text-xs leading-relaxed">
+                  {mint.bitcoinAddress}
+                </p>
+                {(() => {
+                  const url = explorerAddrUrl(mint.bitcoinAddress);
+                  return url ? (
+                    <a
+                      href={url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="mt-2 inline-flex items-center gap-1 text-[11px] font-medium text-blue-500 hover:underline"
+                    >
+                      Track on mempool.space{" "}
+                      <ArrowUpRight className="h-3 w-3" />
+                    </a>
+                  ) : null;
+                })()}
+              </DetailCard>
+            )}
+            {btc?.txid && (
+              <CopyableField
+                label="Bitcoin deposit transaction"
+                value={btc.txid}
+                href={explorerTxUrl(btc.txid)}
+                hrefLabel="View on mempool.space"
+              />
+            )}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }

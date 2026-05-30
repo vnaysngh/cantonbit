@@ -196,9 +196,21 @@ function classifyTransaction(
   );
 
   if (inboundAmount !== "0") {
-    // Inbound: kind depends on whether a DepositAccount was archived in the
-    // same txn (= mint from BitSafe) or this is a transfer accept.
-    const kind: ActivityKind = archivedDepositAccount ? "minted" : "received";
+    // Inbound: classify by what else happened in the same tx.
+    //
+    // "minted" signals (any one is sufficient):
+    //   1. A CBTCDepositAccount was archived — Phase 1 mint delivery (rare: Phase
+    //      1 + 2 in the same tx on some node configs).
+    //   2. A TransferInstruction was archived but none was created — this is Phase
+    //      2 of the mint processor (TransferInstruction_Accept). A real peer-receive
+    //      also archives a TransferInstruction but always created one first in a
+    //      prior tx; crucially the sender is warpx/admin, not the user's peer.
+    //
+    // Everything else with an inbound holding = "received" (peer transfer accept).
+    const isMintAccept =
+      archivedDepositAccount ||
+      (archivedTransferOffers.length > 0 && createdTransferOffers.length === 0);
+    const kind: ActivityKind = isMintAccept ? "minted" : "received";
     const sender = createdTransferOffers.length
       ? createdTransferOffers[0]?.createArgument?.transfer?.sender ?? ""
       : "";

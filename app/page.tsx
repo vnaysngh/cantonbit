@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Coins, Flame } from "lucide-react";
+import { Flame, Pickaxe } from "lucide-react";
 
 import { ActivityList } from "@/components/ActivityList";
 import { BalanceBadge } from "@/components/BalanceBadge";
@@ -11,7 +11,7 @@ import { useBalance } from "@/hooks/useBalance";
 import { useTransfers } from "@/hooks/useTransfers";
 
 const QUICK_ACTIONS = [
-  { href: "/mint", label: "Mint", Icon: Coins },
+  { href: "/mint", label: "Mint", Icon: Pickaxe },
   { href: "/redeem", label: "Redeem", Icon: Flame },
 ] as const;
 
