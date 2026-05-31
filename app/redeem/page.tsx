@@ -210,6 +210,18 @@ export default function RedeemPage() {
         const status = await getRedeemStatus(partyId, btcAddress.trim());
         if (cancelled) return;
 
+        // CompleteWithdrawal was exercised on Canton — canonical "BTC sent" signal.
+        // BitSafe may batch payouts under a different txid, so we trust the
+        // archive event rather than mempool. Flip to "sent" immediately.
+        if (status.state === "completed") {
+          setStage((prev) =>
+            prev.kind === "success"
+              ? { ...prev, progress: "sent", btcTxId: status.btcTxId ?? prev.btcTxId }
+              : prev,
+          );
+          return;
+        }
+
         if (status.btcTxId) {
           // Attestor just assigned a txid — update state; Loop 2 will pick up.
           if (sawRequestAt.current === null) sawRequestAt.current = Date.now();

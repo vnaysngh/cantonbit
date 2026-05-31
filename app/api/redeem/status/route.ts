@@ -14,7 +14,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 
-import { findWithdrawRequest } from "@/lib/redeem-ledger";
+import { findWithdrawRequest, wasWithdrawRequestCompleted } from "@/lib/redeem-ledger";
 
 const TAG = "[redeem/status]";
 
@@ -43,6 +43,20 @@ export async function POST(req: NextRequest) {
         btcTxId: request.btcTxId,
         amount: request.amount,
         withdrawRequestCid: request.contractId,
+      });
+    }
+
+    // No active request — check if one was already completed (CompleteWithdrawal
+    // exercised). BitSafe may broadcast a different txid than what's on the
+    // request, so we can't rely on mempool; archive presence is the real signal.
+    const completed = await wasWithdrawRequestCompleted(partyId, destinationBtcAddress);
+    if (completed.completed) {
+      console.log(`${TAG} request was completed (CompleteWithdrawal archived) for ${destinationBtcAddress}`);
+      return NextResponse.json({
+        state: "completed",
+        btcTxId: completed.btcTxId,
+        amount: null,
+        withdrawRequestCid: null,
       });
     }
 
