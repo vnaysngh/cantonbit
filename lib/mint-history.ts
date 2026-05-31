@@ -41,7 +41,7 @@ import { getLedgerJwt, invalidateLedgerJwtCache } from "./auth";
 import { NETWORK } from "./constants";
 import { createSupabaseServiceClient } from "./supabase/server";
 
-export type MintHistoryStatus = "pending" | "minted";
+export type MintHistoryStatus = "pending" | "btc_detected" | "minted";
 
 export interface MintHistoryItem {
   /** Stable id for the detail page. Delivery updateId if delivered; else the
@@ -62,18 +62,72 @@ export interface MintHistoryItem {
   deliveredAt: string | null;
   /** Canton updateId of the delivery transaction. Null while pending. */
   deliveryUpdateId: string | null;
+  /** Bitcoin txid seen in mempool for pending deposits. Null until BTC is broadcast. */
+  btcTxId: string | null;
+  /** Number of Bitcoin confirmations (0 = mempool only). Null until BTC is detected. */
+  btcConfirmations: number | null;
   status: MintHistoryStatus;
 }
 
 const HISTORY_OFFSET_WINDOW = 60_000;
 
-const DEPOSIT_ACCOUNT_SUFFIX = "CBTC.DepositAccount:CBTCDepositAccount";
 const HOLDING_SUFFIX = "Utility.Registry.Holding.V0.Holding:Holding";
 
-interface DepositAccountCreate {
-  contractId: string;
-  at: string;
-  offset: number;
+// ─── Mempool helpers ────────────────────────────────────────────────────────
+
+interface MempoolTx {
+  txid: string;
+  status: { confirmed: boolean; block_height?: number; block_time?: number };
+  vout: Array<{ scriptpubkey_address?: string; value?: number }>;
+}
+
+interface BtcDetection {
+  txid: string;
+  confirmations: number; // 0 = unconfirmed (mempool only)
+  amountSats: number;
+  /** ISO timestamp from block_time, or null if unconfirmed. */
+  blockTime: string | null;
+}
+
+/**
+ * Fetch ALL incoming BTC transactions to the given address from mempool.space,
+ * newest-first. Returns empty array if network is devnet or mempool unreachable.
+ */
+async function getAllIncomingBtcTxs(btcAddress: string): Promise<BtcDetection[]> {
+  const base =
+    NETWORK.name === "mainnet"
+      ? "https://mempool.space/api"
+      : NETWORK.name === "testnet"
+        ? "https://mempool.space/testnet/api"
+        : null;
+
+  if (!base) return [];
+
+  try {
+    const res = await fetch(
+      `${base}/address/${encodeURIComponent(btcAddress)}/txs`,
+      { cache: "no-store" },
+    );
+    if (!res.ok) return [];
+    const txs = (await res.json()) as MempoolTx[];
+
+    const results: BtcDetection[] = [];
+    for (const tx of txs) {
+      const vout = tx.vout.find((v) => v.scriptpubkey_address === btcAddress);
+      if (!vout) continue; // not an incoming tx to this address
+      results.push({
+        txid: tx.txid,
+        confirmations: tx.status.confirmed ? 1 : 0,
+        amountSats: vout.value ?? 0,
+        blockTime: tx.status.block_time
+          ? new Date(tx.status.block_time * 1000).toISOString()
+          : null,
+      });
+    }
+    return results;
+  } catch {
+    return [];
+  }
 }
 
 interface DeliveryEvent {
@@ -86,83 +140,84 @@ interface DeliveryEvent {
 /**
  * Newest-first mint history for a party.
  *
- * Best-effort: if the ledger scan or Supabase lookup fails, returns []. The
- * activity feed treats this as "no mint history available" and falls back to
- * other sources.
+ * The user reuses the same deposit address for all mints — one CBTCDepositAccount,
+ * multiple BTC sends. So we cannot correlate by "one deposit account per delivery".
+ *
+ * Instead:
+ *   - Deliveries come from the ledger scan (completed mints).
+ *   - For each deposit address in Supabase, we fetch all incoming BTC txs from
+ *     mempool and count them. If mempool_count > delivery_count, the excess are
+ *     pending/unprocessed txs — we surface each one as a "btc_detected" row.
  */
 export async function getMintHistory(partyId: string): Promise<MintHistoryItem[]> {
   if (!partyId) return [];
 
-  const { deposits, deliveries } = await scanTree(partyId);
+  // Run ledger scan + Supabase deposit lookup in parallel.
+  const [{ deliveries }, supabaseDeposits] = await Promise.all([
+    scanTree(partyId),
+    fetchAllDepositAccounts(partyId),
+  ]);
 
-  // Pair deliveries to deposit accounts by time order (oldest first).
-  const usedDeposit = new Set<number>();
+  console.log(`[mint-history] deliveries=${deliveries.length} supabaseDeposits=${supabaseDeposits.length}`, supabaseDeposits.map(d => ({ cid: d.contractId.slice(0,16), addr: d.bitcoinAddress?.slice(0,20) })));
+
   const items: MintHistoryItem[] = [];
 
-  const depositsAsc = [...deposits].sort((a, b) => a.offset - b.offset);
-  const deliveriesAsc = [...deliveries].sort((a, b) => a.offset - b.offset);
+  // 1. Surface all completed deliveries as "minted" rows.
+  //    Attach the deposit address from the first (only) deposit account if we have one.
+  const depositAddress = supabaseDeposits[0]?.bitcoinAddress ?? null;
+  const depositContractId = supabaseDeposits[0]?.contractId ?? null;
+  const depositCreatedAt = supabaseDeposits[0]?.createdAt ?? null;
 
-  // Match each delivery to the earliest unmatched deposit account that was
-  // created before it. (Mints are processed FIFO by the cron.) A delivery
-  // without a matching deposit account in our scan window is an "orphan" —
-  // the deposit account was created before the window began. We still surface
-  // the delivery as a completed mint, just without the deposit-side info.
-  const matched: Array<{
-    deposit: DepositAccountCreate | null;
-    delivery: DeliveryEvent | null;
-  }> = [];
-
-  for (const d of deliveriesAsc) {
-    let claimed = -1;
-    for (let i = 0; i < depositsAsc.length; i++) {
-      if (usedDeposit.has(i)) continue;
-      if (depositsAsc[i].offset > d.offset) break; // deposit can't post-date its delivery
-      claimed = i;
-      break;
-    }
-    if (claimed >= 0) {
-      usedDeposit.add(claimed);
-      matched.push({ deposit: depositsAsc[claimed], delivery: d });
-    } else {
-      // Orphan delivery: deposit account is older than our window. Pass
-      // `deposit: null` so the detail page knows not to invent a fake step.
-      matched.push({ deposit: null, delivery: d });
-    }
-  }
-
-  // Any deposit account left unmatched is a pending mint.
-  for (let i = 0; i < depositsAsc.length; i++) {
-    if (usedDeposit.has(i)) continue;
-    matched.push({ deposit: depositsAsc[i], delivery: null });
-  }
-
-  // Look up BTC addresses for the deposit accounts we DO know about.
-  const knownDepositCids = matched
-    .map((m) => m.deposit?.contractId)
-    .filter((c): c is string => !!c);
-  const addressByCid = await fetchBitcoinAddresses(knownDepositCids);
-
-  for (const m of matched) {
+  for (const d of deliveries) {
     items.push({
-      // Stable id: delivery updateId if delivered (mints are uniquely indexed
-      // by their accept transaction), else the pending deposit account cid.
-      id:
-        m.delivery?.updateId ??
-        m.deposit?.contractId ??
-        `orphan-${Math.random().toString(36).slice(2)}`,
-      amount: m.delivery?.amount ?? null,
-      bitcoinAddress: m.deposit
-        ? (addressByCid.get(m.deposit.contractId) ?? null)
-        : null,
-      depositAccountCreatedAt: m.deposit?.at ?? null,
-      depositAccountContractId: m.deposit?.contractId ?? null,
-      deliveredAt: m.delivery?.at ?? null,
-      deliveryUpdateId: m.delivery?.updateId ?? null,
-      status: m.delivery ? "minted" : "pending",
+      id: d.updateId,
+      amount: d.amount,
+      bitcoinAddress: depositAddress,
+      depositAccountCreatedAt: depositCreatedAt,
+      depositAccountContractId: depositContractId,
+      deliveredAt: d.at,
+      deliveryUpdateId: d.updateId,
+      btcTxId: null,
+      btcConfirmations: null,
+      status: "minted",
     });
   }
 
-  // Newest first by the most-recent timestamp we have.
+  // 2. For each deposit address, count incoming mempool txs. Any txs beyond
+  //    the delivery count are pending (BTC sent but not yet processed by cron).
+  for (const deposit of supabaseDeposits) {
+    if (!deposit.bitcoinAddress) continue;
+
+    const allIncomingTxs = await getAllIncomingBtcTxs(deposit.bitcoinAddress);
+    console.log(`[mint-history] addr=${deposit.bitcoinAddress.slice(0,20)} mempoolTxs=${allIncomingTxs.length} deliveries=${deliveries.length} pending=${Math.max(0, allIncomingTxs.length - deliveries.length)}`);
+    // deliveries in the ledger window may not cover all-time history if the
+    // window is smaller than total mints. Use total tx count vs delivery count
+    // to find the unprocessed excess.
+    const pendingCount = Math.max(0, allIncomingTxs.length - deliveries.length);
+
+    // Surface the most recent unprocessed txs as pending rows.
+    const pendingTxs = allIncomingTxs.slice(0, pendingCount);
+    for (const tx of pendingTxs) {
+      // Convert sats to BTC decimal string (8 decimal places, trimmed).
+      const amountBtc = tx.amountSats > 0
+        ? (tx.amountSats / 1e8).toFixed(8).replace(/\.?0+$/, "")
+        : null;
+      items.push({
+        id: `pending-${tx.txid}`,
+        amount: amountBtc,
+        bitcoinAddress: deposit.bitcoinAddress,
+        depositAccountCreatedAt: tx.blockTime ?? deposit.createdAt,
+        depositAccountContractId: deposit.contractId,
+        deliveredAt: null,
+        deliveryUpdateId: null,
+        btcTxId: tx.txid,
+        btcConfirmations: tx.confirmations,
+        status: "btc_detected",
+      });
+    }
+  }
+
+  // Newest first.
   items.sort((a, b) => {
     const ta = a.deliveredAt ?? a.depositAccountCreatedAt ?? "";
     const tb = b.deliveredAt ?? b.depositAccountCreatedAt ?? "";
@@ -181,9 +236,8 @@ export async function getMintById(
   return all.find((m) => m.id === id) ?? null;
 }
 
-/** Scan the tree for deposit-account creates and `cbtc-mint-accept-*` deliveries. */
+/** Scan the tree for `cbtc-mint-accept-*` delivery transactions. */
 async function scanTree(partyId: string): Promise<{
-  deposits: DepositAccountCreate[];
   deliveries: DeliveryEvent[];
 }> {
   const run = async (token: string) => {
@@ -246,7 +300,6 @@ async function scanTree(partyId: string): Promise<{
     }
   }
 
-  const deposits: DepositAccountCreate[] = [];
   const deliveries: DeliveryEvent[] = [];
 
   for (const u of result.arr ?? []) {
@@ -259,6 +312,8 @@ async function scanTree(partyId: string): Promise<{
     const isMintAccept =
       typeof tx.workflowId === "string" &&
       tx.workflowId.startsWith("cbtc-mint-accept-");
+    if (!isMintAccept) continue;
+
     const events = tx.eventsById ? Object.values(tx.eventsById) : [];
 
     for (const ev of events) {
@@ -266,25 +321,8 @@ async function scanTree(partyId: string): Promise<{
         .CreatedTreeEvent?.value;
       if (!cr) continue;
 
-      // 1) deposit account create — record it
+      // Delivery — a Holding created for the user inside a mint-accept tx.
       if (
-        cr.templateId?.includes(DEPOSIT_ACCOUNT_SUFFIX) &&
-        cr.contractId
-      ) {
-        const arg = cr.createArgument ?? {};
-        // Only count this party's deposit accounts.
-        if (arg.owner === partyId) {
-          deposits.push({
-            contractId: cr.contractId,
-            at: tx.effectiveAt,
-            offset: tx.offset,
-          });
-        }
-      }
-
-      // 2) delivery — a Holding created for the user inside a mint-accept tx
-      if (
-        isMintAccept &&
         cr.templateId?.includes(HOLDING_SUFFIX) &&
         (cr.createArgument?.owner as string | undefined) === partyId &&
         !cr.createArgument?.lock // delivered = unlocked
@@ -299,37 +337,47 @@ async function scanTree(partyId: string): Promise<{
     }
   }
 
-  return { deposits, deliveries };
+  return { deliveries };
 }
 
-/** Read the BTC address map from Supabase by deposit-account contractId. */
-async function fetchBitcoinAddresses(
-  cids: string[],
-): Promise<Map<string, string>> {
-  const out = new Map<string, string>();
-  if (cids.length === 0) return out;
+interface SupabaseDeposit {
+  contractId: string;
+  bitcoinAddress: string | null;
+  /** ISO timestamp from Supabase created_at column (used for ordering). */
+  createdAt: string;
+}
+
+/**
+ * Fetch ALL deposit accounts for this party from Supabase, oldest-first.
+ * This is the source of truth — not bounded by the ledger scan window.
+ */
+async function fetchAllDepositAccounts(partyId: string): Promise<SupabaseDeposit[]> {
   try {
     const supabase = await createSupabaseServiceClient();
     const { data, error } = await supabase
       .from("deposit_accounts")
-      .select("deposit_account_contract_id, bitcoin_address")
-      .in("deposit_account_contract_id", cids);
+      .select("deposit_account_contract_id, bitcoin_address, created_at")
+      .eq("canton_party_id", partyId)
+      .order("created_at", { ascending: true });
     if (error) {
       console.warn(`[mint-history] deposit_accounts lookup failed:`, error);
-      return out;
+      return [];
     }
-    for (const row of (data as Array<{
-      deposit_account_contract_id: string;
-      bitcoin_address: string | null;
-    }>) ?? []) {
-      if (row.bitcoin_address) {
-        out.set(row.deposit_account_contract_id, row.bitcoin_address);
-      }
-    }
+    return (
+      (data as Array<{
+        deposit_account_contract_id: string;
+        bitcoin_address: string | null;
+        created_at: string;
+      }>) ?? []
+    ).map((row) => ({
+      contractId: row.deposit_account_contract_id,
+      bitcoinAddress: row.bitcoin_address,
+      createdAt: row.created_at,
+    }));
   } catch (e) {
     console.warn(`[mint-history] supabase unavailable:`, e);
+    return [];
   }
-  return out;
 }
 
 interface TreeTx {

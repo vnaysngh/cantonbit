@@ -49,6 +49,7 @@ interface MintDetail {
   depositAccountContractId: string | null;
   deliveredAt: string | null;
   deliveryUpdateId: string | null;
+  btcTxId: string | null;
   status: MintStatus;
 }
 
@@ -158,6 +159,7 @@ export default function ActivityDetailPage() {
             depositAccountContractId: null,
             deliveredAt: row.timestamp,
             deliveryUpdateId: row.id,
+            btcTxId: row.btcTxId ?? null,
             status: row.status === "complete" ? "minted" : "pending"
           }
         };
@@ -614,7 +616,7 @@ interface BtcInfo {
 
 const CONFS_REQUIRED = 6;
 
-async function fetchBtcInfo(address: string): Promise<BtcInfo | null> {
+async function fetchBtcInfo(address: string, btcTxId?: string | null): Promise<BtcInfo | null> {
   const base =
     NETWORK.name === "mainnet"
       ? "https://mempool.space/api"
@@ -623,10 +625,9 @@ async function fetchBtcInfo(address: string): Promise<BtcInfo | null> {
         : null;
   if (!base) return null;
   try {
-    const [addrRes, tipRes, txsRes] = await Promise.all([
+    const [addrRes, tipRes] = await Promise.all([
       fetch(`${base}/address/${encodeURIComponent(address)}`),
       fetch(`${base}/blocks/tip/height`),
-      fetch(`${base}/address/${encodeURIComponent(address)}/txs`)
     ]);
     if (!addrRes.ok || !tipRes.ok) return null;
     const addr = (await addrRes.json()) as {
@@ -637,19 +638,37 @@ async function fetchBtcInfo(address: string): Promise<BtcInfo | null> {
     const receivedSat =
       (addr.chain_stats?.funded_txo_sum ?? 0) +
       (addr.mempool_stats?.funded_txo_sum ?? 0);
+
     let txid: string | null = null;
     let blockHeight: number | null = null;
-    if (txsRes.ok) {
-      const txs = (await txsRes.json()) as Array<{
-        txid: string;
-        status?: { block_height?: number };
-      }>;
-      const oldest = [...txs].reverse()[0];
-      if (oldest) {
-        txid = oldest.txid;
-        blockHeight = oldest.status?.block_height ?? null;
+
+    if (btcTxId) {
+      // We know the specific tx — look it up directly for accurate block height.
+      const txRes = await fetch(`${base}/tx/${encodeURIComponent(btcTxId)}`);
+      if (txRes.ok) {
+        const tx = (await txRes.json()) as {
+          txid: string;
+          status?: { block_height?: number };
+        };
+        txid = tx.txid;
+        blockHeight = tx.status?.block_height ?? null;
+      }
+    } else {
+      // No specific txid — fall back to the most recent tx on the address.
+      const txsRes = await fetch(`${base}/address/${encodeURIComponent(address)}/txs`);
+      if (txsRes.ok) {
+        const txs = (await txsRes.json()) as Array<{
+          txid: string;
+          status?: { block_height?: number };
+        }>;
+        const newest = txs[0];
+        if (newest) {
+          txid = newest.txid;
+          blockHeight = newest.status?.block_height ?? null;
+        }
       }
     }
+
     return {
       txid,
       blockHeight,
@@ -671,7 +690,7 @@ function MintView({ mint }: { mint: MintDetail }) {
     void Promise.resolve().then(() => {
       if (cancelled) return;
       setBtcLoading(true);
-      void fetchBtcInfo(mint.bitcoinAddress!).then((info) => {
+      void fetchBtcInfo(mint.bitcoinAddress!, mint.btcTxId).then((info) => {
         if (!cancelled) {
           setBtc(info);
           setBtcLoading(false);

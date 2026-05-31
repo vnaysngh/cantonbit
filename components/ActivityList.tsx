@@ -23,33 +23,30 @@ const KIND_LABEL = {
   redeemed: "Redeemed",
 } as const;
 
-/** Short status chip text + colour. `complete` shows nothing (the default). */
-const STATUS_META: Record<
-  ActivityStatus,
-  { label: string; className: string } | null
-> = {
+/** Short status chip colour. `complete` shows nothing. */
+const STATUS_CLASS: Record<ActivityStatus, string | null> = {
   complete: null,
-  pending: {
-    label: "Pending",
-    className:
-      "bg-muted text-muted-foreground",
-  },
-  broadcasting: {
-    label: "Broadcasting",
-    className:
-      "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300",
-  },
-  stalled: {
-    label: "Delayed",
-    className:
-      "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
-  },
-  failed: {
-    label: "Failed",
-    className:
-      "bg-destructive/15 text-destructive",
-  },
+  pending: "bg-muted text-muted-foreground",
+  broadcasting: "bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300",
+  stalled: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
+  failed: "bg-destructive/15 text-destructive",
 };
+
+/** Chip label — varies by kind so mints and redeems can use different wording. */
+function statusLabel(status: ActivityStatus, kind: ActivityRow["kind"]): string {
+  switch (status) {
+    case "broadcasting":
+      return kind === "minted" ? "BTC Detected" : "Broadcasting";
+    case "pending":
+      return "Pending";
+    case "stalled":
+      return "Delayed";
+    case "failed":
+      return "Failed";
+    default:
+      return "";
+  }
+}
 
 interface Props {
   rows: ActivityRow[];
@@ -78,7 +75,8 @@ export function ActivityList({
       {rows.map((row, idx) => {
         const Icon = ICONS[row.kind];
         const isInbound = row.kind === "received" || row.kind === "minted"; // used for amount sign
-        const statusMeta = STATUS_META[row.status];
+        const statusClass = STATUS_CLASS[row.status];
+        const chipLabel = statusLabel(row.status, row.kind);
         // Redeems and mints both have a detail page; clicking the row opens
         // the full breakdown.
         const href = row.redeemId
@@ -106,14 +104,14 @@ export function ActivityList({
                   <span className="text-sm font-medium">
                     {KIND_LABEL[row.kind]}
                   </span>
-                  {statusMeta && (
+                  {statusClass && (
                     <span
                       className={cn(
                         "rounded-full px-1.5 py-0.5 text-[10px] font-medium",
-                        statusMeta.className,
+                        statusClass,
                       )}
                     >
-                      {statusMeta.label}
+                      {chipLabel}
                     </span>
                   )}
                 </div>
