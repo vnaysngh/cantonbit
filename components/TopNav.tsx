@@ -6,6 +6,8 @@ import { usePathname, useRouter } from "next/navigation";
 
 import { useState } from "react";
 
+import { LogOut } from "lucide-react";
+
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { useBalance } from "@/hooks/useBalance";
 import { useWallet } from "@/hooks/useWallet";
@@ -55,8 +57,9 @@ export function TopNav() {
             <Image
               src="/logo.png"
               alt="Oranj"
-              width={80}
-              height={25}
+              width={60}
+              height={0}
+              style={{ height: "auto" }}
               className="block dark:hidden"
               priority
             />
@@ -64,8 +67,9 @@ export function TopNav() {
             <Image
               src="/logo-white.png"
               alt="Oranj"
-              width={80}
-              height={25}
+              width={60}
+              height={0}
+              style={{ height: "auto" }}
               className="hidden dark:block"
               priority
             />
@@ -81,7 +85,7 @@ export function TopNav() {
                   key={item.href}
                   href={item.href}
                   className={cn(
-                    "rounded-md px-3 py-1.5 text-sm transition-colors",
+                    "rounded-md px-3 py-1.5 text-xs transition-colors",
                     active
                       ? "bg-accent text-accent-foreground"
                       : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
@@ -118,9 +122,10 @@ export function TopNav() {
               <ThemeToggle />
               <button
                 onClick={handleLogout}
-                className="rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors"
+                title="Sign out"
+                className="rounded-md p-1.5 text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors"
               >
-                Sign out
+                <LogOut className="h-4 w-4" />
               </button>
             </>
           ) : (
