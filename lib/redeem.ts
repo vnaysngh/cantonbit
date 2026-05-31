@@ -220,7 +220,7 @@ export async function submitWithdraw(
  *   "broadcasting" — attestor created the request and assigned a btcTxId; BTC is
  *                    on its way (client confirms via the chain).
  */
-export type RedeemState = "pending" | "broadcasting" | "completed";
+export type RedeemState = "pending" | "broadcasting";
 
 export interface RedeemStatus {
   state: RedeemState;
