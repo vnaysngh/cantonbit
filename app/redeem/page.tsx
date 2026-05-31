@@ -180,60 +180,46 @@ export default function RedeemPage() {
     }
   }, [partyId, btcAddress, amount, refetchBalance]);
 
-  // Live redeem tracking. Once the burn succeeds, poll the on-ledger
-  // CBTCWithdrawRequest (attestor-created) and, once a btcTxId is assigned,
-  // poll the Bitcoin chain — so the user sees real progress instead of a
-  // vague "pending", and a stall is surfaced rather than hidden.
+  // Live redeem tracking — two separate polling loops with different cadences:
+  //
+  //   Loop 1 (Canton, every 20s): poll CBTCWithdrawRequest until the attestor
+  //   assigns a btcTxId. Once assigned we stop this loop.
+  //
+  //   Loop 2 (Bitcoin, every 90s): only starts AFTER a btcTxId is known and
+  //   only on networks with a public explorer (mainnet/testnet). Polls mempool
+  //   until the tx appears on-chain. Polling mempool before the txid exists
+  //   would always 404, so we gate it strictly.
+  //
+  // This prevents the previous behaviour of hitting mempool every 20s with
+  // guaranteed 404s while the attestor hasn't even broadcast yet.
   const sawRequestAt = useRef<number | null>(null);
+  const lastCheckedTxId = useRef<string | null>(null);
+
+  // Loop 1: Canton poll — wait for attestor to create the WithdrawRequest.
   useEffect(() => {
     if (stage.kind !== "success") return;
-    if (stage.progress === "sent") return; // terminal — stop polling
+    // Stop once we have a txid (Loop 2 takes over) or terminal state.
+    if (stage.progress === "sent" || stage.progress === "stalled") return;
+    if (stage.btcTxId) return; // txid known — Loop 2 handles it
     if (!partyId) return;
 
     let cancelled = false;
 
     const tick = async () => {
       try {
-        const dest = btcAddress.trim();
-        const status = await getRedeemStatus(partyId, dest);
-
-        // Attestor has assigned a btcTxId → check whether it's on-chain yet.
-        if (status.btcTxId) {
-          if (sawRequestAt.current === null) sawRequestAt.current = Date.now();
-          const chain = await checkBitcoinTx(status.btcTxId);
-          if (cancelled) return;
-
-          if (chain.found) {
-            setStage({
-              kind: "success",
-              progress: "sent",
-              btcTxId: status.btcTxId,
-              burnedAmount: status.amount ?? stage.burnedAmount,
-            });
-            return;
-          }
-
-          // txid assigned but not on-chain — broadcasting, or stalled if it's
-          // been too long without appearing anywhere (not even the mempool).
-          const elapsed = Date.now() - (sawRequestAt.current ?? Date.now());
-          setStage({
-            kind: "success",
-            progress: elapsed > STALL_AFTER_MS ? "stalled" : "broadcasting",
-            btcTxId: status.btcTxId,
-            burnedAmount: status.amount ?? stage.burnedAmount,
-          });
-          return;
-        }
-
-        // No request yet — still in the attestor's queue right after the burn.
+        const status = await getRedeemStatus(partyId, btcAddress.trim());
         if (cancelled) return;
-        setStage((prev) =>
-          prev.kind === "success" && prev.progress === "burned"
-            ? prev
-            : prev.kind === "success"
-              ? { ...prev, progress: "burned", btcTxId: null }
+
+        if (status.btcTxId) {
+          // Attestor just assigned a txid — update state; Loop 2 will pick up.
+          if (sawRequestAt.current === null) sawRequestAt.current = Date.now();
+          setStage((prev) =>
+            prev.kind === "success"
+              ? { ...prev, progress: "broadcasting", btcTxId: status.btcTxId, burnedAmount: status.amount ?? prev.burnedAmount }
               : prev,
-        );
+          );
+        }
+        // No txid yet — stay in "burned" state, nothing to update.
       } catch {
         // transient — wait for the next tick
       }
@@ -245,7 +231,61 @@ export default function RedeemPage() {
       cancelled = true;
       clearInterval(id);
     };
-  }, [stage, partyId, btcAddress]);
+  }, [stage.kind, stage.kind === "success" ? stage.progress : null, stage.kind === "success" ? stage.btcTxId : null, partyId, btcAddress]);
+
+  // Loop 2: Bitcoin poll — only runs once we have a btcTxId, checks every 90s.
+  // 90s because Bitcoin blocks are ~10 min; checking faster just burns requests.
+  useEffect(() => {
+    if (stage.kind !== "success") return;
+    if (!stage.btcTxId) return; // no txid yet — Loop 1 is still waiting
+    if (stage.progress === "sent") return; // terminal
+    if (!partyId) return;
+
+    const txId = stage.btcTxId;
+
+    // Skip if we already checked this exact txid on this render cycle.
+    // (Avoids a double-hit when Loop 1 sets the txid and Loop 2 mounts.)
+    let cancelled = false;
+
+    const tick = async () => {
+      // Don't re-check the same txid more than once per interval.
+      if (lastCheckedTxId.current === txId && cancelled) return;
+      lastCheckedTxId.current = txId;
+
+      try {
+        const chain = await checkBitcoinTx(txId);
+        if (cancelled) return;
+
+        if (chain.found) {
+          setStage((prev) =>
+            prev.kind === "success"
+              ? { ...prev, progress: "sent" }
+              : prev,
+          );
+          return;
+        }
+
+        // Still not on-chain — check stall threshold.
+        const elapsed = Date.now() - (sawRequestAt.current ?? Date.now());
+        if (elapsed > STALL_AFTER_MS) {
+          setStage((prev) =>
+            prev.kind === "success" && prev.progress !== "sent"
+              ? { ...prev, progress: "stalled" }
+              : prev,
+          );
+        }
+      } catch {
+        // transient — wait for the next tick
+      }
+    };
+
+    void tick();
+    const id = setInterval(tick, 90_000); // 90s — no point hitting mempool faster
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [stage.kind, stage.kind === "success" ? stage.btcTxId : null, stage.kind === "success" ? stage.progress : null, partyId]);
 
   const reset = () => {
     setAmount("");
