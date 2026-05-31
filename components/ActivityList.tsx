@@ -54,11 +54,15 @@ const STATUS_META: Record<
 interface Props {
   rows: ActivityRow[];
   emptyLabel?: string;
+  hasMore?: boolean;
+  onLoadMore?: () => void;
 }
 
 export function ActivityList({
   rows,
   emptyLabel = "No activity yet.",
+  hasMore = false,
+  onLoadMore,
 }: Props) {
   if (rows.length === 0) {
     return (
@@ -69,6 +73,7 @@ export function ActivityList({
   }
 
   return (
+    <div className="space-y-3">
     <ul className="divide-y rounded-md border">
       {rows.map((row, idx) => {
         const Icon = ICONS[row.kind];
@@ -156,5 +161,14 @@ export function ActivityList({
         );
       })}
     </ul>
+    {hasMore && (
+      <button
+        onClick={onLoadMore}
+        className="w-full rounded-md border border-dashed py-2.5 text-sm text-muted-foreground transition-colors hover:border-border hover:text-foreground"
+      >
+        Load more
+      </button>
+    )}
+    </div>
   );
 }

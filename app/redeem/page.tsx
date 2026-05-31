@@ -210,6 +210,16 @@ export default function RedeemPage() {
         const status = await getRedeemStatus(partyId, btcAddress.trim());
         if (cancelled) return;
 
+        // Confirmed on Bitcoin — mempool found an incoming tx to the address.
+        if (status.state === "completed") {
+          setStage((prev) =>
+            prev.kind === "success"
+              ? { ...prev, progress: "sent", btcTxId: status.btcTxId ?? prev.btcTxId }
+              : prev,
+          );
+          return;
+        }
+
         if (status.btcTxId) {
           // Attestor just assigned a txid — update state; Loop 2 will pick up.
           if (sawRequestAt.current === null) sawRequestAt.current = Date.now();

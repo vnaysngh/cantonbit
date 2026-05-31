@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { ActivityList } from "@/components/ActivityList";
 import { useTransfers } from "@/hooks/useTransfers";
@@ -18,14 +18,25 @@ const TABS: { id: Filter; label: string }[] = [
   { id: "redeemed", label: "Redeemed" },
 ];
 
+const PAGE_SIZE = 20;
+
 export default function ActivityPage() {
   const { activity, isLoading } = useTransfers();
   const [filter, setFilter] = useState<Filter>("all");
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+
+  // Reset pagination whenever the filter or the underlying data changes.
+  useEffect(() => {
+    setVisibleCount(PAGE_SIZE);
+  }, [filter]);
 
   const filtered = useMemo(() => {
     if (filter === "all") return activity;
     return activity.filter((row) => row.kind === filter);
   }, [activity, filter]);
+
+  const visible = filtered.slice(0, visibleCount);
+  const hasMore = filtered.length > visibleCount;
 
   return (
     <div className="space-y-6">
@@ -52,12 +63,14 @@ export default function ActivityPage() {
         <div className="h-48 animate-pulse rounded-md border bg-muted/30" />
       ) : (
         <ActivityList
-          rows={filtered}
+          rows={visible}
           emptyLabel={
             filter === "all"
               ? "No activity yet."
               : `No ${filter} transactions yet.`
           }
+          hasMore={hasMore}
+          onLoadMore={() => setVisibleCount((c) => c + PAGE_SIZE)}
         />
       )}
     </div>

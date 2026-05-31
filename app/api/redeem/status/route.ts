@@ -15,6 +15,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { findWithdrawRequest } from "@/lib/redeem-ledger";
+import { NETWORK } from "@/lib/constants";
 
 const TAG = "[redeem/status]";
 
@@ -44,6 +45,45 @@ export async function POST(req: NextRequest) {
         amount: request.amount,
         withdrawRequestCid: request.contractId,
       });
+    }
+
+    // No active request — either not picked up yet, or already completed+archived.
+    // Check mempool for a confirmed incoming tx to the destination address.
+    const explorerBase =
+      NETWORK.name === "mainnet" ? "https://mempool.space/api"
+      : NETWORK.name === "testnet" ? "https://mempool.space/testnet/api"
+      : null;
+
+    if (explorerBase) {
+      try {
+        const mRes = await fetch(
+          `${explorerBase}/address/${encodeURIComponent(destinationBtcAddress)}/txs`,
+          { cache: "no-store" },
+        );
+        if (mRes.ok) {
+          const txs = (await mRes.json()) as Array<{
+            txid: string;
+            status?: { confirmed?: boolean };
+            vout?: Array<{ scriptpubkey_address?: string }>;
+          }>;
+          const confirmed = txs.find(
+            (tx) =>
+              tx.status?.confirmed &&
+              tx.vout?.some((v) => v.scriptpubkey_address === destinationBtcAddress),
+          );
+          if (confirmed) {
+            console.log(`${TAG} completed — confirmed btc tx ${confirmed.txid}`);
+            return NextResponse.json({
+              state: "completed",
+              btcTxId: confirmed.txid,
+              amount: null,
+              withdrawRequestCid: null,
+            });
+          }
+        }
+      } catch {
+        // mempool unreachable — fall through to pending
+      }
     }
 
     console.log(`${TAG} no active request for ${destinationBtcAddress}`);
