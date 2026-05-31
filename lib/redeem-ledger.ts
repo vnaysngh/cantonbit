@@ -187,11 +187,52 @@ export async function wasWithdrawRequestCompleted(
 
   for (const [cid, txId] of requestTxIds) {
     if (completedCids.has(cid)) {
-      return { completed: true, btcTxId: txId };
+      // CompleteWithdrawal is confirmed on Canton. The txid on the request is
+      // what BitSafe pre-signed, but they often broadcast a batched payout
+      // under a different txid. Look up the real confirmed tx by querying the
+      // destination address on mempool — that gives us the actual txid with
+      // 6+ confirmations we can show the user.
+      const realTxId = await fetchConfirmedTxForAddress(destinationBtcAddress) ?? txId;
+      return { completed: true, btcTxId: realTxId };
     }
   }
 
   return { completed: false, btcTxId: null };
+}
+
+/**
+ * Fetch the most recent confirmed incoming txid for a Bitcoin address from
+ * mempool.space. Returns null on devnet or if not found.
+ */
+async function fetchConfirmedTxForAddress(address: string): Promise<string | null> {
+  const base =
+    NETWORK.name === "mainnet"
+      ? "https://mempool.space/api"
+      : NETWORK.name === "testnet"
+        ? "https://mempool.space/testnet/api"
+        : null;
+  if (!base) return null;
+
+  try {
+    const res = await fetch(`${base}/address/${encodeURIComponent(address)}/txs`, {
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    const txs = (await res.json()) as Array<{
+      txid: string;
+      status?: { confirmed?: boolean };
+      vout?: Array<{ scriptpubkey_address?: string; value?: number }>;
+    }>;
+    // Find the most recent confirmed incoming tx (one that has an output to this address).
+    for (const tx of txs) {
+      if (!tx.status?.confirmed) continue;
+      const hasOutput = tx.vout?.some((v) => v.scriptpubkey_address === address);
+      if (hasOutput) return tx.txid;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /**
