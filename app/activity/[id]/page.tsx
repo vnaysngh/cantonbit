@@ -149,6 +149,10 @@ export default function ActivityDetailPage() {
         };
       }
       if (row.kind === "minted") {
+        // Don't use placeholder for in-flight mints — the activity feed has
+        // incomplete data (no block height, no confirmation count) and the
+        // flash of wrong state is worse than a brief loading skeleton.
+        if (row.status !== "complete") return undefined;
         return {
           kind: "mint",
           mint: {
@@ -160,7 +164,7 @@ export default function ActivityDetailPage() {
             deliveredAt: row.timestamp,
             deliveryUpdateId: row.id,
             btcTxId: row.btcTxId ?? null,
-            status: row.status === "complete" ? "minted" : "pending"
+            status: "minted"
           }
         };
       }

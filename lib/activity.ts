@@ -390,11 +390,8 @@ export async function getActivityForParty(
     rows.push(m);
   }
 
-  console.log(`${TAG} mintRows=${mintRows.length}`, mintRows.map(m => ({ id: m.id.slice(0,20), status: m.status, timestamp: m.timestamp })));
-
   // Newest first, cap to limit.
   rows.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
-  console.log(`${TAG} total rows=${rows.length} after sort, returning ${Math.min(rows.length, limit)}`);
   return rows.slice(0, limit);
 }
 

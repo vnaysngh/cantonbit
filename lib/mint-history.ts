@@ -4,35 +4,22 @@
  *
  * From the user party's perspective, a mint produces a clean trail:
  *
- *   1. DEPOSIT ACCOUNT CREATED       a CBTCDepositAccount Created event
- *                                    (the contractId is the join key to the
- *                                    Supabase row that has the BTC address)
+ *   1. (off-ledger)  user sends BTC to their deposit address.
  *
- *   2. (off-ledger)  user sends BTC to the deposit address — this lives only
- *                    on Bitcoin; the detail page enriches with mempool.space.
+ *   2. btc_detected  — BTC tx is unconfirmed in mempool. We surface this
+ *                      immediately so the user knows we see it.
  *
- *   3. (off-ledger)  attestors watch for 6 confirmations and mint CBTC onto
- *                    the warpx party — this is invisible to the user party.
+ *   3. (off-ledger)  attestors wait 6 confirmations, mint CBTC onto warpx party.
  *
- *   4. DELIVERED TO USER             a `cbtc-mint-accept-*` transaction where
- *                                    a TransferInstruction_Accept produces an
- *                                    unlocked Holding owned by the user.
- *                                    This is the "you have spendable CBTC" moment.
+ *   4. minted        — a `cbtc-mint-accept-*` transaction delivers an unlocked
+ *                      Holding to the user. This is the "spendable CBTC" moment.
  *
- * Status (from the user's perspective):
+ * Status logic:
+ *   btc_detected  — unconfirmed tx in mempool (confirmed txs are already being
+ *                   processed by cron so we don't surface them as pending).
+ *   minted        — delivered Holding found in the ledger scan window.
  *
- *   pending   — deposit account exists, no matching delivery yet. The BTC may
- *               or may not have been sent; the detail page does the on-chain
- *               check. Activity feed shows it as "pending" either way.
- *   minted    — a delivered Holding exists for this deposit account (matched
- *               by amount + ordering — see the correlation below).
- *
- * Correlation between a deposit account and the delivered Holding is by time
- * order: deliveries arrive in the same order the deposits clear, and we pair
- * each delivery with the oldest still-unmatched deposit account.
- *
- * No DB write paths here — pure read. The deposit_accounts table is read for
- * the BTC address only; everything else comes from the ledger.
+ * No DB write paths here — pure read.
  */
 
 import "server-only";
@@ -83,10 +70,7 @@ interface MempoolTx {
 
 interface BtcDetection {
   txid: string;
-  confirmations: number; // 0 = unconfirmed (mempool only)
   amountSats: number;
-  /** ISO timestamp from block_time, or null if unconfirmed. */
-  blockTime: string | null;
 }
 
 /**
@@ -113,15 +97,14 @@ async function getAllIncomingBtcTxs(btcAddress: string): Promise<BtcDetection[]>
 
     const results: BtcDetection[] = [];
     for (const tx of txs) {
+      // Only surface unconfirmed txs — confirmed ones have already been (or will
+      // shortly be) minted by the cron, so we don't want to show them as pending.
+      if (tx.status.confirmed) continue;
       const vout = tx.vout.find((v) => v.scriptpubkey_address === btcAddress);
       if (!vout) continue; // not an incoming tx to this address
       results.push({
         txid: tx.txid,
-        confirmations: tx.status.confirmed ? 1 : 0,
         amountSats: vout.value ?? 0,
-        blockTime: tx.status.block_time
-          ? new Date(tx.status.block_time * 1000).toISOString()
-          : null,
       });
     }
     return results;
@@ -133,32 +116,17 @@ async function getAllIncomingBtcTxs(btcAddress: string): Promise<BtcDetection[]>
 interface DeliveryEvent {
   updateId: string;
   at: string;
-  offset: number;
   amount: string;
 }
 
-/**
- * Newest-first mint history for a party.
- *
- * The user reuses the same deposit address for all mints — one CBTCDepositAccount,
- * multiple BTC sends. So we cannot correlate by "one deposit account per delivery".
- *
- * Instead:
- *   - Deliveries come from the ledger scan (completed mints).
- *   - For each deposit address in Supabase, we fetch all incoming BTC txs from
- *     mempool and count them. If mempool_count > delivery_count, the excess are
- *     pending/unprocessed txs — we surface each one as a "btc_detected" row.
- */
+/** Newest-first mint history for a party. */
 export async function getMintHistory(partyId: string): Promise<MintHistoryItem[]> {
   if (!partyId) return [];
 
-  // Run ledger scan + Supabase deposit lookup in parallel.
   const [{ deliveries }, supabaseDeposits] = await Promise.all([
     scanTree(partyId),
     fetchAllDepositAccounts(partyId),
   ]);
-
-  console.log(`[mint-history] deliveries=${deliveries.length} supabaseDeposits=${supabaseDeposits.length}`, supabaseDeposits.map(d => ({ cid: d.contractId.slice(0,16), addr: d.bitcoinAddress?.slice(0,20) })));
 
   const items: MintHistoryItem[] = [];
 
@@ -183,22 +151,13 @@ export async function getMintHistory(partyId: string): Promise<MintHistoryItem[]
     });
   }
 
-  // 2. For each deposit address, count incoming mempool txs. Any txs beyond
-  //    the delivery count are pending (BTC sent but not yet processed by cron).
+  // 2. Surface any unconfirmed BTC txs as "btc_detected" rows.
   for (const deposit of supabaseDeposits) {
     if (!deposit.bitcoinAddress) continue;
 
-    const allIncomingTxs = await getAllIncomingBtcTxs(deposit.bitcoinAddress);
-    console.log(`[mint-history] addr=${deposit.bitcoinAddress.slice(0,20)} mempoolTxs=${allIncomingTxs.length} deliveries=${deliveries.length} pending=${Math.max(0, allIncomingTxs.length - deliveries.length)}`);
-    // deliveries in the ledger window may not cover all-time history if the
-    // window is smaller than total mints. Use total tx count vs delivery count
-    // to find the unprocessed excess.
-    const pendingCount = Math.max(0, allIncomingTxs.length - deliveries.length);
-
-    // Surface the most recent unprocessed txs as pending rows.
-    const pendingTxs = allIncomingTxs.slice(0, pendingCount);
-    for (const tx of pendingTxs) {
-      // Convert sats to BTC decimal string (8 decimal places, trimmed).
+    // Only unconfirmed txs — confirmed ones are already being processed by cron.
+    const unconfirmedTxs = await getAllIncomingBtcTxs(deposit.bitcoinAddress);
+    for (const tx of unconfirmedTxs) {
       const amountBtc = tx.amountSats > 0
         ? (tx.amountSats / 1e8).toFixed(8).replace(/\.?0+$/, "")
         : null;
@@ -206,12 +165,12 @@ export async function getMintHistory(partyId: string): Promise<MintHistoryItem[]
         id: `pending-${tx.txid}`,
         amount: amountBtc,
         bitcoinAddress: deposit.bitcoinAddress,
-        depositAccountCreatedAt: tx.blockTime ?? deposit.createdAt,
+        depositAccountCreatedAt: deposit.createdAt,
         depositAccountContractId: deposit.contractId,
         deliveredAt: null,
         deliveryUpdateId: null,
         btcTxId: tx.txid,
-        btcConfirmations: tx.confirmations,
+        btcConfirmations: 0,
         status: "btc_detected",
       });
     }
@@ -330,7 +289,6 @@ async function scanTree(partyId: string): Promise<{
         deliveries.push({
           updateId: tx.updateId,
           at: tx.effectiveAt,
-          offset: tx.offset,
           amount: (cr.createArgument?.amount as string | undefined) ?? "0",
         });
       }
@@ -382,7 +340,6 @@ async function fetchAllDepositAccounts(partyId: string): Promise<SupabaseDeposit
 
 interface TreeTx {
   updateId: string;
-  offset: number;
   effectiveAt: string;
   workflowId?: string;
   eventsById?: Record<string, unknown>;
