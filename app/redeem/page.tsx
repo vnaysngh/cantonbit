@@ -273,6 +273,21 @@ export default function RedeemPage() {
         <>
           <div className="space-y-4">
             <div className="space-y-2">
+              <Label htmlFor="btc-address">Bitcoin destination address</Label>
+              <Input
+                id="btc-address"
+                placeholder="bc1q…"
+                value={btcAddress}
+                onChange={(e) => setBtcAddress(e.target.value)}
+                className="font-mono text-sm"
+              />
+              <p className="text-xs text-muted-foreground">
+                Taproot (P2TR) address required. Address format must match the
+                network. A wrong-network address will be rejected by the bridge.
+              </p>
+            </div>
+
+            <div className="space-y-2">
               <div className="flex items-baseline justify-between">
                 <Label htmlFor="amount">Amount to burn (BTC)</Label>
                 <Button
@@ -308,21 +323,6 @@ export default function RedeemPage() {
                   Remaining after burn: {remainingDisplay} CBTC
                 </p>
               )}
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="btc-address">Bitcoin destination address</Label>
-              <Input
-                id="btc-address"
-                placeholder="bc1q…"
-                value={btcAddress}
-                onChange={(e) => setBtcAddress(e.target.value)}
-                className="font-mono text-sm"
-              />
-              <p className="text-xs text-muted-foreground">
-                Taproot (P2TR) address required. Address format must match the
-                network. A wrong-network address will be rejected by the bridge.
-              </p>
             </div>
           </div>
 
