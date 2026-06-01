@@ -3,11 +3,8 @@
 import Image from "next/image";
 import { useEffect, useState } from "react";
 
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import { cn } from "@/lib/utils";
 
 type Stage =
   | { kind: "email" }
@@ -17,15 +14,24 @@ type Stage =
 
 const RESEND_COOLDOWN_SEC = 120;
 
+const inputClass =
+  "w-full h-12 rounded-lg border border-outline-variant bg-surface-container-low px-md font-body-md text-body-md text-on-surface transition-all placeholder:text-on-secondary-container/50 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-primary md:bg-surface-container-low";
+
+const otpInputClass =
+  "w-full h-12 rounded-lg border border-outline-variant bg-surface-container-low px-md text-center font-body-md text-body-md tracking-[0.4em] text-on-surface transition-all placeholder:text-on-secondary-container/50 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-primary";
+
+const primaryBtnClass =
+  "flex h-14 w-full items-center justify-center gap-sm rounded-lg bg-primary font-headline-md text-headline-md text-on-primary transition-all duration-200 hover:bg-primary-container hover:text-on-primary-container active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60";
+
 export default function LoginPage() {
   const [stage, setStage] = useState<Stage>({ kind: "email" });
   const [email, setEmail] = useState("");
   const [otp, setOtp] = useState("");
   const [resendCountdown, setResendCountdown] = useState(0);
+  const [emailFocused, setEmailFocused] = useState(false);
 
   const supabase = createSupabaseBrowserClient();
 
-  // Count down the resend timer
   useEffect(() => {
     if (stage.kind !== "otp") return;
     const remaining = Math.max(
@@ -92,55 +98,66 @@ export default function LoginPage() {
   const isLoading = stage.kind === "loading";
   const isError = stage.kind === "error";
 
+  const emailValue = isError ? stage.prevEmail : email;
+
   return (
-    <div className="w-full max-w-sm space-y-8">
-      {/* Logo + tagline */}
-      <div className="flex flex-col items-center gap-3">
-        <Image
-          src="/logo.png"
-          alt="Oranj"
-          width={174}
-          height={42}
-          className="block dark:hidden"
-          priority
-        />
-        <Image
-          src="/logo-white.png"
-          alt="Oranj"
-          width={174}
-          height={42}
-          className="hidden dark:block"
-          priority
-        />
-        <p className="text-sm text-muted-foreground">
+    <div className="flex w-full max-w-bridge-widget-width flex-col items-center">
+      {/* Brand */}
+      <div className="mb-lg text-center">
+        <div className="mb-sm flex items-center justify-center">
+          <Image
+            src="/logo.png"
+            alt="Oranj"
+            width={174}
+            height={42}
+            className="block dark:hidden"
+            priority
+          />
+          <Image
+            src="/logo-white.png"
+            alt="Oranj"
+            width={174}
+            height={42}
+            className="hidden dark:block"
+            priority
+          />
+        </div>
+        <p className="mx-auto max-w-[320px] font-body-md text-body-md text-on-secondary-container">
           Mint, hold, and transfer CBTC on Canton Network.
         </p>
       </div>
 
       {/* Auth card */}
-      <Card className="shadow-sm">
-        <CardHeader className="pb-4">
-          <CardTitle className="text-base font-semibold">
+      <div className="w-full rounded-lg border border-outline-variant bg-surface-container-lowest p-md shadow-sm transition-all hover:border-primary/20 md:rounded-xl md:p-lg">
+        <div className="mb-lg">
+          <h2 className="font-headline-md text-headline-md text-on-surface">
             {isOtp ? "Check your email" : "Sign in"}
-          </CardTitle>
-        </CardHeader>
+          </h2>
+        </div>
 
-        <CardContent className="space-y-4">
-          {/* ── Email entry ── */}
+        <div className="space-y-md">
           {(isEmail || isError) && (
             <>
               {isError && (
-                <p className="rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                <p className="rounded-lg bg-error-container px-md py-sm font-label-sm text-label-sm text-on-error-container">
                   {stage.message}
                 </p>
               )}
-              <div className="space-y-1.5">
-                <Label htmlFor="email">Email address</Label>
-                <Input
+              <div className="space-y-xs">
+                <label
+                  htmlFor="email"
+                  className={cn(
+                    "block font-label-sm text-label-sm uppercase text-on-surface-variant transition-colors md:text-on-secondary-container md:tracking-wider",
+                    emailFocused && "text-primary"
+                  )}
+                >
+                  Email address
+                </label>
+                <input
                   id="email"
                   type="email"
                   placeholder="you@example.com"
-                  value={isError ? stage.prevEmail : email}
+                  value={emailValue}
                   onChange={(e) => {
                     if (isError) {
                       setEmail(e.target.value);
@@ -149,60 +166,71 @@ export default function LoginPage() {
                       setEmail(e.target.value);
                     }
                   }}
+                  onFocus={() => setEmailFocused(true)}
+                  onBlur={() => setEmailFocused(false)}
                   onKeyDown={(e) => e.key === "Enter" && sendOtp()}
                   autoFocus
                   autoComplete="email"
+                  className={inputClass}
                 />
               </div>
-              <Button
-                className="w-full"
+              <button
+                type="button"
+                className={primaryBtnClass}
                 onClick={() => sendOtp()}
-                disabled={!(isError ? stage.prevEmail : email).trim()}
+                disabled={!emailValue.trim()}
               >
                 Send code
-              </Button>
+              </button>
             </>
           )}
 
-          {/* ── OTP entry ── */}
           {isOtp && (
             <>
-              <p className="text-sm text-muted-foreground">
+              <p className="font-body-md text-body-md text-on-secondary-container">
                 We sent an 8-digit code to{" "}
-                <span className="font-medium text-foreground">
+                <span className="font-semibold text-on-surface">
                   {stage.email}
                 </span>
                 .
               </p>
-              <div className="space-y-1.5">
-                <Label htmlFor="otp">One-time code</Label>
-                <Input
+              <div className="space-y-xs">
+                <label
+                  htmlFor="otp"
+                  className="block font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant"
+                >
+                  One-time code
+                </label>
+                <input
                   id="otp"
                   type="text"
                   inputMode="numeric"
                   placeholder="00000000"
                   maxLength={8}
                   value={otp}
-                  onChange={(e) => setOtp(e.target.value.replace(/\D/g, ""))}
+                  onChange={(e) =>
+                    setOtp(e.target.value.replace(/\D/g, ""))
+                  }
                   onKeyDown={(e) =>
                     e.key === "Enter" && otp.length === 8 && verifyOtp()
                   }
-                  className="font-mono text-xl tracking-[0.4em] text-center"
                   autoFocus
                   autoComplete="one-time-code"
+                  className={otpInputClass}
                 />
               </div>
-              <Button
-                className="w-full"
+              <button
+                type="button"
+                className={primaryBtnClass}
                 onClick={verifyOtp}
                 disabled={otp.length < 8}
               >
                 Verify & sign in
-              </Button>
-              <div className="flex items-center justify-between pt-1">
+              </button>
+              <div className="flex items-center justify-between pt-xs">
                 <button
                   type="button"
-                  className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+                  className="font-label-sm text-label-sm text-on-secondary-container transition-colors hover:text-primary"
                   onClick={() => {
                     setOtp("");
                     setEmail(stage.email);
@@ -214,7 +242,7 @@ export default function LoginPage() {
                 <button
                   type="button"
                   disabled={resendCountdown > 0}
-                  className="text-xs text-muted-foreground hover:text-foreground transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="font-label-sm text-label-sm text-on-secondary-container transition-colors hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
                   onClick={() => sendOtp(stage.email)}
                 >
                   {resendCountdown > 0
@@ -225,36 +253,20 @@ export default function LoginPage() {
             </>
           )}
 
-          {/* ── Loading ── */}
           {isLoading && (
-            <div className="flex flex-col items-center gap-3 py-6">
-              <svg
-                className="h-6 w-6 animate-spin text-muted-foreground"
-                xmlns="http://www.w3.org/2000/svg"
-                fill="none"
-                viewBox="0 0 24 24"
-              >
-                <circle
-                  className="opacity-25"
-                  cx="12"
-                  cy="12"
-                  r="10"
-                  stroke="currentColor"
-                  strokeWidth="4"
-                />
-                <path
-                  className="opacity-75"
-                  fill="currentColor"
-                  d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"
-                />
-              </svg>
-              <p className="text-sm text-muted-foreground">Please wait…</p>
+            <div className="flex flex-col items-center gap-sm py-lg">
+              <span className="material-symbols-outlined animate-spin text-[28px] text-primary">
+                progress_activity
+              </span>
+              <p className="font-body-md text-body-md text-on-secondary-container">
+                Please wait…
+              </p>
             </div>
           )}
-        </CardContent>
-      </Card>
+        </div>
+      </div>
 
-      <p className="text-center text-xs text-muted-foreground">
+      <p className="mt-md text-center font-label-sm text-label-sm text-on-secondary-container md:font-body-md md:text-body-md">
         No password needed — we&apos;ll email you a one-time code.
       </p>
     </div>

@@ -1,11 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { QRCodeSVG } from "qrcode.react";
 
-import { AddressQR } from "@/components/AddressQR";
 import { BalanceBadge } from "@/components/BalanceBadge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useBalance } from "@/hooks/useBalance";
 import { useWallet } from "@/hooks/useWallet";
 import { formatSatoshis } from "@/lib/format";
@@ -29,6 +28,14 @@ export default function MintPage() {
   const { total, refetch: refetchBalance } = useBalance();
 
   const [stage, setStage] = useState<Stage>({ kind: "recovering" });
+  // Presentational only — copy-to-clipboard feedback for the deposit address.
+  const [copied, setCopied] = useState(false);
+  const copyAddress = useCallback(() => {
+    if (stage.kind !== "ready") return;
+    void navigator.clipboard.writeText(stage.address);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }, [stage]);
   const baselineRef = useRef<string | null>(null);
   // The most recently recovered/created deposit account — reused across "Mint more" cycles
   // so we never create a new Canton contract unless there are literally zero existing ones.
@@ -172,98 +179,168 @@ export default function MintPage() {
   };
 
   return (
-    <div className="mx-auto max-w-lg space-y-8 py-4">
-      <h1 className="text-2xl font-semibold">Mint CBTC</h1>
-
-      {stage.kind === "recovering" && (
-        <Card>
-          <CardContent className="py-8 text-center text-sm text-muted-foreground">
-            Checking for existing deposit account…
-          </CardContent>
-        </Card>
-      )}
-
-      {stage.kind === "idle" && (
-        <div className="space-y-3">
-          <p className="text-sm text-muted-foreground">
-            Generate a Bitcoin deposit address. Send at least{" "}
-            <span className="font-medium text-foreground">0.001 BTC</span>{" "}
-            (minimum). After 6 Bitcoin confirmations (~60 min) and attestor
-            verification (~60–120 sec), CBTC will appear in your balance.
+    <div className="flex flex-col items-center py-lg">
+      {/* Minting widget — fixed 480px central column per the design system. */}
+      <div className="w-full max-w-bridge-widget-width space-y-md">
+        {/* Page header */}
+        <div className="mb-lg space-y-2 text-center">
+          <h1 className="text-display-lg text-on-background">Mint CBTC</h1>
+          <p className="mx-auto max-w-[400px] text-body-lg text-on-surface-variant">
+            Send Bitcoin to the address below to mint cross-chain CBTC on the
+            network.
           </p>
-          <Button
-            onClick={() => start().catch(console.error)}
-            className="w-full"
-          >
-            Generate deposit address
-          </Button>
         </div>
-      )}
 
-      {(stage.kind === "creating-account" ||
-        stage.kind === "fetching-address") && (
-        <Card>
-          <CardContent className="py-8 text-center text-sm text-muted-foreground">
+        {stage.kind === "recovering" && (
+          <div className="rounded-2xl border border-outline/10 bg-surface-container-lowest p-8 text-center text-body-md text-on-surface-variant shadow-sm">
+            Checking for existing deposit account…
+          </div>
+        )}
+
+        {stage.kind === "idle" && (
+          <div className="space-y-md rounded-2xl border border-outline/10 bg-surface-container-lowest p-8 shadow-sm">
+            <p className="text-body-md text-on-surface-variant">
+              Generate a Bitcoin deposit address. Send at least{" "}
+              <span className="font-semibold text-on-surface">0.001 BTC</span>{" "}
+              (minimum). After 6 Bitcoin confirmations (~60 min) and attestor
+              verification (~60–120 sec), CBTC will appear in your balance.
+            </p>
+            <Button
+              onClick={() => start().catch(console.error)}
+              className="flex h-auto w-full items-center justify-center gap-2 rounded-lg bg-primary-container py-3.5 text-body-lg font-bold text-on-primary shadow-sm transition-all hover:brightness-105 active:scale-[0.98]"
+            >
+              Generate deposit address
+              <span className="material-symbols-outlined text-[20px]">
+                arrow_forward
+              </span>
+            </Button>
+          </div>
+        )}
+
+        {(stage.kind === "creating-account" ||
+          stage.kind === "fetching-address") && (
+          <div className="rounded-2xl border border-outline/10 bg-surface-container-lowest p-8 text-center text-body-md text-on-surface-variant shadow-sm">
             {stage.kind === "creating-account" &&
               "Creating your deposit account on Canton…"}
             {stage.kind === "fetching-address" &&
               "Fetching your Bitcoin deposit address…"}
-          </CardContent>
-        </Card>
-      )}
-
-      {stage.kind === "ready" && (
-        <div className="space-y-8">
-          <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-xs leading-relaxed text-amber-800 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-300">
-            <span aria-hidden className="mt-px shrink-0">⚠️</span>
-            <span>
-              Send at least <span className="font-semibold">0.001 BTC</span> to
-              this address. Amounts below the minimum will not be processed and
-              cannot be recovered.
-            </span>
           </div>
-          <AddressQR
-            value={stage.address}
-            label="CBTC appears after 6 Bitcoin confirmations (~60 min) plus attestor processing (~60–120 sec)."
-          />
-        </div>
-      )}
+        )}
 
-      {stage.kind === "minted" && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-green-600">CBTC received!</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <p className="text-sm text-muted-foreground">
-              <span className="font-medium text-foreground">
+        {stage.kind === "ready" && (
+          <>
+            {/* Bridge card: QR + deposit address + live monitoring status. */}
+            <div className="space-y-md rounded-2xl border border-outline/10 bg-surface-container-lowest p-8 shadow-sm">
+              {/* QR */}
+              <div className="flex flex-col items-center justify-center py-4">
+                <div className="rounded-xl bg-white p-4 shadow-sm">
+                  <QRCodeSVG value={stage.address} size={192} level="M" />
+                </div>
+              </div>
+
+              {/* Deposit address + copy */}
+              <div className="space-y-sm">
+                <label className="block px-1 text-center text-label-sm uppercase tracking-widest text-on-surface-variant">
+                  Bitcoin Deposit Address
+                </label>
+                <div className="flex items-center gap-3 rounded-xl border border-outline/5 bg-surface-container p-4 transition-all focus-within:border-primary">
+                  <span className="flex-1 overflow-hidden text-ellipsis break-all font-mono text-label-sm text-on-surface">
+                    {stage.address}
+                  </span>
+                  <button
+                    onClick={copyAddress}
+                    title="Copy to clipboard"
+                    className="flex items-center justify-center rounded-lg p-2 text-primary transition-all hover:bg-primary-container/20 active:scale-90"
+                  >
+                    <span className="material-symbols-outlined text-[20px]">
+                      {copied ? "check" : "content_copy"}
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Stats */}
+            <div className="space-y-1 rounded-xl border border-outline/5 bg-surface-container-low p-4">
+              <span className="block text-[11px] font-bold uppercase tracking-tighter text-on-surface-variant">
+                Est. Time
+              </span>
+              <div className="flex items-center gap-1.5">
+                <span className="material-symbols-outlined text-[18px] text-on-surface-variant">
+                  schedule
+                </span>
+                <span className="text-headline-md leading-none text-on-surface">
+                  ~60m
+                </span>
+              </div>
+            </div>
+
+            {/* Important Information */}
+            <div className="flex items-start gap-4 rounded-xl border border-primary-container/20 bg-primary-container/10 p-5">
+              <span className="material-symbols-outlined mt-1 text-primary">
+                info
+              </span>
+              <div className="space-y-1">
+                <h4 className="font-mono text-label-sm font-bold text-on-primary-container">
+                  Important Information
+                </h4>
+                <p className="text-[13px] leading-relaxed text-on-primary-container/80">
+                  Minimum deposit is{" "}
+                  <span className="font-bold">0.001 BTC</span>. Deposits below
+                  this amount will not be processed and cannot be recovered.
+                  Requires 6 network confirmations to begin minting.
+                </p>
+              </div>
+            </div>
+          </>
+        )}
+
+        {stage.kind === "minted" && (
+          <div className="space-y-md rounded-2xl border border-outline/10 bg-surface-container-lowest p-8 text-center shadow-sm">
+            <div className="flex flex-col items-center gap-2">
+              <span className="material-symbols-outlined text-[40px] text-tertiary">
+                check_circle
+              </span>
+              <h2 className="text-headline-lg text-on-background">
+                CBTC received
+              </h2>
+            </div>
+            <p className="text-body-md text-on-surface-variant">
+              <span className="font-semibold text-on-surface">
                 {stage.amount} CBTC
               </span>{" "}
               has been minted to your party.
             </p>
-            <BalanceBadge amount={total} size="lg" />
-            <Button onClick={reset} className="w-full">
+            <div className="flex justify-center">
+              <BalanceBadge amount={total} size="lg" />
+            </div>
+            <Button
+              onClick={reset}
+              className="w-full rounded-lg bg-primary text-on-primary hover:opacity-90"
+            >
               Mint more CBTC
             </Button>
-          </CardContent>
-        </Card>
-      )}
+          </div>
+        )}
 
-      {stage.kind === "error" && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-destructive">Mint failed</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <pre className="overflow-x-auto rounded bg-muted p-2 text-xs">
+        {stage.kind === "error" && (
+          <div className="space-y-md rounded-2xl border border-error/20 bg-surface-container-lowest p-8 shadow-sm">
+            <div className="flex items-center gap-2">
+              <span className="material-symbols-outlined text-error">error</span>
+              <h2 className="text-headline-md text-error">Mint failed</h2>
+            </div>
+            <pre className="overflow-x-auto rounded-lg bg-surface-container p-3 font-mono text-label-sm text-on-surface-variant">
               {stage.message}
             </pre>
-            <Button onClick={reset} className="w-full">
+            <Button
+              onClick={reset}
+              className="w-full rounded-lg bg-primary text-on-primary hover:opacity-90"
+            >
               Try again
             </Button>
-          </CardContent>
-        </Card>
-      )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

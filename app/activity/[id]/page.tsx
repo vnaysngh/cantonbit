@@ -1,18 +1,10 @@
 "use client";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  ArrowLeft,
-  ArrowUpRight,
-  Check,
-  Clock,
-  Copy as CopyIcon
-} from "lucide-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
-import { Card, CardContent } from "@/components/ui/card";
 import { NETWORK } from "@/lib/constants";
 import { formatBtc } from "@/lib/format";
 import type { ActivityRow } from "@/lib/types";
@@ -219,22 +211,21 @@ export default function ActivityDetailPage() {
   const loading = isLoading && !detail;
 
   return (
-    <div className="mx-auto max-w-4xl space-y-8">
+    <div className="mx-auto w-full max-w-container-max space-y-md pb-lg">
       <Link
         href="/activity"
-        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+        className="inline-flex w-fit items-center gap-xs text-on-secondary-container transition-colors hover:text-primary active:scale-95"
       >
-        <ArrowLeft className="h-4 w-4" /> Back to activity
+        <span className="material-symbols-outlined text-[20px]">arrow_back</span>
+        <span className="font-label-sm text-label-sm">Back to activity</span>
       </Link>
 
       {loading && <PageSkeleton />}
 
       {!loading && errorMsg && (
-        <Card>
-          <CardContent className="py-16 text-center text-sm text-muted-foreground">
-            {errorMsg}
-          </CardContent>
-        </Card>
+        <div className="rounded-xl border border-outline-variant bg-surface-container-lowest p-md text-center font-body-md text-body-md text-on-secondary-container">
+          {errorMsg}
+        </div>
       )}
 
       {!loading && detail?.kind === "redeem" && (
@@ -249,34 +240,35 @@ export default function ActivityDetailPage() {
 
 function PageSkeleton() {
   return (
-    <div className="space-y-6">
-      <div className="space-y-3">
-        <div className="h-5 w-28 animate-pulse rounded-full bg-muted" />
-        <div className="h-12 w-64 animate-pulse rounded bg-muted" />
-        <div className="h-4 w-48 animate-pulse rounded bg-muted" />
+    <div className="space-y-lg">
+      <div className="space-y-sm">
+        <div className="h-6 w-28 animate-pulse rounded-full bg-surface-container-high" />
+        <div className="h-12 w-64 animate-pulse rounded-lg bg-surface-container-high" />
+        <div className="h-4 w-48 animate-pulse rounded bg-surface-container-high" />
       </div>
-      <div className="grid gap-6 lg:grid-cols-[1fr_380px]">
-        <Card>
-          <CardContent className="space-y-6 py-6 px-6">
+      <div className="grid grid-cols-1 gap-md lg:grid-cols-12">
+        <div className="rounded-xl border border-outline-variant bg-surface-container-lowest p-md lg:col-span-7">
+          <div className="space-y-lg">
             {[0, 1, 2].map((i) => (
-              <div key={i} className="flex gap-4">
-                <div className="h-6 w-6 shrink-0 animate-pulse rounded-full bg-muted mt-0.5" />
-                <div className="flex-1 space-y-2">
-                  <div className="h-4 w-2/3 animate-pulse rounded bg-muted" />
-                  <div className="h-3 w-1/2 animate-pulse rounded bg-muted" />
+              <div key={i} className="flex gap-md">
+                <div className="mt-0.5 h-6 w-6 shrink-0 animate-pulse rounded-full bg-surface-container-high" />
+                <div className="flex-1 space-y-xs">
+                  <div className="h-4 w-2/3 animate-pulse rounded bg-surface-container-high" />
+                  <div className="h-3 w-1/2 animate-pulse rounded bg-surface-container-high" />
                 </div>
               </div>
             ))}
-          </CardContent>
-        </Card>
-        <div className="space-y-3">
+          </div>
+        </div>
+        <div className="space-y-md lg:col-span-5">
           {[0, 1].map((i) => (
-            <Card key={i}>
-              <CardContent className="py-4 px-4 space-y-2">
-                <div className="h-3 w-20 animate-pulse rounded bg-muted" />
-                <div className="h-4 w-full animate-pulse rounded bg-muted" />
-              </CardContent>
-            </Card>
+            <div
+              key={i}
+              className="rounded-xl border border-outline-variant bg-surface-container-lowest p-md"
+            >
+              <div className="mb-sm h-3 w-20 animate-pulse rounded bg-surface-container-high" />
+              <div className="h-4 w-full animate-pulse rounded bg-surface-container-high" />
+            </div>
           ))}
         </div>
       </div>
@@ -284,23 +276,24 @@ function PageSkeleton() {
   );
 }
 
-/* ─── Shared sub-components ─── */
+/* ─── Shared sub-components (stitch_minimal wireframe) ─── */
 
 type BadgeTone = "success" | "info" | "warning" | "neutral";
 
-function Badge({ label, tone }: { label: string; tone: BadgeTone }) {
+function StatusBadge({ label, tone }: { label: string; tone: BadgeTone }) {
   const cls: Record<BadgeTone, string> = {
     success:
-      "bg-green-500/10 text-green-600 dark:text-green-400 border border-green-500/20",
-    info: "bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20",
+      "bg-tertiary-container/10 text-tertiary border-tertiary-container/20",
+    info: "bg-secondary-container/30 text-secondary border-secondary-container",
     warning:
-      "bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20",
-    neutral: "bg-muted text-muted-foreground border border-border"
+      "bg-primary-container/20 text-primary border-primary-container/30",
+    neutral:
+      "bg-surface-container text-on-surface-variant border-outline-variant"
   };
   return (
     <span
       className={cn(
-        "inline-flex h-6 items-center rounded-full px-3 text-[11px] font-medium tracking-wide",
+        "inline-flex items-center rounded-full border px-sm py-xs font-label-sm text-label-sm",
         cls[tone]
       )}
     >
@@ -317,14 +310,34 @@ function DetailCard({
   children: React.ReactNode;
 }) {
   return (
-    <Card>
-      <CardContent className="py-4 px-4">
-        <p className="mb-2 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
-          {label}
-        </p>
-        {children}
-      </CardContent>
-    </Card>
+    <div className="rounded-xl border border-outline-variant bg-surface-container-lowest p-md">
+      <h2 className="mb-sm font-label-sm text-label-sm uppercase tracking-widest text-on-surface-variant">
+        {label}
+      </h2>
+      {children}
+    </div>
+  );
+}
+
+function ExplorerLink({
+  href,
+  label
+}: {
+  href: string;
+  label: string;
+}) {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="group mt-sm inline-flex w-fit items-center gap-xs font-label-sm text-label-sm text-primary transition-all hover:underline active:scale-95"
+    >
+      {label}
+      <span className="material-symbols-outlined text-[14px] transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5">
+        north_east
+      </span>
+    </a>
   );
 }
 
@@ -351,49 +364,123 @@ function CopyableField({
   };
   return (
     <DetailCard label={label}>
-      <div className="flex items-start gap-2">
-        <p className="flex-1 break-all font-mono text-xs leading-relaxed">
+      <div className="mb-xs flex items-center justify-between gap-sm">
+        <p className="flex-grow break-all rounded-lg border border-outline-variant bg-surface-container-low p-sm font-label-sm text-label-sm text-on-surface">
           {value}
         </p>
         <button
           type="button"
           onClick={copy}
-          className="shrink-0 inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+          className="shrink-0 p-xs text-on-secondary-container transition-colors hover:text-primary active:scale-95"
+          aria-label="Copy"
         >
-          {copied ? (
-            <>
-              <Check className="h-3 w-3" />
-              Copied
-            </>
-          ) : (
-            <>
-              <CopyIcon className="h-3 w-3" />
-              Copy
-            </>
-          )}
+          <span className="material-symbols-outlined text-[20px]">
+            {copied ? "check" : "content_copy"}
+          </span>
         </button>
       </div>
       {href && (
-        <a
-          href={href}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="mt-2 inline-flex items-center gap-1 text-[11px] font-medium text-blue-500 hover:underline"
-        >
-          {hrefLabel ?? "Open"} <ArrowUpRight className="h-3 w-3" />
-        </a>
+        <ExplorerLink href={href} label={hrefLabel ?? "View on mempool.space"} />
       )}
     </DetailCard>
   );
 }
 
-/* ─── Timeline step ─── */
+function DetailHeader({
+  statusLabel,
+  tone,
+  amountDisplay,
+  timestamp
+}: {
+  statusLabel: string;
+  tone: BadgeTone;
+  amountDisplay: string;
+  timestamp: string | null;
+}) {
+  return (
+    <section className="mb-lg">
+      <div className="mb-sm">
+        <StatusBadge label={statusLabel} tone={tone} />
+      </div>
+      <div className="mt-xs flex items-baseline gap-sm">
+        <h1 className="font-headline-lg-mobile text-headline-lg-mobile font-bold text-on-surface md:font-headline-lg md:text-headline-lg md:font-semibold lg:text-display-lg lg:font-bold lg:tracking-tight">
+          {amountDisplay}
+        </h1>
+        <span className="font-headline-md text-headline-md text-on-surface-variant">
+          CBTC
+        </span>
+      </div>
+      {timestamp && (
+        <div className="mt-xs flex items-center gap-xs text-on-secondary-container">
+          <span className="material-symbols-outlined text-[18px]">schedule</span>
+          <span className="font-label-sm text-label-sm uppercase md:normal-case">
+            {timestamp}
+          </span>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function TimelinePanel({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="rounded-xl border border-outline-variant bg-surface-container-lowest p-md lg:col-span-7">
+      <h2 className="mb-lg font-label-sm text-label-sm uppercase tracking-widest text-on-surface-variant">
+        Timeline
+      </h2>
+      <div className="relative ml-xs space-y-lg">
+        <div
+          aria-hidden
+          className="absolute bottom-2 left-3 top-2 w-0.5 bg-surface-container-high"
+        />
+        <ol className="relative space-y-lg">{children}</ol>
+      </div>
+    </div>
+  );
+}
+
+/** Centered SVG check — avoids Material Symbol clipping in 24px circles. */
+function TimelineCheckIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      fill="none"
+      className="h-3.5 w-3.5 shrink-0"
+      aria-hidden
+    >
+      <path
+        d="M3.5 8.25 6.5 11.25 12.5 4.75"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function TimelineErrorIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      fill="none"
+      className="h-3.5 w-3.5 shrink-0"
+      aria-hidden
+    >
+      <path
+        d="M8 4.5v4M8 11.25h.01"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
 
 function Step({
   done = false,
   active = false,
   error = false,
-  last = false,
   title,
   detail,
   time
@@ -401,61 +488,66 @@ function Step({
   done?: boolean;
   active?: boolean;
   error?: boolean;
-  last?: boolean;
   title: string;
   detail: string;
   time?: string;
 }) {
-  const dot = error
-    ? "border border-amber-500/50 text-amber-500"
-    : done
-      ? "border border-green-500/40 bg-green-500/10 text-green-500"
-      : active
-        ? "border border-foreground/40 text-foreground"
-        : "border border-border/40 text-muted-foreground/20";
+  const dotClass = cn(
+    "relative z-10 flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-full",
+    error && "bg-primary-container text-on-primary",
+    done && "bg-tertiary text-on-tertiary",
+    active && !done && !error && "bg-tertiary text-on-tertiary active-dot",
+    !done &&
+      !active &&
+      !error &&
+      "border-2 border-surface-container-high bg-surface-container-lowest"
+  );
 
   return (
-    <li className="flex gap-4">
-      <div className="flex flex-col items-center">
-        <span
-          className={cn(
-            "flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px]",
-            dot
-          )}
-        >
-          {done ? (
-            <Check className="h-3 w-3" strokeWidth={2} />
-          ) : error ? (
-            "!"
-          ) : active ? (
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
-          ) : null}
-        </span>
-        {!last && <div className="mt-1 w-px flex-1 bg-border min-h-[28px]" />}
+    <li className="relative flex items-start gap-md">
+      <div className={dotClass}>
+        {done ? (
+          <TimelineCheckIcon />
+        ) : error ? (
+          <TimelineErrorIcon />
+        ) : active ? (
+          <span className="h-2 w-2 animate-pulse-slow rounded-full bg-on-tertiary" />
+        ) : null}
       </div>
-      <div className={cn("flex-1 pb-6", last && "pb-0")}>
-        <div className="flex items-start justify-between gap-6">
-          <div className="space-y-0.5">
-            <p
-              className={cn(
-                "text-sm font-semibold leading-snug",
-                !(done || active || error) && "text-muted-foreground/40"
-              )}
-            >
-              {title}
-            </p>
-            <p className="text-xs text-muted-foreground leading-relaxed">
-              {detail}
-            </p>
-          </div>
-          {time && (
-            <p className="shrink-0 text-[11px] tabular-nums text-muted-foreground whitespace-nowrap">
-              {time}
-            </p>
-          )}
+      <div className="flex flex-1 items-start justify-between gap-md">
+        <div>
+          <h3
+            className={cn(
+              "font-semibold text-on-surface text-body-lg",
+              !done && !active && !error && "text-on-surface-variant/60"
+            )}
+          >
+            {title}
+          </h3>
+          <p className="font-body-md text-body-md text-on-secondary-container">
+            {detail}
+          </p>
         </div>
+        {time ? (
+          <span className="shrink-0 pt-1 font-label-sm text-label-sm text-on-surface-variant tabular-nums">
+            {time}
+          </span>
+        ) : null}
       </div>
     </li>
+  );
+}
+
+function SupportCard({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="rounded-xl border border-secondary-container bg-secondary-container/20 p-md">
+      <div className="flex gap-sm">
+        <span className="material-symbols-outlined text-secondary">info</span>
+        <div className="font-body-md text-body-md text-on-secondary-container">
+          {children}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -475,135 +567,95 @@ function RedeemView({ redeem }: { redeem: RedeemDetail }) {
     stalled: "Stalled — bridge delay"
   }[redeem.status];
 
-  // Always show the details column — even pending redeems have a destination address and initiated time.
-  const hasDetails = true;
-
   return (
-    <div className="space-y-8">
-      {/* Header */}
-      <div className="space-y-2">
-        <Badge label={statusLabel} tone={tone} />
-        <div className="flex items-baseline gap-2">
-          <h1 className="text-5xl font-bold tabular-nums tracking-tight">
-            {formatBtc(redeem.amount)}
-          </h1>
-          <span className="text-2xl font-medium text-muted-foreground">
-            CBTC
-          </span>
+    <div>
+      <DetailHeader
+        statusLabel={statusLabel}
+        tone={tone}
+        amountDisplay={formatBtc(redeem.amount)}
+        timestamp={redeem.createdAt ? fmtFull(redeem.createdAt) : null}
+      />
+
+      <div className="grid grid-cols-1 gap-md lg:grid-cols-12 lg:gap-md">
+        <TimelinePanel>
+          <Step
+            done
+            title={`Burned ${formatBtc(redeem.amount)} CBTC`}
+            detail="Destroyed on Canton ledger."
+            time={fmtShort(redeem.createdAt)}
+          />
+          <Step
+            done={redeem.status !== "burned"}
+            active={redeem.status === "burned"}
+            title="Bridge picked up redemption"
+            detail={
+              redeem.status === "burned"
+                ? "Waiting for the bridge to assign a Bitcoin transaction…"
+                : "Bridge assigned a Bitcoin transaction."
+            }
+            time={fmtShort(redeem.requestSeenAt) || undefined}
+          />
+          <Step
+            done={redeem.status === "sent"}
+            active={redeem.status === "broadcasting"}
+            error={redeem.status === "stalled"}
+            title="Bitcoin broadcast"
+            detail={
+              redeem.status === "sent"
+                ? "Confirmed on the Bitcoin network."
+                : redeem.status === "stalled"
+                  ? "Transaction assigned but not yet on-chain."
+                  : "Broadcasting to the Bitcoin network…"
+            }
+            time={fmtShort(redeem.btcConfirmedAt) || undefined}
+          />
+        </TimelinePanel>
+
+        <div className="flex flex-col gap-md lg:col-span-5">
+          {redeem.createdAt && (
+            <DetailCard label="Initiated">
+              <p className="font-body-lg font-semibold text-on-surface">
+                {fmtFull(redeem.createdAt)}
+              </p>
+            </DetailCard>
+          )}
+          {redeem.destinationBtcAddress && (
+            <DetailCard label="Destination address">
+              <p className="mb-sm break-all rounded-lg border border-outline-variant bg-surface-container-low p-sm font-label-sm text-label-sm text-on-surface">
+                {redeem.destinationBtcAddress}
+              </p>
+              {(() => {
+                const url = explorerAddrUrl(redeem.destinationBtcAddress);
+                return url ? (
+                  <ExplorerLink href={url} label="Track on mempool.space" />
+                ) : null;
+              })()}
+            </DetailCard>
+          )}
+          {redeem.btcTxId && (
+            <CopyableField
+              label="Bitcoin transaction ID"
+              value={redeem.btcTxId}
+              href={explorerTxUrl(redeem.btcTxId)}
+              hrefLabel="View on mempool.space"
+            />
+          )}
+          {redeem.status === "stalled" && (
+            <SupportCard>
+              <p className="font-semibold text-secondary">Bridge delay</p>
+              <p className="mt-xs font-label-sm text-label-sm">
+                Your CBTC is burned and recorded on Canton. Contact{" "}
+                <a
+                  href="mailto:support@bitsafe.finance"
+                  className="font-semibold text-primary underline"
+                >
+                  support@bitsafe.finance
+                </a>{" "}
+                if it doesn&apos;t resolve.
+              </p>
+            </SupportCard>
+          )}
         </div>
-        {redeem.createdAt && (
-          <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
-            <Clock className="h-3.5 w-3.5 shrink-0" />{" "}
-            {fmtFull(redeem.createdAt)}
-          </p>
-        )}
-      </div>
-
-      {/* Body */}
-      <div
-        className={cn("grid gap-6", hasDetails && "lg:grid-cols-[1fr_380px]")}
-      >
-        {/* Timeline */}
-        <Card>
-          <CardContent className="py-6 px-6">
-            <p className="mb-6 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
-              Timeline
-            </p>
-            <ol className="space-y-0">
-              <Step
-                done
-                title={`Burned ${formatBtc(redeem.amount)} CBTC`}
-                detail="Destroyed on Canton ledger."
-                time={fmtShort(redeem.createdAt)}
-                last={false}
-              />
-              <Step
-                done={redeem.status !== "burned"}
-                active={redeem.status === "burned"}
-                title="Bridge picked up redemption"
-                detail={
-                  redeem.status === "burned"
-                    ? "Waiting for the bridge to assign a Bitcoin transaction…"
-                    : "Bridge assigned a Bitcoin transaction."
-                }
-                time={fmtShort(redeem.requestSeenAt)}
-                last={false}
-              />
-              <Step
-                done={redeem.status === "sent"}
-                active={redeem.status === "broadcasting"}
-                error={redeem.status === "stalled"}
-                title="Bitcoin broadcast"
-                detail={
-                  redeem.status === "sent"
-                    ? "Confirmed on the Bitcoin network."
-                    : redeem.status === "stalled"
-                      ? "Transaction assigned but not yet on-chain."
-                      : "Broadcasting to the Bitcoin network…"
-                }
-                time={fmtShort(redeem.btcConfirmedAt)}
-                last
-              />
-            </ol>
-          </CardContent>
-        </Card>
-
-        {/* Details column */}
-        {hasDetails && (
-          <div className="space-y-3">
-            {redeem.createdAt && (
-              <DetailCard label="Initiated">
-                <p className="text-sm font-medium">
-                  {fmtFull(redeem.createdAt)}
-                </p>
-              </DetailCard>
-            )}
-            {redeem.destinationBtcAddress && (
-              <DetailCard label="Destination address">
-                <p className="break-all font-mono text-xs leading-relaxed">
-                  {redeem.destinationBtcAddress}
-                </p>
-                {(() => {
-                  const url = explorerAddrUrl(redeem.destinationBtcAddress);
-                  return url ? (
-                    <a
-                      href={url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="mt-2 inline-flex items-center gap-1 text-[11px] font-medium text-blue-500 hover:underline"
-                    >
-                      Track on mempool.space{" "}
-                      <ArrowUpRight className="h-3 w-3" />
-                    </a>
-                  ) : null;
-                })()}
-              </DetailCard>
-            )}
-            {redeem.btcTxId && (
-              <CopyableField
-                label="Bitcoin transaction ID"
-                value={redeem.btcTxId}
-                href={explorerTxUrl(redeem.btcTxId)}
-                hrefLabel="View on mempool.space"
-              />
-            )}
-            {redeem.status === "stalled" && (
-              <Card className="border-amber-400/30 bg-amber-50 dark:bg-amber-950/20">
-                <CardContent className="py-4 px-4 text-xs leading-relaxed text-amber-800 dark:text-amber-300">
-                  Your CBTC is burned and recorded on Canton. This is a delay on
-                  the bridge side. Contact{" "}
-                  <a
-                    href="mailto:support@bitsafe.finance"
-                    className="font-semibold underline"
-                  >
-                    support@bitsafe.finance
-                  </a>{" "}
-                  if it doesn&apos;t resolve.
-                </CardContent>
-              </Card>
-            )}
-          </div>
-        )}
       </div>
     </div>
   );
@@ -728,152 +780,117 @@ function MintView({ mint }: { mint: MintDetail }) {
   const hasDetails = !!(mint.deliveredAt || mint.bitcoinAddress || btc?.txid);
 
   return (
-    <div className="space-y-8">
-      {/* Header */}
-      <div className="space-y-2">
-        <Badge label={statusLabel} tone={tone} />
-        <div className="flex items-baseline gap-2">
-          <h1 className="text-5xl font-bold tabular-nums tracking-tight">
-            {mint.amount ? formatBtc(mint.amount) : "—"}
-          </h1>
-          <span className="text-2xl font-medium text-muted-foreground">
-            CBTC
-          </span>
-        </div>
-        {timestamp && (
-          <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
-            <Clock className="h-3.5 w-3.5 shrink-0" /> {fmtFull(timestamp)}
-          </p>
-        )}
-      </div>
+    <div>
+      <DetailHeader
+        statusLabel={statusLabel}
+        tone={tone}
+        amountDisplay={mint.amount ? formatBtc(mint.amount) : "—"}
+        timestamp={timestamp ? fmtFull(timestamp) : null}
+      />
 
-      {/* Body */}
-      <div
-        className={cn("grid gap-6", hasDetails && "lg:grid-cols-[1fr_380px]")}
-      >
-        {/* Timeline */}
-        <Card>
-          <CardContent className="py-6 px-6">
-            <p className="mb-6 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
-              Timeline
-            </p>
-            {isOrphan ? (
-              <ol className="space-y-0">
-                <Step
-                  done
-                  title="Bitcoin received"
-                  detail={
-                    btc?.receivedBtc
-                      ? `${btc.receivedBtc.toFixed(8)} BTC deposited.`
-                      : "BTC was received."
-                  }
-                  time={
-                    btc?.blockHeight ? `block ${btc.blockHeight}` : undefined
-                  }
-                  last={false}
-                />
-                <Step
-                  done
-                  title={`${CONFS_REQUIRED} Bitcoin confirmations`}
-                  detail="Confirmed on the Bitcoin network."
-                  last={false}
-                />
-                <Step
-                  done
-                  title="CBTC delivered to your wallet"
-                  detail={`${mint.amount ? formatBtc(mint.amount) + " " : ""}CBTC minted to your wallet.`}
-                  time={fmtShort(mint.deliveredAt)}
-                  last
-                />
-              </ol>
-            ) : (
-              <ol className="space-y-0">
-                <Step
-                  done={!!mint.depositAccountCreatedAt}
-                  title="Deposit account created"
-                  detail="A Bitcoin deposit address was issued for you on Canton."
-                  time={fmtShort(mint.depositAccountCreatedAt)}
-                  last={false}
-                />
-                <Step
-                  done={btcSeen || delivered}
-                  active={!btcSeen && !delivered}
-                  title="Bitcoin received"
-                  detail={
-                    btcLoading
-                      ? "Checking the Bitcoin chain…"
-                      : btcSeen
-                        ? btc?.receivedBtc
-                          ? `${btc.receivedBtc.toFixed(8)} BTC seen at deposit address.`
-                          : "Deposit detected."
-                        : delivered
-                          ? "BTC was received."
-                          : "Send BTC to your deposit address."
-                  }
-                  time={
-                    btc?.blockHeight ? `block ${btc.blockHeight}` : undefined
-                  }
-                  last={false}
-                />
-                <Step
-                  done={confirmed || delivered}
-                  active={btcSeen && !confirmed && !delivered}
-                  title={`${CONFS_REQUIRED} Bitcoin confirmations`}
-                  detail={
-                    delivered
-                      ? "Confirmed."
-                      : btcSeen
-                        ? confirmed
-                          ? "Confirmed. Bridge releasing CBTC."
-                          : `${confs} of ${CONFS_REQUIRED} — ~10 min each.`
-                        : "Starts once your BTC is in a block."
-                  }
-                  last={false}
-                />
-                <Step
-                  done={delivered}
-                  active={confirmed && !delivered}
-                  title="CBTC delivered to your wallet"
-                  detail={
-                    delivered
-                      ? `${mint.amount ? formatBtc(mint.amount) + " " : ""}CBTC is in your wallet.`
-                      : "Bridging onto Canton…"
-                  }
-                  time={fmtShort(mint.deliveredAt)}
-                  last
-                />
-              </ol>
-            )}
-          </CardContent>
-        </Card>
+      <div className="grid grid-cols-1 gap-md lg:grid-cols-12">
+        <TimelinePanel>
+          {isOrphan ? (
+            <>
+              <Step
+                done
+                title="Bitcoin received"
+                detail={
+                  btc?.receivedBtc
+                    ? `${btc.receivedBtc.toFixed(8)} BTC deposited.`
+                    : "BTC was received."
+                }
+                time={
+                  btc?.blockHeight ? `block ${btc.blockHeight}` : undefined
+                }
+              />
+              <Step
+                done
+                title={`${CONFS_REQUIRED} Bitcoin confirmations`}
+                detail="Confirmed on the Bitcoin network."
+              />
+              <Step
+                done
+                active={delivered}
+                title="CBTC delivered to your wallet"
+                detail={`${mint.amount ? formatBtc(mint.amount) + " " : ""}CBTC minted to your wallet.`}
+                time={fmtShort(mint.deliveredAt) || undefined}
+              />
+            </>
+          ) : (
+            <>
+              <Step
+                done={!!mint.depositAccountCreatedAt}
+                title="Deposit account created"
+                detail="A Bitcoin deposit address was issued for you on Canton."
+                time={fmtShort(mint.depositAccountCreatedAt) || undefined}
+              />
+              <Step
+                done={btcSeen || delivered}
+                active={!btcSeen && !delivered}
+                title="Bitcoin received"
+                detail={
+                  btcLoading
+                    ? "Checking the Bitcoin chain…"
+                    : btcSeen
+                      ? btc?.receivedBtc
+                        ? `${btc.receivedBtc.toFixed(8)} BTC seen at deposit address.`
+                        : "Deposit detected."
+                      : delivered
+                        ? "BTC was received."
+                        : "Send BTC to your deposit address."
+                }
+                time={
+                  btc?.blockHeight ? `block ${btc.blockHeight}` : undefined
+                }
+              />
+              <Step
+                done={confirmed || delivered}
+                active={btcSeen && !confirmed && !delivered}
+                title={`${CONFS_REQUIRED} Bitcoin confirmations`}
+                detail={
+                  delivered
+                    ? "Confirmed on the Bitcoin network."
+                    : btcSeen
+                      ? confirmed
+                        ? "Confirmed. Bridge releasing CBTC."
+                        : `${confs} of ${CONFS_REQUIRED} — ~10 min each.`
+                      : "Starts once your BTC is in a block."
+                }
+              />
+              <Step
+                done={delivered}
+                active={confirmed && !delivered}
+                title="CBTC delivered to your wallet"
+                detail={
+                  delivered
+                    ? `${mint.amount ? formatBtc(mint.amount) + " " : ""}CBTC minted to your wallet.`
+                    : "Bridging onto Canton…"
+                }
+                time={fmtShort(mint.deliveredAt) || undefined}
+              />
+            </>
+          )}
+        </TimelinePanel>
 
-        {/* Details column */}
         {hasDetails && (
-          <div className="space-y-3">
+          <div className="flex flex-col gap-md lg:col-span-5">
             {mint.deliveredAt && (
               <DetailCard label="Delivered at">
-                <p className="text-sm font-medium">
+                <p className="font-body-lg font-semibold text-on-surface">
                   {fmtFull(mint.deliveredAt)}
                 </p>
               </DetailCard>
             )}
             {mint.bitcoinAddress && (
               <DetailCard label="Bitcoin deposit address">
-                <p className="break-all font-mono text-xs leading-relaxed">
+                <p className="mb-sm break-all rounded-lg bg-surface-container-low p-sm font-label-sm text-label-sm text-on-surface">
                   {mint.bitcoinAddress}
                 </p>
                 {(() => {
                   const url = explorerAddrUrl(mint.bitcoinAddress);
                   return url ? (
-                    <a
-                      href={url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="mt-2 inline-flex items-center gap-1 text-[11px] font-medium text-blue-500 hover:underline"
-                    >
-                      Track on mempool.space{" "}
-                      <ArrowUpRight className="h-3 w-3" />
-                    </a>
+                    <ExplorerLink href={url} label="Track on mempool.space" />
                   ) : null;
                 })()}
               </DetailCard>
@@ -886,6 +903,13 @@ function MintView({ mint }: { mint: MintDetail }) {
                 hrefLabel="View on mempool.space"
               />
             )}
+            <SupportCard>
+              <p className="font-semibold text-secondary">Need help?</p>
+              <p className="mt-xs font-label-sm text-label-sm">
+                If you have any issues with this transaction, contact our
+                support team with your transaction ID.
+              </p>
+            </SupportCard>
           </div>
         )}
       </div>

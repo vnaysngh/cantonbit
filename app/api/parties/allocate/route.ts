@@ -18,6 +18,7 @@ import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 
 import { getLedgerJwt } from "@/lib/auth";
+import { grantUserRightsForParty } from "@/lib/canton";
 import { NETWORK } from "@/lib/constants";
 import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
 
@@ -52,6 +53,18 @@ export async function POST() {
 
     if (existing?.canton_party_id) {
       console.log(`${TAG} returning existing party=${existing.canton_party_id}`);
+      // Self-heal: parties allocated before the rights-grant fix exist in the DB
+      // but never received CanActAs/CanReadAs, so their reads 403. Re-granting is
+      // idempotent on Canton, so it's safe to do on every login. We DON'T fail
+      // the request if this errors — the party is already persisted and a
+      // transient grant failure shouldn't lock the user out; the balance read
+      // will surface any lingering permission problem on its own.
+      try {
+        await grantUserRightsForParty(existing.canton_party_id);
+      } catch (grantErr) {
+        const msg = grantErr instanceof Error ? grantErr.message : String(grantErr);
+        console.error(`${TAG} heal-grant failed for existing party=${existing.canton_party_id}: ${msg}`);
+      }
       return NextResponse.json({ partyId: existing.canton_party_id, isNew: false });
     }
 
@@ -89,6 +102,27 @@ export async function POST() {
     }
 
     console.log(`${TAG} allocated partyId=${partyId}`);
+
+    // 3b. Grant the m2m ledger user CanActAs + CanReadAs rights for this new
+    // party. Without this, every active-contracts read for the party returns
+    // 403 PERMISSION_DENIED. Do this BEFORE storing the mapping and FAIL LOUDLY
+    // on error — we never want to persist a party the app can't actually read
+    // (that would leave the user stuck on a permanent "Couldn't load balance").
+    try {
+      await grantUserRightsForParty(partyId);
+    } catch (grantErr) {
+      const msg = grantErr instanceof Error ? grantErr.message : String(grantErr);
+      console.error(`${TAG} rights grant FAILED for party=${partyId}: ${msg}`);
+      return NextResponse.json(
+        {
+          error:
+            `Party allocated but granting ledger read/act rights failed: ${msg}. ` +
+            `The party was NOT saved — please retry. If this persists, the m2m ` +
+            `user likely lacks permission to grant rights.`,
+        },
+        { status: 502 },
+      );
+    }
 
     // 4. Store the mapping — write-once, service role bypasses RLS
     const { error: insertError } = await serviceClient
