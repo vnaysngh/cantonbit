@@ -16,19 +16,25 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { findWithdrawRequest } from "@/lib/redeem-ledger";
 import { NETWORK } from "@/lib/constants";
+import { resolveSessionParty } from "@/lib/session-party";
 
 const TAG = "[redeem/status]";
 
 export async function POST(req: NextRequest) {
   try {
-    const { partyId, destinationBtcAddress } = (await req.json()) as {
+    const { partyId: clientPartyId, destinationBtcAddress } = (await req.json()) as {
       partyId?: string;
       destinationBtcAddress?: string;
     };
 
-    if (!partyId || !destinationBtcAddress) {
+    // SECURITY: read only the session's own party's redeem status.
+    const sess = await resolveSessionParty(clientPartyId);
+    if (sess.error) return sess.error;
+    const partyId = sess.partyId;
+
+    if (!destinationBtcAddress) {
       return NextResponse.json(
-        { error: "partyId and destinationBtcAddress required" },
+        { error: "destinationBtcAddress required" },
         { status: 400 },
       );
     }

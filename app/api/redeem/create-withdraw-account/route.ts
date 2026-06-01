@@ -13,8 +13,8 @@ import { randomUUID } from "node:crypto";
 
 import { getLedgerJwt, invalidateLedgerJwtCache } from "@/lib/auth";
 import { getAccountContractRules } from "@/lib/bitsafe";
-import { captureReset, captureStep } from "@/lib/burn-capture";
 import { NETWORK } from "@/lib/constants";
+import { resolveSessionParty } from "@/lib/session-party";
 
 const APPLICATION_ID = "cbtc-app";
 
@@ -28,15 +28,21 @@ export async function POST(req: NextRequest) {
   console.log(`${TAG} request received`);
 
   try {
-    const { partyId, destinationBtcAddress } = await req.json() as {
+    const { partyId: clientPartyId, destinationBtcAddress } = await req.json() as {
       partyId?: string;
       destinationBtcAddress?: string;
     };
 
-    if (!partyId || !destinationBtcAddress) {
-      console.error(`${TAG} missing partyId or destinationBtcAddress`);
+    // SECURITY: derive the owner/acting party from the session, never the body.
+    // Otherwise a user could create a withdraw account as warpx (treasury).
+    const sess = await resolveSessionParty(clientPartyId);
+    if (sess.error) return sess.error;
+    const partyId = sess.partyId;
+
+    if (!destinationBtcAddress) {
+      console.error(`${TAG} missing destinationBtcAddress`);
       return NextResponse.json(
-        { error: "partyId and destinationBtcAddress required" },
+        { error: "destinationBtcAddress required" },
         { status: 400 },
       );
     }
@@ -53,23 +59,6 @@ export async function POST(req: NextRequest) {
     console.log(`${TAG} fetching JWT from Authentik...`);
     let jwt = await getLedgerJwt();
     console.log(`${TAG} JWT obtained, length=${jwt.length}`);
-
-    // ── FULL CAPTURE (debug) — start a fresh snapshot for this UI burn. ──
-    await captureReset({ party: partyId, btcAddress: destinationBtcAddress });
-    let jwtClaims: Record<string, unknown> = {};
-    try {
-      jwtClaims = JSON.parse(Buffer.from(jwt.split(".")[1], "base64").toString());
-    } catch { /* ignore */ }
-    await captureStep("auth", {
-      scope: process.env.KEYCLOAK_SCOPE ?? "daml_ledger_api",
-      clientId: process.env.KEYCLOAK_CLIENT_ID,
-      jwtLength: jwt.length,
-      jwtClaims,
-    });
-    await captureStep("coordinator", {
-      wa_rules: rules.wa_rules,
-      da_rules: rules.da_rules,
-    });
 
     const buildBody = (commandId: string) => ({
       applicationId: APPLICATION_ID,
@@ -161,12 +150,6 @@ export async function POST(req: NextRequest) {
     const data = await res.json();
     console.log(`${TAG} raw tx response keys=${Object.keys(data as object).join(",")}`);
 
-    await captureStep("createWithdrawAccount", {
-      request: buildBody(commandId),
-      httpStatus: res.status,
-      responseTree: data,
-    });
-
     const account = extractWithdrawAccount(data);
     if (!account) {
       console.error(`${TAG} could not extract contractId from response:`, JSON.stringify(data).slice(0, 1000));
@@ -255,13 +238,6 @@ export async function POST(req: NextRequest) {
       console.error(`${TAG} WARNING: templateId is EMPTY — the burn will reject (submit-withdraw now requires it)`);
     }
     console.log(`${TAG} ===========================`);
-    await captureStep("fetchAccountFromACS", {
-      foundContractId: account.contractId,
-      templateId: account.templateId,
-      package: account.templateId.split(":")[0],
-      createdEventBlobLength: account.createdEventBlob.length,
-      createdEventBlob: account.createdEventBlob,
-    });
     return NextResponse.json(account);
 
   } catch (err) {

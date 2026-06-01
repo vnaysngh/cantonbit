@@ -14,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import { getLedgerJwt, invalidateLedgerJwtCache } from "@/lib/auth";
 import { getAccountContractRules, getBitcoinAddress } from "@/lib/bitsafe";
 import { NETWORK } from "@/lib/constants";
+import { resolveSessionParty } from "@/lib/session-party";
 import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
 
 const APPLICATION_ID = "cbtc-app";
@@ -33,12 +34,15 @@ export async function POST(req: NextRequest) {
   console.log(`${TAG} request received`);
 
   try {
-    const { partyId } = await req.json() as { partyId?: string };
+    const { partyId: clientPartyId } = await req.json() as { partyId?: string };
 
-    if (!partyId) {
-      console.error(`${TAG} missing partyId in request body`);
-      return NextResponse.json({ error: "partyId required" }, { status: 400 });
-    }
+    // SECURITY: although signing here uses warpx (so this can't move funds),
+    // the resulting deposit-account record is stored under `partyId`. Resolve
+    // it from the session so a user can't associate accounts with an arbitrary
+    // party id in their history.
+    const sess = await resolveSessionParty(clientPartyId);
+    if (sess.error) return sess.error;
+    const partyId = sess.partyId;
 
     // All signing uses the WarpX-hosted party — m2m JWT has authority over it
     // and cBTC DARs are vetted on the WarpX node. Owner is also WarpX party

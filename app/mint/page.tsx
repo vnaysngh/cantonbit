@@ -11,7 +11,7 @@ import { formatSatoshis } from "@/lib/format";
 import {
   createDepositAccount,
   getDepositAddress,
-  snapshotHoldingBalance,
+  snapshotHoldingBalance
 } from "@/lib/mint";
 
 type Stage =
@@ -39,7 +39,10 @@ export default function MintPage() {
   const baselineRef = useRef<string | null>(null);
   // The most recently recovered/created deposit account — reused across "Mint more" cycles
   // so we never create a new Canton contract unless there are literally zero existing ones.
-  const existingAccountRef = useRef<{ depositAccountCid: string; address: string } | null>(null);
+  const existingAccountRef = useRef<{
+    depositAccountCid: string;
+    address: string;
+  } | null>(null);
 
   // On mount: find the most recent CBTCDepositAccount for this party and recover its
   // bitcoin address. Prevents creating a new contract on every page refresh.
@@ -50,9 +53,11 @@ export default function MintPage() {
         const res = await fetch("/api/mint/list-deposit-accounts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ partyId }),
+          body: JSON.stringify({ partyId })
         });
-        const data = await res.json() as { accounts?: Array<{ contractId: string; bitcoinAddress?: string }> };
+        const data = (await res.json()) as {
+          accounts?: Array<{ contractId: string; bitcoinAddress?: string }>;
+        };
         const accounts = data.accounts ?? [];
 
         // Use the most recent account (last in array — Canton returns in creation order)
@@ -68,9 +73,11 @@ export default function MintPage() {
           const addrRes = await fetch("/api/mint/bitcoin-address", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ depositAccountContractId: existing.contractId }),
+            body: JSON.stringify({
+              depositAccountContractId: existing.contractId
+            })
           });
-          const addrData = await addrRes.json() as { address?: string };
+          const addrData = (await addrRes.json()) as { address?: string };
           address = addrData.address ?? "";
         }
 
@@ -79,12 +86,19 @@ export default function MintPage() {
           return;
         }
 
-        existingAccountRef.current = { depositAccountCid: existing.contractId, address };
+        existingAccountRef.current = {
+          depositAccountCid: existing.contractId,
+          address
+        };
         // Baseline = the USER's current balance. We poll the user party and flip
         // to "minted" when CBTC lands there (delivered by the server-side cron).
         const baseline = await snapshotHoldingBalance(partyId);
         baselineRef.current = baseline;
-        setStage({ kind: "ready", depositAccountCid: existing.contractId, address });
+        setStage({
+          kind: "ready",
+          depositAccountCid: existing.contractId,
+          address
+        });
       } catch {
         // Recovery is best-effort — fall back to idle so user can start fresh
         setStage({ kind: "idle" });
@@ -120,7 +134,7 @@ export default function MintPage() {
     } catch (err) {
       setStage({
         kind: "error",
-        message: err instanceof Error ? err.message : String(err),
+        message: err instanceof Error ? err.message : String(err)
       });
     }
   }, [partyId]);
@@ -185,10 +199,10 @@ export default function MintPage() {
         {/* Page header */}
         <div className="mb-lg space-y-2 text-center">
           <h1 className="text-display-lg text-on-background">Mint CBTC</h1>
-          <p className="mx-auto max-w-[400px] text-body-lg text-on-surface-variant">
+          {/*   <p className="mx-auto max-w-[400px] text-body-lg text-on-surface-variant">
             Send Bitcoin to the address below to mint cross-chain CBTC on the
             network.
-          </p>
+          </p> */}
         </div>
 
         {stage.kind === "recovering" && (
@@ -258,19 +272,18 @@ export default function MintPage() {
                   </button>
                 </div>
               </div>
-            </div>
 
-            {/* Stats */}
-            <div className="space-y-1 rounded-xl border border-outline/5 bg-surface-container-low p-4">
-              <span className="block text-[11px] font-bold uppercase tracking-tighter text-on-surface-variant">
-                Est. Time
-              </span>
-              <div className="flex items-center gap-1.5">
-                <span className="material-symbols-outlined text-[18px] text-on-surface-variant">
-                  schedule
+              {/* Est. time — folded into the card as a footer row instead of a
+                  separate floating box. Label left, value right. */}
+              <div className="flex items-center justify-between border-t border-outline/10 pt-4">
+                <span className="flex items-center gap-1.5 text-label-sm uppercase tracking-wide text-on-surface-variant">
+                  <span className="material-symbols-outlined text-[18px]">
+                    schedule
+                  </span>
+                  Est. Time
                 </span>
-                <span className="text-headline-md leading-none text-on-surface">
-                  ~60m
+                <span className="text-body-md font-bold text-on-surface">
+                  ~60 min
                 </span>
               </div>
             </div>
@@ -326,7 +339,9 @@ export default function MintPage() {
         {stage.kind === "error" && (
           <div className="space-y-md rounded-2xl border border-error/20 bg-surface-container-lowest p-8 shadow-sm">
             <div className="flex items-center gap-2">
-              <span className="material-symbols-outlined text-error">error</span>
+              <span className="material-symbols-outlined text-error">
+                error
+              </span>
               <h2 className="text-headline-md text-error">Mint failed</h2>
             </div>
             <pre className="overflow-x-auto rounded-lg bg-surface-container p-3 font-mono text-label-sm text-on-surface-variant">

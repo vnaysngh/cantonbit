@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getHoldings } from "@/lib/canton";
+import { resolveSessionParty } from "@/lib/session-party";
 
 export const dynamic = "force-dynamic";
 
@@ -17,17 +18,17 @@ const TAG = "[canton/holdings]";
 export async function GET(request: Request) {
   console.log(`${TAG} request received`);
   const url = new URL(request.url);
-  const partyId = url.searchParams.get("partyId");
+  const clientPartyId = url.searchParams.get("partyId");
 
-  console.log(`${TAG} partyId=${partyId ? partyId.slice(0, 40) + "..." : "MISSING"}`);
+  // SECURITY: this route previously had NO auth and returned ANY party's
+  // holdings (incl. warpx treasury) to anyone. Now it requires a logged-in
+  // session and only ever reads the session's own party. A client-supplied
+  // ?partyId must match the session party or we reject.
+  const sess = await resolveSessionParty(clientPartyId);
+  if (sess.error) return sess.error;
+  const partyId = sess.partyId;
 
-  if (!partyId) {
-    console.error(`${TAG} missing partyId query param`);
-    return NextResponse.json(
-      { error: "Missing required query param: partyId" },
-      { status: 400 },
-    );
-  }
+  console.log(`${TAG} partyId=${partyId.slice(0, 40)}...`);
 
   try {
     const holdings = await getHoldings(partyId);

@@ -18,8 +18,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 
 import { getLedgerJwt, invalidateLedgerJwtCache } from "@/lib/auth";
-import { captureStep } from "@/lib/burn-capture";
 import { NETWORK } from "@/lib/constants";
+import { resolveSessionParty } from "@/lib/session-party";
 
 const APPLICATION_ID = "cbtc-app";
 
@@ -32,7 +32,7 @@ export async function POST(req: NextRequest) {
 
   try {
     const {
-      partyId,
+      partyId: clientPartyId,
       withdrawAccountContractId,
       withdrawAccountTemplateId,
       withdrawAccountCreatedEventBlob,
@@ -47,10 +47,19 @@ export async function POST(req: NextRequest) {
       amount?: string;
     };
 
-    if (!partyId || !withdrawAccountContractId || !holdingCids?.length || !amount) {
+    // SECURITY: derive the acting party from the session. The m2m JWT can act
+    // as warpx (treasury) too, so trusting a client partyId here would let any
+    // user burn treasury funds to their own BTC address. Accept-but-validate:
+    // a supplied partyId must equal the session's party, and we always act as
+    // the session party regardless.
+    const sess = await resolveSessionParty(clientPartyId);
+    if (sess.error) return sess.error;
+    const partyId = sess.partyId;
+
+    if (!withdrawAccountContractId || !holdingCids?.length || !amount) {
       console.error(`${TAG} missing required fields`);
       return NextResponse.json(
-        { error: "partyId, withdrawAccountContractId, holdingCids, and amount required" },
+        { error: "withdrawAccountContractId, holdingCids, and amount required" },
         { status: 400 },
       );
     }
@@ -216,15 +225,6 @@ export async function POST(req: NextRequest) {
     } catch {
       // response body not JSON / already consumed — non-fatal
     }
-
-    // FULL CAPTURE: the burn request + response tree (the final, decisive step).
-    await captureStep("burn", {
-      url,
-      request: burnBody,
-      httpStatus: res.status,
-      responseTree: burnTree,
-      updateId: burnUpdateId,
-    });
 
     console.log(
       `${TAG} success! burn submitted for amount=${amount} updateId=${burnUpdateId ?? "(unknown)"}`,

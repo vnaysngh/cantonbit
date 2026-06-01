@@ -12,6 +12,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { getLedgerJwt, invalidateLedgerJwtCache } from "@/lib/auth";
 import { NETWORK } from "@/lib/constants";
+import { resolveSessionParty } from "@/lib/session-party";
 import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
 
 // active-contracts TemplateFilter requires package NAME alias, not hash.
@@ -25,11 +26,14 @@ export async function POST(req: NextRequest) {
   console.log(`${TAG} request received`);
 
   try {
-    const { partyId } = await req.json() as { partyId?: string };
-    if (!partyId) {
-      console.error(`${TAG} missing partyId`);
-      return NextResponse.json({ error: "partyId required" }, { status: 400 });
-    }
+    const { partyId: clientPartyId } = await req.json() as { partyId?: string };
+
+    // SECURITY: only ever list the session's own deposit accounts. The ledger
+    // query runs as warpx and filters by owner===partyId, so a client-supplied
+    // partyId would leak another user's accounts.
+    const sess = await resolveSessionParty(clientPartyId);
+    if (sess.error) return sess.error;
+    const partyId = sess.partyId;
 
     console.log(`${TAG} partyId=${partyId.slice(0, 30)}...`);
     console.log(`${TAG} network=${NETWORK.name} ledgerHost=${NETWORK.ledgerHost}`);

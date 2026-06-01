@@ -12,8 +12,8 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { getLedgerJwt, invalidateLedgerJwtCache } from "@/lib/auth";
 import { getAccountContractRules } from "@/lib/bitsafe";
-import { captureReset, captureStep } from "@/lib/burn-capture";
 import { NETWORK } from "@/lib/constants";
+import { resolveSessionParty } from "@/lib/session-party";
 
 // active-contracts TemplateFilter requires package NAME alias, not hash.
 // "#cbtc" alias is confirmed working via live test against the mainnet ledger.
@@ -26,15 +26,22 @@ export async function POST(req: NextRequest) {
   console.log(`${TAG} request received`);
 
   try {
-    const { partyId, destinationBtcAddress } = await req.json() as {
+    const { partyId: clientPartyId, destinationBtcAddress } = await req.json() as {
       partyId?: string;
       destinationBtcAddress?: string;
     };
 
-    if (!partyId || !destinationBtcAddress) {
-      console.error(`${TAG} missing partyId or destinationBtcAddress`);
+    // SECURITY: query only the session's own party — never a client-supplied
+    // one. Otherwise a user could enumerate warpx's (or others') withdraw
+    // accounts as recon for a burn.
+    const sess = await resolveSessionParty(clientPartyId);
+    if (sess.error) return sess.error;
+    const partyId = sess.partyId;
+
+    if (!destinationBtcAddress) {
+      console.error(`${TAG} missing destinationBtcAddress`);
       return NextResponse.json(
-        { error: "partyId and destinationBtcAddress required" },
+        { error: "destinationBtcAddress required" },
         { status: 400 },
       );
     }
@@ -191,27 +198,6 @@ export async function POST(req: NextRequest) {
       console.log(`${TAG} reuse.package=${(ev.templateId ?? "").split(":")[0]}`);
       console.log(`${TAG} reuse.createdEventBlob.length=${(ev.createdEventBlob ?? "").length}`);
       console.log(`${TAG} ===================================================`);
-      // FULL CAPTURE: the UI is REUSING this account (create-withdraw-account
-      // won't run), so start the snapshot here with auth + the reused account.
-      await captureReset({ party: partyId, btcAddress: destinationBtcAddress, path: "REUSE existing account" });
-      let jwtClaims: Record<string, unknown> = {};
-      try {
-        jwtClaims = JSON.parse(Buffer.from(jwt.split(".")[1], "base64").toString());
-      } catch { /* ignore */ }
-      await captureStep("auth", {
-        scope: process.env.KEYCLOAK_SCOPE ?? "daml_ledger_api",
-        clientId: process.env.KEYCLOAK_CLIENT_ID,
-        jwtLength: jwt.length,
-        jwtClaims,
-      });
-      await captureStep("fetchAccountFromACS", {
-        foundContractId: ev.contractId,
-        templateId: ev.templateId ?? "",
-        package: (ev.templateId ?? "").split(":")[0],
-        createdEventBlobLength: (ev.createdEventBlob ?? "").length,
-        createdEventBlob: ev.createdEventBlob ?? "",
-        reused: true,
-      });
       return NextResponse.json({
         contractId: ev.contractId,
         templateId: ev.templateId ?? "",

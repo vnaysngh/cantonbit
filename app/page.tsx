@@ -140,15 +140,15 @@ const KIND_META = {
     icon: "remove_circle",
     label: "Redemption",
     inbound: false,
-    iconBg: "bg-primary-container/15",
-    iconFg: "text-primary"
+    iconBg: "bg-error-container/40",
+    iconFg: "text-error"
   },
   sent: {
     icon: "arrow_outward",
     label: "Sent",
     inbound: false,
-    iconBg: "bg-primary-container/15",
-    iconFg: "text-primary"
+    iconBg: "bg-error-container/40",
+    iconFg: "text-error"
   },
   received: {
     icon: "south_west",

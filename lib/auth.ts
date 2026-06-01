@@ -120,18 +120,6 @@ export async function getLedgerJwt(): Promise<string> {
   return token.accessToken;
 }
 
-/** For diagnostics only — never expose to the browser. */
-export function describeCachedToken(): {
-  cached: boolean;
-  expiresInSeconds: number | null;
-} {
-  if (!cached) return { cached: false, expiresInSeconds: null };
-  return {
-    cached: true,
-    expiresInSeconds: Math.max(0, Math.round((cached.expiresAt - Date.now()) / 1000)),
-  };
-}
-
 /** Test/dev only — force the next call to re-fetch. */
 export function invalidateLedgerJwtCache(): void {
   cached = null;

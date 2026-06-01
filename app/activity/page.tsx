@@ -32,20 +32,20 @@ const KIND_META = {
   redeemed: {
     icon: "remove_circle",
     label: "Redeemed",
-    iconBg: "bg-primary-container/15",
-    iconFg: "text-primary",
+    iconBg: "bg-error-container/40",
+    iconFg: "text-error",
   },
   sent: {
     icon: "arrow_outward",
     label: "Sent",
-    iconBg: "bg-tertiary-container/30",
-    iconFg: "text-tertiary",
+    iconBg: "bg-error-container/40",
+    iconFg: "text-error",
   },
   received: {
     icon: "south_west",
     label: "Received",
-    iconBg: "bg-primary-container/15",
-    iconFg: "text-primary-container",
+    iconBg: "bg-tertiary-container/30",
+    iconFg: "text-tertiary",
   },
 } as const;
 
