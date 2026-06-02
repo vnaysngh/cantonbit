@@ -190,7 +190,7 @@ export async function submitWithdraw(
   withdrawAccountCreatedEventBlob: string,
   holdingCids: string[],
   amount: string,
-): Promise<void> {
+): Promise<{ burnUpdateId: string | null }> {
   const res = await fetch("/api/redeem/submit-withdraw", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -205,11 +205,20 @@ export async function submitWithdraw(
     }),
   });
 
-  const data = await res.json() as { ok?: boolean; error?: string };
+  const data = await res.json() as {
+    ok?: boolean;
+    error?: string;
+    burnUpdateId?: string | null;
+  };
 
   if (!res.ok || !data.ok) {
     throw new Error(data.error ?? `Submit withdraw failed (${res.status})`);
   }
+
+  // The burn's Canton updateId is returned synchronously (submit-and-wait
+  // commits before responding). It's the stable id for this redeem in the
+  // ledger-derived activity history.
+  return { burnUpdateId: data.burnUpdateId ?? null };
 }
 
 /**

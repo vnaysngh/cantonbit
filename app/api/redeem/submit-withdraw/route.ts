@@ -212,16 +212,16 @@ export async function POST(req: NextRequest) {
 
     // Parse the burn's updateId — returned to the client and used as the stable
     // id for this redeem in the (ledger-derived) activity history.
+    //
+    // The exact nesting of updateId in the submit-and-wait-for-transaction-tree
+    // response varies (transactionTree.updateId vs transaction.updateId vs a
+    // deeper wrap), so we search the tree recursively for the first updateId /
+    // update_id rather than hardcoding one path.
     let burnUpdateId: string | null = null;
     let burnTree: unknown = null;
     try {
       burnTree = await res.json();
-      const tree = burnTree as {
-        transactionTree?: { updateId?: string; offset?: number };
-        transaction?: { updateId?: string };
-      };
-      burnUpdateId =
-        tree.transactionTree?.updateId ?? tree.transaction?.updateId ?? null;
+      burnUpdateId = findUpdateId(burnTree);
     } catch {
       // response body not JSON / already consumed — non-fatal
     }
@@ -236,4 +236,30 @@ export async function POST(req: NextRequest) {
     console.error(`${TAG} unexpected error:`, err);
     return NextResponse.json({ error: message }, { status: 500 });
   }
+}
+
+/**
+ * Recursively find the first `updateId` (or `update_id`) string anywhere in a
+ * Canton transaction-tree response. Robust to nesting differences across the
+ * submit-and-wait response shapes.
+ */
+function findUpdateId(node: unknown): string | null {
+  if (node == null || typeof node !== "object") return null;
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const found = findUpdateId(item);
+      if (found) return found;
+    }
+    return null;
+  }
+  const obj = node as Record<string, unknown>;
+  for (const key of ["updateId", "update_id"]) {
+    const v = obj[key];
+    if (typeof v === "string" && v.length > 0) return v;
+  }
+  for (const value of Object.values(obj)) {
+    const found = findUpdateId(value);
+    if (found) return found;
+  }
+  return null;
 }

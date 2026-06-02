@@ -75,6 +75,9 @@ type Stage =
       progress: RedeemProgress;
       btcTxId: string | null;
       burnedAmount: string;
+      // Canton updateId of the burn — stable id for this redeem, available
+      // synchronously from the burn response. Lets us link to /activity/<id>.
+      burnUpdateId: string | null;
     }
   | { kind: "error"; message: string };
 
@@ -88,6 +91,22 @@ export default function RedeemPage() {
   // Set true when the user clicks "Review redemption" — gates the final,
   // irreversible burn behind an explicit confirmation screen.
   const [confirming, setConfirming] = useState(false);
+
+  // The burn is in flight across these stages. While processing, the confirm
+  // modal stays open and shows an in-place "Processing…" state (no page swap).
+  const isProcessing =
+    stage.kind === "preparing" ||
+    stage.kind === "creating-account" ||
+    stage.kind === "burning";
+  // A human label for the current processing step, shown in the modal button.
+  const processingLabel =
+    stage.kind === "preparing"
+      ? "Preparing…"
+      : stage.kind === "creating-account"
+        ? "Creating account…"
+        : stage.kind === "burning"
+          ? "Burning…"
+          : "Processing…";
 
   // ── Amount validation (exact satoshi math, no float) ──
   const balanceSats = parseBtc(total);
@@ -150,7 +169,10 @@ export default function RedeemPage() {
     }
 
     try {
-      setConfirming(false);
+      // Keep the modal OPEN through preparing/creating-account/burning so the
+      // user gets in-place "Processing…" feedback instead of a jarring full-page
+      // swap. The modal is dismissed only once we reach the success tracker
+      // (handled in the success branch below).
       setStage({ kind: "preparing" });
 
       // Step 1: find or create a WithdrawAccount for this BTC destination.
@@ -200,7 +222,7 @@ export default function RedeemPage() {
         kind: "burning",
         holdingsUsed: holdings.filter((h) => holdingCids.includes(h.contractId))
       });
-      await submitWithdraw(
+      const { burnUpdateId } = await submitWithdraw(
         partyId,
         btcAddress.trim(),
         withdrawAccountCid,
@@ -211,13 +233,19 @@ export default function RedeemPage() {
       );
 
       refetchBalance();
+      // Burn done — dismiss the modal and hand off to the progress tracker.
+      setConfirming(false);
       setStage({
         kind: "success",
         progress: "burned",
         btcTxId: null,
-        burnedAmount: canonicalAmount
+        burnedAmount: canonicalAmount,
+        burnUpdateId
       });
     } catch (err) {
+      // Surface the error in the progress column (modal closes) so the user
+      // sees the full message + a "Try again" path rather than a stuck modal.
+      setConfirming(false);
       setStage({
         kind: "error",
         message: err instanceof Error ? err.message : String(err)
@@ -285,8 +313,13 @@ export default function RedeemPage() {
               ? {
                   ...prev,
                   progress: "broadcasting",
-                  btcTxId: status.btcTxId,
-                  burnedAmount: status.amount ?? prev.burnedAmount
+                  btcTxId: status.btcTxId
+                  // NOTE: do NOT overwrite burnedAmount from the poll.
+                  // burnedAmount is the exact amount THIS burn destroyed, known
+                  // at burn time. findWithdrawRequest() matches by party+address,
+                  // so with repeat redeems to the same address it can return a
+                  // DIFFERENT/stale request's amount — which previously clobbered
+                  // the correct value (e.g. showing 0.000021 for a 0.000001 burn).
                 }
               : prev
           );
@@ -378,7 +411,9 @@ export default function RedeemPage() {
 
   return (
     <div className="py-12">
-      {stage.kind === "form" && (
+      {/* Keep the form rendered while the confirm modal is processing, so the
+          burn shows as an overlay on the form rather than a blank backdrop. */}
+      {(stage.kind === "form" || isProcessing) && (
         <div className="mx-auto grid w-full max-w-[1100px] grid-cols-1 items-start gap-12 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
           {/* ── Left: How it works ──
               min-w-0 MUST live on the grid child itself, otherwise the column
@@ -570,18 +605,21 @@ export default function RedeemPage() {
       )}
 
       {/* Confirm dialog — modal overlay on top of the still-visible form.
-          Burning fires only from "Confirm and burn" inside this dialog. */}
-      {stage.kind === "form" && confirming && (
+          Stays open while the burn processes (isProcessing) so the user gets
+          in-place feedback instead of a full-page swap. */}
+      {((stage.kind === "form" && confirming) || isProcessing) && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center p-4"
           role="dialog"
           aria-modal="true"
           aria-labelledby="confirm-redeem-title"
         >
-          {/* Backdrop — click to dismiss */}
+          {/* Backdrop — click to dismiss (disabled while processing). */}
           <div
             className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-            onClick={() => setConfirming(false)}
+            onClick={() => {
+              if (!isProcessing) setConfirming(false);
+            }}
           />
           {/* Dialog panel */}
           <div className="relative z-10 w-full max-w-[26rem] overflow-hidden rounded-2xl border border-outline-variant bg-surface-container-lowest shadow-2xl">
@@ -601,8 +639,9 @@ export default function RedeemPage() {
               <button
                 type="button"
                 onClick={() => setConfirming(false)}
+                disabled={isProcessing}
                 aria-label="Close"
-                className="-mr-2 -mt-1 rounded-full p-2 text-on-surface-variant transition-colors hover:bg-surface-container hover:text-on-surface"
+                className="-mr-2 -mt-1 rounded-full p-2 text-on-surface-variant transition-colors hover:bg-surface-container hover:text-on-surface disabled:cursor-not-allowed disabled:opacity-40"
               >
                 <span className="material-symbols-outlined text-[20px]">
                   close
@@ -665,16 +704,27 @@ export default function RedeemPage() {
               <div className="flex gap-3 pt-1">
                 <Button
                   variant="outline"
-                  className="h-11 flex-1 rounded-lg border-outline-variant text-body-md font-medium text-on-surface hover:bg-surface-container"
+                  disabled={isProcessing}
+                  className="h-11 flex-1 rounded-lg border-outline-variant text-body-md font-medium text-on-surface hover:bg-surface-container disabled:opacity-50"
                   onClick={() => setConfirming(false)}
                 >
                   Back
                 </Button>
                 <Button
-                  className="h-11 flex-[1.4] rounded-lg bg-primary-container text-body-md font-bold text-on-primary shadow-sm transition-all hover:brightness-105 active:scale-[0.98]"
+                  disabled={isProcessing}
+                  className="h-11 flex-[1.4] gap-2 rounded-lg bg-primary-container text-body-md font-bold text-on-primary shadow-sm transition-all hover:brightness-105 active:scale-[0.98] disabled:cursor-not-allowed disabled:active:scale-100"
                   onClick={() => submit().catch(console.error)}
                 >
-                  Confirm &amp; Burn
+                  {isProcessing ? (
+                    <>
+                      <span className="material-symbols-outlined animate-spin text-[18px]">
+                        progress_activity
+                      </span>
+                      {processingLabel}
+                    </>
+                  ) : (
+                    "Confirm & Burn"
+                  )}
                 </Button>
               </div>
             </div>
@@ -682,29 +732,11 @@ export default function RedeemPage() {
         </div>
       )}
 
-      {/* Progress / success / error states swap the centered widget column. */}
-      {stage.kind !== "form" ? (
+      {/* Success / error states swap the centered widget column. The
+          preparing/creating-account/burning steps are NO LONGER shown here —
+          they render in-place inside the confirm modal (see isProcessing). */}
+      {stage.kind === "success" || stage.kind === "error" ? (
         <div className="mx-auto max-w-bridge-widget-width space-y-md">
-          {(stage.kind === "preparing" ||
-            stage.kind === "creating-account" ||
-            stage.kind === "burning") && (
-            <div className="rounded-2xl border border-outline/10 bg-surface-container-lowest p-8 text-center text-body-md text-on-surface-variant shadow-sm">
-              {stage.kind === "preparing" &&
-                "Looking up your withdraw account and holdings…"}
-              {stage.kind === "creating-account" &&
-                "Creating your withdraw account on Canton…"}
-              {stage.kind === "burning" && (
-                <>
-                  Burning {amount} CBTC…
-                  <div className="mt-2 text-label-sm">
-                    Using {stage.holdingsUsed.length} holding
-                    {stage.holdingsUsed.length === 1 ? "" : "s"}.
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-
           {stage.kind === "success" && (
             <div className="space-y-4 rounded-2xl border border-outline/10 bg-surface-container-lowest p-8 shadow-sm">
               <h2

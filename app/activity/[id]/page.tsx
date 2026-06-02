@@ -538,18 +538,20 @@ function Step({
   );
 }
 
-function SupportCard({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="rounded-xl border border-secondary-container bg-secondary-container/20 p-md">
-      <div className="flex gap-sm">
-        <span className="material-symbols-outlined text-secondary">info</span>
-        <div className="font-body-md text-body-md text-on-secondary-container">
-          {children}
-        </div>
-      </div>
-    </div>
-  );
-}
+// Commented out per request — support cards (Bridge delay / Need help?) are
+// disabled in both the redeem and mint detail views, so this is unused for now.
+// function SupportCard({ children }: { children: React.ReactNode }) {
+//   return (
+//     <div className="rounded-xl border border-secondary-container bg-secondary-container/20 p-md">
+//       <div className="flex gap-sm">
+//         <span className="material-symbols-outlined text-secondary">info</span>
+//         <div className="font-body-md text-body-md text-on-secondary-container">
+//           {children}
+//         </div>
+//       </div>
+//     </div>
+//   );
+// }
 
 /* ─── REDEEM VIEW ─── */
 
@@ -640,6 +642,7 @@ function RedeemView({ redeem }: { redeem: RedeemDetail }) {
               hrefLabel="View on mempool.space"
             />
           )}
+          {/* Commented out per request — "Bridge delay" support card.
           {redeem.status === "stalled" && (
             <SupportCard>
               <p className="font-semibold text-secondary">Bridge delay</p>
@@ -655,6 +658,7 @@ function RedeemView({ redeem }: { redeem: RedeemDetail }) {
               </p>
             </SupportCard>
           )}
+          */}
         </div>
       </div>
     </div>
@@ -903,6 +907,7 @@ function MintView({ mint }: { mint: MintDetail }) {
                 hrefLabel="View on mempool.space"
               />
             )}
+            {/* Commented out per request — "Need help?" support card.
             <SupportCard>
               <p className="font-semibold text-secondary">Need help?</p>
               <p className="mt-xs font-label-sm text-label-sm">
@@ -910,6 +915,7 @@ function MintView({ mint }: { mint: MintDetail }) {
                 support team with your transaction ID.
               </p>
             </SupportCard>
+            */}
           </div>
         )}
       </div>
