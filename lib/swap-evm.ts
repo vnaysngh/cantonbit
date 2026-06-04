@@ -11,9 +11,51 @@
 /** Canonical Permit2 (same address on every chain). */
 export const PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
 
-/** Base Sepolia chain id (origin chain for testnet swaps). */
+/** Known chain ids. */
 export const BASE_SEPOLIA_CHAIN_ID = 84532;
 export const BASE_MAINNET_CHAIN_ID = 8453;
+export const ARBITRUM_CHAIN_ID = 42161;
+export const ETHEREUM_CHAIN_ID = 1;
+
+/**
+ * The EVM origin chain the swap sources WBTC from. Config-driven so flipping
+ * testnet→mainnet is env-only. Default: Base Sepolia (testnet). For mainnet we
+ * swap from Arbitrum (deep WBTC liquidity), set NEXT_PUBLIC_SWAP_CHAIN=arbitrum.
+ */
+interface SwapChain {
+  id: number;
+  name: string;
+  /** wallet_addEthereumChain params (for the "switch network" button). */
+  rpcUrls: string[];
+  blockExplorerUrls: string[];
+}
+
+const SWAP_CHAINS: Record<string, SwapChain> = {
+  "base-sepolia": {
+    id: BASE_SEPOLIA_CHAIN_ID, name: "Base Sepolia",
+    rpcUrls: ["https://sepolia.base.org"],
+    blockExplorerUrls: ["https://sepolia.basescan.org"],
+  },
+  arbitrum: {
+    id: ARBITRUM_CHAIN_ID, name: "Arbitrum One",
+    rpcUrls: ["https://arb1.arbitrum.io/rpc"],
+    blockExplorerUrls: ["https://arbiscan.io"],
+  },
+  base: {
+    id: BASE_MAINNET_CHAIN_ID, name: "Base",
+    rpcUrls: ["https://mainnet.base.org"],
+    blockExplorerUrls: ["https://basescan.org"],
+  },
+  ethereum: {
+    id: ETHEREUM_CHAIN_ID, name: "Ethereum",
+    rpcUrls: ["https://eth.llamarpc.com"],
+    blockExplorerUrls: ["https://etherscan.io"],
+  },
+};
+
+/** The configured swap origin chain. */
+export const SWAP_CHAIN: SwapChain =
+  SWAP_CHAINS[process.env.NEXT_PUBLIC_SWAP_CHAIN ?? "base-sepolia"] ?? SWAP_CHAINS["base-sepolia"];
 
 const MAX_UINT256 = "0x" + "f".repeat(64);
 

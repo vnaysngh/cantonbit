@@ -30,14 +30,21 @@ import {
   type Hex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { base, baseSepolia } from "viem/chains";
+import { arbitrum, base, baseSepolia } from "viem/chains";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 
 const OUT = "../contracts/out";
 const ENV_PATH = ".env";
 
-/** Canonical Base mainnet WBTC (BitGo LayerZero OFT "WBTCOFT", 8 decimals). */
-const BASE_MAINNET_WBTC: Address = "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c";
+/**
+ * Per-EVM-chain mainnet WBTC. We swap from ARBITRUM (deep WBTC liquidity, ~7k
+ * supply, the classic ERC-20, cheap L2 gas). Base WBTC also exists but is thin
+ * (a LayerZero OFT, ~60 supply) — kept here only for reference.
+ */
+const MAINNET_WBTC: Record<"arbitrum" | "base", Address> = {
+  arbitrum: "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f", // classic WBTC, 8dp
+  base: "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",     // LayerZero OFT, 8dp (thin)
+};
 
 type Net = "devnet" | "testnet" | "mainnet";
 
@@ -49,10 +56,20 @@ function net(): Net {
   return n as Net;
 }
 
-function chainFor(n: Net): { chain: Chain; defaultRpc: string } {
-  return n === "mainnet"
-    ? { chain: base, defaultRpc: "https://mainnet.base.org" }
-    : { chain: baseSepolia, defaultRpc: "https://sepolia.base.org" };
+/** Which EVM chain to use. Mainnet defaults to Arbitrum (our chosen source). */
+function evmChain(n: Net): "arbitrum" | "base" {
+  if (n !== "mainnet") return "base"; // testnet/devnet → Base Sepolia
+  const c = (process.env.EVM_CHAIN ?? "arbitrum").toLowerCase();
+  if (c !== "arbitrum" && c !== "base") throw new Error(`EVM_CHAIN must be arbitrum|base, got '${c}'`);
+  return c as "arbitrum" | "base";
+}
+
+function chainFor(n: Net): { chain: Chain; defaultRpc: string; evm: "arbitrum" | "base" } {
+  if (n !== "mainnet") return { chain: baseSepolia, defaultRpc: "https://sepolia.base.org", evm: "base" };
+  const evm = evmChain(n);
+  return evm === "arbitrum"
+    ? { chain: arbitrum, defaultRpc: "https://arb1.arbitrum.io/rpc", evm }
+    : { chain: base, defaultRpc: "https://mainnet.base.org", evm };
 }
 
 function art(p: string): { abi: unknown[]; bytecode: Hex } {
@@ -77,7 +94,7 @@ async function main() {
     );
   }
 
-  const { chain, defaultRpc } = chainFor(network);
+  const { chain, defaultRpc, evm } = chainFor(network);
   const RPC = process.env.ORIGIN_RPC_URL ?? defaultRpc;
 
   const account = privateKeyToAccount(key());
@@ -99,13 +116,13 @@ async function main() {
   // --- WBTC: mock on testnet, real canonical token on mainnet ---
   let wbtc: Address;
   if (isMainnet) {
-    wbtc = getAddress(process.env.WBTC_ADDRESS ?? BASE_MAINNET_WBTC);
+    wbtc = getAddress(process.env.WBTC_ADDRESS ?? MAINNET_WBTC[evm]);
     // Sanity: the real token must report 8 decimals (our whole stack assumes 8dp).
     const decimals = await pub.readContract({
       address: wbtc, abi: parseAbi(["function decimals() view returns (uint8)"]), functionName: "decimals",
     });
     if (Number(decimals) !== 8) throw new Error(`WBTC at ${wbtc} reports ${decimals} decimals, expected 8`);
-    console.log(`[deploy] using REAL Base WBTC ${wbtc} (decimals=8 ✓) — no mock, no mint`);
+    console.log(`[deploy] using REAL ${evm} WBTC ${wbtc} (decimals=8 ✓) — no mock, no mint`);
   } else {
     console.log("[deploy] deploying MockWBTC (8 decimals)…");
     wbtc = await deploy(art("MockWBTC.sol/MockWBTC.json"), []);

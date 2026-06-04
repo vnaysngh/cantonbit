@@ -14,7 +14,7 @@ import {
   type QuoteResponse, type OrderView, type SwapStatus,
 } from "@/lib/swap-api";
 import {
-  PERMIT2_ADDRESS, BASE_SEPOLIA_CHAIN_ID,
+  PERMIT2_ADDRESS, SWAP_CHAIN,
   encodeApprove, encodeAllowance, encodeBalanceOf, decodeUint,
   formatWbtc, parseWbtc,
 } from "@/lib/swap-evm";
@@ -53,7 +53,7 @@ export default function SwapPage() {
   const [wbtcBalance, setWbtcBalance] = useState<bigint | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const wrongChain = evm.chainId != null && evm.chainId !== BASE_SEPOLIA_CHAIN_ID;
+  const wrongChain = evm.chainId != null && evm.chainId !== SWAP_CHAIN.id;
 
   // --- read WBTC balance once connected + quoted (so we know the token addr) ---
   const refreshBalance = useCallback(async (wbtc: string) => {
@@ -69,14 +69,14 @@ export default function SwapPage() {
 
   const fail = (message: string) => setStage({ kind: "error", message });
 
-  // --- switch wallet to Base Sepolia (adds the network if unknown) ---
+  // --- switch wallet to the configured swap chain (adds it if unknown) ---
   const handleSwitchChain = useCallback(async () => {
     try {
-      await evm.switchChain(BASE_SEPOLIA_CHAIN_ID, {
-        chainName: "Base Sepolia",
-        rpcUrls: ["https://sepolia.base.org"],
+      await evm.switchChain(SWAP_CHAIN.id, {
+        chainName: SWAP_CHAIN.name,
+        rpcUrls: SWAP_CHAIN.rpcUrls,
         nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
-        blockExplorerUrls: ["https://sepolia.basescan.org"],
+        blockExplorerUrls: SWAP_CHAIN.blockExplorerUrls,
       });
     } catch (e) {
       fail(e instanceof Error ? e.message : "Failed to switch network.");
@@ -224,8 +224,9 @@ export default function SwapPage() {
       <div className="mb-6">
         <h1 className="text-2xl font-semibold text-foreground">Swap</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Swap WBTC on Base for cBTC on Canton. One solver fronts the cBTC; your
-          WBTC is locked in an audited escrow and refundable if delivery fails.
+          Swap WBTC on {SWAP_CHAIN.name} for cBTC on Canton. One solver fronts the
+          cBTC; your WBTC is locked in an audited escrow and refundable if delivery
+          fails.
         </p>
       </div>
 
@@ -275,10 +276,10 @@ export default function SwapPage() {
               <div className="flex flex-col gap-2">
                 <p className="text-xs text-destructive">
                   Wrong network — your wallet reports chain {evm.chainId}, but this swap needs
-                  Base Sepolia (chain {BASE_SEPOLIA_CHAIN_ID}).
+                  {" "}{SWAP_CHAIN.name} (chain {SWAP_CHAIN.id}).
                 </p>
                 <Button size="sm" variant="outline" onClick={handleSwitchChain}>
-                  Switch to Base Sepolia
+                  Switch to {SWAP_CHAIN.name}
                 </Button>
               </div>
             )}
@@ -330,7 +331,7 @@ export default function SwapPage() {
               label={
                 stage.kind === "approving" ? "Approve WBTC in your wallet…" :
                 stage.kind === "signing" ? "Sign the swap in your wallet…" :
-                "Locking WBTC on Base…"
+                `Locking WBTC on ${SWAP_CHAIN.name}…`
               }
             />
           )}

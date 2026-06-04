@@ -19,12 +19,15 @@
  */
 
 import { createPublicClient, http, parseAbi, getAddress, type Address } from "viem";
-import { base, baseSepolia } from "viem/chains";
+import { arbitrum, base, baseSepolia } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 
 import { PERMIT2_ADDRESS } from "./open-for.js";
 
-const BASE_MAINNET_WBTC: Address = "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c";
+const MAINNET_WBTC: Record<"arbitrum" | "base", Address> = {
+  arbitrum: "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f",
+  base: "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",
+};
 
 function key(): `0x${string}` {
   const raw = process.env.PRIVATE_KEY ?? process.env.AGENT_PRIVATE_KEY ?? "";
@@ -33,9 +36,14 @@ function key(): `0x${string}` {
 
 async function main() {
   const isMainnet = (process.env.SWAP_NETWORK ?? "").toLowerCase() === "mainnet";
-  const chain = isMainnet ? base : baseSepolia;
-  const RPC = process.env.ORIGIN_RPC_URL ?? (isMainnet ? "https://mainnet.base.org" : "https://sepolia.base.org");
-  const wbtc = getAddress(process.env.WBTC_ADDRESS ?? BASE_MAINNET_WBTC);
+  const evm = isMainnet ? (process.env.EVM_CHAIN ?? "arbitrum").toLowerCase() : "base";
+  const chain = !isMainnet ? baseSepolia : evm === "arbitrum" ? arbitrum : base;
+  const defaultRpc = !isMainnet
+    ? "https://sepolia.base.org"
+    : evm === "arbitrum" ? "https://arb1.arbitrum.io/rpc" : "https://mainnet.base.org";
+  const RPC = process.env.ORIGIN_RPC_URL ?? defaultRpc;
+  const wbtcDefault = evm === "base" ? MAINNET_WBTC.base : MAINNET_WBTC.arbitrum;
+  const wbtc = getAddress(process.env.WBTC_ADDRESS ?? wbtcDefault);
   const pub = createPublicClient({ chain, transport: http(RPC) });
 
   console.log(`[check] network=${isMainnet ? "mainnet" : "testnet"} chain=${chain.name}`);
@@ -91,9 +99,11 @@ async function main() {
   }
 
   console.log("\n" + (ok ? "✓ STATIC CHECKS PASSED" : "✗ STATIC CHECKS FAILED"));
+  const tokenKind = evm === "base" ? "this LayerZero OFT" : "this token";
   console.log("\n⚠️  STILL UNVERIFIED (needs a live tx): that Permit2.permitWitnessTransferFrom");
-  console.log("    actually pulls this OFT cleanly. Before any real swap, run ONE dust-amount");
+  console.log(`    actually pulls ${tokenKind} cleanly. Before any real swap, run ONE dust-amount`);
   console.log("    approve → openFor → refund cycle on mainnet to confirm end-to-end.");
+  if (evm === "arbitrum") console.log("    (Arbitrum WBTC is the classic ERC-20, so this is low-risk — but still confirm.)");
   process.exit(ok ? 0 : 1);
 }
 
