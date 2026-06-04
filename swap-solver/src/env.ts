@@ -29,8 +29,14 @@ export interface SolverEnv {
   escrow: Address;
   oracle: Address;
   wbtc: Address;
-  /** The agent signer (attest + finalise). Treasury-grade. */
+  /** The agent signer (attest + finalise). HOT key. */
   agentAccount: Account;
+  /**
+   * Where collected WBTC is paid out on finalise (escrow `destination`).
+   * Decoupled from the hot signing key so funds can land in a cold/treasury
+   * wallet. Falls back to the agent address if PAYOUT_ADDRESS is unset.
+   */
+  payoutAddress: Address;
 
   // --- Canton side ---
   canton: {
@@ -97,6 +103,11 @@ export function loadEnv(): SolverEnv {
   }
   const agentAccount = privateKeyToAccount(normalizedKey);
 
+  // Payout (treasury) address for collected WBTC. Optional; defaults to the
+  // agent. Validated + checksummed so a typo can't silently send funds astray.
+  const rawPayout = process.env.PAYOUT_ADDRESS;
+  const payoutAddress = rawPayout ? getAddress(rawPayout) : agentAccount.address;
+
   return {
     network,
     originRpcUrl: req("ORIGIN_RPC_URL"),
@@ -104,6 +115,7 @@ export function loadEnv(): SolverEnv {
     oracle: getAddress(req("ORACLE_ADDRESS")),
     wbtc: getAddress(req("WBTC_ADDRESS")),
     agentAccount,
+    payoutAddress,
 
     canton: {
       ledgerHost: req("CANTON_LEDGER_HOST"),
@@ -114,7 +126,13 @@ export function loadEnv(): SolverEnv {
       auth: {
         tokenUrl: req("KEYCLOAK_TOKEN_URL"),
         clientId: req("KEYCLOAK_CLIENT_ID"),
-        clientSecret: req("KEYCLOAK_CLIENT_SECRET"),
+        // On devnet, prefer the dedicated KEYCLOAK_CLIENT_SECRET_DEVNET so we
+        // don't accidentally pair the devnet client_id with the app's mainnet
+        // secret (which yields invalid_grant). Falls back to KEYCLOAK_CLIENT_SECRET.
+        clientSecret:
+          network === "devnet" && process.env.KEYCLOAK_CLIENT_SECRET_DEVNET
+            ? process.env.KEYCLOAK_CLIENT_SECRET_DEVNET
+            : req("KEYCLOAK_CLIENT_SECRET"),
         scope: opt("KEYCLOAK_SCOPE", "daml_ledger_api"),
       },
     },
@@ -134,6 +152,8 @@ export function describeEnv(env: SolverEnv): Record<string, string> {
     wbtc: env.wbtc,
     agentAddress: env.agentAccount.address,
     agentKey: "***redacted***",
+    payoutAddress: env.payoutAddress,
+    payoutSeparateFromAgent: String(env.payoutAddress.toLowerCase() !== env.agentAccount.address.toLowerCase()),
     cantonLedgerHost: env.canton.ledgerHost,
     solverParty: maskParty(env.canton.solverParty),
     keycloakClientId: env.canton.auth.clientId,

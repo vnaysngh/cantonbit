@@ -77,3 +77,49 @@ Happy path + the destructive refund path.
 8. **Refund path** (destructive): open a second order, do NOT have the solver
    finalise (or stop it), let `expires` pass, then the user calls `refund()` and
    reclaims their WBTC. Confirm.
+
+---
+
+## Validation scripts (live testnet drills)
+
+Each is a standalone script. **Canton creds live in the Oranj app's
+`.env.local`; the EVM addresses + agent key live in `swap-solver/.env`.**
+
+> ⚠️ **ENV LOAD ORDER MATTERS.** Both files define `KEYCLOAK_CLIENT_ID`, but the
+> values differ: `.env.local` has the **21-char app/mainnet** id, `.env` has the
+> **20-char DevNet** id. DevNet auth needs the **20-char** id + the
+> `KEYCLOAK_CLIENT_SECRET_DEVNET` secret. So always load **`.env.local` FIRST,
+> `.env` LAST** for any Canton-touching script, so the DevNet id wins. Loading in
+> the wrong order pairs the mainnet id with the devnet secret → `invalid_grant`.
+
+Base-only scripts (no Canton) just need `.env`:
+
+```bash
+# V1 — refund / expiry (Base only). Locks WBTC, waits past expiry, refunds. ~3 min.
+node --env-file=.env --import tsx src/e2e-refund.ts
+```
+
+Canton-touching scripts need both, in this order:
+
+```bash
+# V3 — insufficient float. Asks for more cBTC than the float; asserts refusal,
+#      no offer, float intact. Zero risk (never delivers). ~20s.
+node --env-file=../.env.local --env-file=.env --import tsx src/e2e-insufficient-float.ts
+
+# Float check (diagnostic).
+node --env-file=../.env.local --env-file=.env --import tsx src/check-float.ts
+
+# V2 / happy path — full swap. Manual two-step accept requires the wallet's
+#      admin-wide AUTO-ACCEPT to be OFF; then accept the offer in the wallet
+#      when prompted. With auto-accept ON it collapses to one step.
+node --env-file=../.env.local --env-file=.env --import tsx src/e2e-full.ts
+```
+
+### Status of the drills
+- **V1 refund/expiry** — ✅ passed live (Base Sepolia). Validated: lock →
+  Deposited, early refund reverts, post-expiry refund returns WBTC → Refunded,
+  double-refund reverts.
+- **V3 insufficient float** — ✅ passed live (DevNet). Validated: solver refuses,
+  status=failed, no offer created, float unchanged.
+- **V2 manual two-step accept** — ⏳ needs the wallet auto-accept toggle OFF, then
+  a live run + manual accept. Happy path itself already proven (auto-accept ON).

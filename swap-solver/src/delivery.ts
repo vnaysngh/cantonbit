@@ -33,6 +33,9 @@ export interface DeliveryParams {
 export type DeliveryOutcome =
   | { kind: "skipped"; reason: string }
   | { kind: "delivering"; offerContractId: string; updateId: string }
+  // Wallet auto-accepted the offer on creation → collapsed to delivered in one
+  // step (no separate accept to watch). fillTimestamp = submit time.
+  | { kind: "delivered"; updateId: string; fillTimestamp: number }
   | { kind: "failed"; reason: string };
 
 /**
@@ -92,11 +95,26 @@ export async function startDelivery(
   // --- Create the offer (Phase 1). ---
   try {
     const holdings = await canton.getHoldings(canton.solverParty);
-    const { updateId, offerContractId } = await canton.createOffer({
+    const { updateId, offerContractId, autoAccepted } = await canton.createOffer({
       receiverParty: cantonParty,
       amountBtc,
       inputHoldings: holdings,
     });
+
+    // If the receiver wallet auto-accepts, the offer is consumed on creation —
+    // there is no offerContractId to watch and no separate accept event. The
+    // delivery is already final, so collapse straight to `delivered` using the
+    // submit time as the fill timestamp. (Mirrors e2e-full.ts.)
+    if (autoAccepted || !offerContractId) {
+      store.update(orderId, {
+        status: "delivered",
+        cantonDeliveryRef: updateId,
+        fillTimestamp: params.now,
+        note: `auto-accepted on delivery (updateId=${updateId})`,
+      });
+      return { kind: "delivered", updateId, fillTimestamp: params.now };
+    }
+
     store.update(orderId, {
       status: "delivering",
       cantonDeliveryRef: offerContractId,

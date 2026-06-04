@@ -19,6 +19,7 @@ const NAV = [
   // { href: "/send", label: "Send" },
   // { href: "/receive", label: "Receive" },
   { href: "/redeem", label: "Redeem" },
+  { href: "/swap", label: "Swap" },
   { href: "/activity", label: "Activity" }
 ] as const;
 

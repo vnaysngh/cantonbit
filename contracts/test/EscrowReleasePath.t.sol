@@ -2,7 +2,6 @@
 pragma solidity ^0.8.26;
 
 import { Test } from "forge-std/Test.sol";
-import { ERC20 } from "openzeppelin/token/ERC20/ERC20.sol";
 
 import { InputSettlerEscrow } from "oif-contracts/src/input/escrow/InputSettlerEscrow.sol";
 import { InputSettlerBase } from "oif-contracts/src/input/InputSettlerBase.sol";
@@ -11,11 +10,7 @@ import { StandardOrder } from "oif-contracts/src/input/types/StandardOrderType.s
 import { MandateOutputEncodingLib } from "oif-contracts/src/libs/MandateOutputEncodingLib.sol";
 
 import { OranjAttestorOracle } from "../src/OranjAttestorOracle.sol";
-
-contract MockWBTC is ERC20 {
-    constructor() ERC20("Mock WBTC", "WBTC") {}
-    function mint(address to, uint256 amt) external { _mint(to, amt); }
-}
+import { MockWBTC } from "../src/MockWBTC.sol";
 
 /**
  * @notice Proves the entire WBTC-side trust loop in isolation (no Canton, no
@@ -143,6 +138,37 @@ contract EscrowReleasePathTest is Test {
         escrow.finalise(order, sp, solverId, "");
 
         assertEq(wbtc.balanceOf(solver), LOCK_AMOUNT, "WBTC released to solver");
+        assertEq(wbtc.balanceOf(address(escrow)), 0, "escrow drained");
+    }
+
+    /// @notice Proves the SOLVER (proof identity) and DESTINATION (payout) can be
+    /// DIFFERENT addresses: the fill is attested under `solver`, but `finalise`
+    /// routes the released WBTC to a separate treasury `destination`. This is the
+    /// hot-key/cold-treasury split the solver uses (settle.ts payoutAddress).
+    function test_release_destinationDistinctFromSolver() public {
+        StandardOrder memory order = _buildOrder();
+        bytes32 solverId = _toId(solver);
+        address treasury = vm.addr(uint256(keccak256("treasury")));
+        bytes32 treasuryId = _toId(treasury);
+        assertTrue(treasury != solver, "treasury must differ from solver");
+
+        // Open + attest exactly as the happy path (proof keyed by solverId).
+        vm.prank(solver);
+        escrow.open(order);
+        uint32 fillTs = uint32(block.timestamp);
+        InputSettlerBase.SolveParams[] memory sp = new InputSettlerBase.SolveParams[](1);
+        sp[0] = InputSettlerBase.SolveParams({ timestamp: fillTs, solver: solverId });
+
+        bytes32 ph = _payloadHash(order, solverId, fillTs);
+        vm.prank(attestor);
+        oracle.attest(CANTON_CHAIN_ID, _toId(address(oracle)), cantonSettlerId, ph);
+
+        // Finalise with destination = treasury (NOT solver).
+        vm.prank(solver);
+        escrow.finalise(order, sp, treasuryId, "");
+
+        assertEq(wbtc.balanceOf(treasury), LOCK_AMOUNT, "WBTC routed to treasury destination");
+        assertEq(wbtc.balanceOf(solver), 0, "solver (hot key) received nothing");
         assertEq(wbtc.balanceOf(address(escrow)), 0, "escrow drained");
     }
 

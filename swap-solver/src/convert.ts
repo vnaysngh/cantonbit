@@ -8,6 +8,30 @@ import type { Hex } from "viem";
 import type { SerializedOrder } from "./store.js";
 import type { MandateOutput, StandardOrder } from "./encoding.js";
 
+/** Inverse of deserializeOrder: a typed StandardOrder → the JSON-safe form
+ *  (bigints as decimal strings) for storage and API responses. */
+export function serializeOrder(o: StandardOrder): SerializedOrder {
+  return {
+    user: o.user,
+    nonce: o.nonce.toString(),
+    originChainId: o.originChainId.toString(),
+    expires: o.expires,
+    fillDeadline: o.fillDeadline,
+    inputOracle: o.inputOracle,
+    inputs: o.inputs.map((p) => [p[0].toString(), p[1].toString()] as [string, string]),
+    outputs: o.outputs.map((out) => ({
+      oracle: out.oracle,
+      settler: out.settler,
+      chainId: out.chainId.toString(),
+      token: out.token,
+      amount: out.amount.toString(),
+      recipient: out.recipient,
+      callbackData: out.callbackData,
+      context: out.context,
+    })),
+  };
+}
+
 export function deserializeOrder(s: SerializedOrder): StandardOrder {
   return {
     user: s.user,

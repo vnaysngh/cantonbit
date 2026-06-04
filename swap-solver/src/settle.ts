@@ -37,8 +37,16 @@ export interface SettleConfig {
   rpcUrl: string;
   escrow: Address;
   oracle: Address;
-  /** The agent account (signs attest + finalise). This is the treasury key. */
+  /** The agent account (signs attest + finalise). This is the HOT key. */
   account: Account;
+  /**
+   * Where the released WBTC is sent on finalise (the escrow `destination`).
+   * Decoupled from the signing key so collected funds can land in a separate
+   * cold/treasury wallet. Defaults to the agent address if unset (backwards
+   * compatible). NOTE: this is NOT part of the proof — only `solver` (the agent
+   * identity) is hashed into the attestation; `destination` just routes funds.
+   */
+  payoutAddress?: Address;
 }
 
 export type SettleOutcome =
@@ -57,9 +65,19 @@ export class Settler {
     this.wallet = createWalletClient({ account: cfg.account, transport: http(cfg.rpcUrl) });
   }
 
-  /** The solver's identity = the agent address, as both solver & destination. */
+  /** The solver's identity (hashed into the proof) = the agent address as bytes32. */
   private solverId(): Hex {
     return `0x${"00".repeat(12)}${this.cfg.account.address.slice(2)}` as Hex;
+  }
+
+  /**
+   * Where the released WBTC lands (escrow `destination`), as bytes32. This is
+   * the payout/treasury address — separate from the signing key — and is NOT
+   * part of the attestation proof. Defaults to the agent address.
+   */
+  private destinationId(): Hex {
+    const payout = this.cfg.payoutAddress ?? this.cfg.account.address;
+    return `0x${"00".repeat(12)}${payout.slice(2)}` as Hex;
   }
 
   async settleOne(store: OrderStore, orderId: Hex): Promise<SettleOutcome> {
@@ -123,9 +141,12 @@ export class Settler {
     }
 
     try {
+      // solver = agent identity (matches the attested proof); destination =
+      // payout/treasury address (where the WBTC actually lands).
       const solveParams = [{ timestamp: fillTs, solver: solverId }];
+      const destination = this.destinationId();
       const finaliseTxHash = await escrow.write.finalise(
-        [orderToTuple(order), solveParams, solverId, "0x"],
+        [orderToTuple(order), solveParams, destination, "0x"],
         { account: this.cfg.account, chain: null },
       );
       await this.pub.waitForTransactionReceipt({ hash: finaliseTxHash });

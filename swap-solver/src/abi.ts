@@ -105,6 +105,15 @@ export const ESCROW_ABI = [
     ],
     outputs: [],
   },
+  {
+    // refund(order) — after order.expires, returns the locked inputs to order.user.
+    // The user safety valve when a solver never delivers / never finalises.
+    type: "function",
+    name: "refund",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "order", type: "tuple", components: STANDARD_ORDER_COMPONENTS }],
+    outputs: [],
+  },
 ] as const;
 
 /** Our oracle ABI — the attest entrypoints + read. */

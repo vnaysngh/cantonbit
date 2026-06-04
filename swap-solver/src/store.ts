@@ -129,10 +129,33 @@ export class OrderStore {
     return Object.values(this.data.orders).filter((o) => o.status === status);
   }
 
-  /** Insert a newly-seen order. Idempotent: ignored if the orderId exists. */
+  /**
+   * Re-read the store file from disk into memory. The solver runs as MULTIPLE
+   * processes sharing one file (the API registers orders + cantonParty; the loop
+   * delivers/settles). Each must see the other's writes, so the loop calls this
+   * at the top of every tick, and writes merge-from-disk (see reloadInto).
+   */
+  reload(): void {
+    if (existsSync(this.path)) {
+      this.data = JSON.parse(readFileSync(this.path, "utf8")) as StoreFile;
+    }
+  }
+
+  /** Read the latest file state so a write doesn't clobber another process's. */
+  private reloadInto(): void {
+    if (existsSync(this.path)) {
+      try {
+        this.data = JSON.parse(readFileSync(this.path, "utf8")) as StoreFile;
+      } catch { /* mid-write torn read is impossible (atomic rename) but be safe */ }
+    }
+  }
+
+  /** Insert a newly-seen order. Idempotent: existing record (e.g. one the API
+   *  already enriched with cantonParty) is preserved, not overwritten. */
   insertSeen(orderId: Hex, openBlock: number, order: SerializedOrder): OrderRecord {
+    this.reloadInto(); // pick up the other process's writes before deciding
     const existing = this.data.orders[orderId];
-    if (existing) return existing;
+    if (existing) return existing; // first-write-wins; never clobber enrichment
     const now = new Date().toISOString();
     const rec: OrderRecord = {
       orderId,
@@ -147,8 +170,10 @@ export class OrderStore {
     return rec;
   }
 
-  /** Patch an order record (status transitions + leg metadata). */
+  /** Patch an order record (status transitions + leg metadata). Merges against
+   *  the latest on-disk state so a concurrent process's fields aren't lost. */
   update(orderId: Hex, patch: Partial<Omit<OrderRecord, "orderId" | "createdAt">>): OrderRecord {
+    this.reloadInto(); // merge against latest disk state (other process may have written)
     const rec = this.data.orders[orderId];
     if (!rec) throw new Error(`order ${orderId} not found`);
     Object.assign(rec, patch, { updatedAt: new Date().toISOString() });

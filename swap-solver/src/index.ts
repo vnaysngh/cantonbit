@@ -68,6 +68,7 @@ async function main(): Promise<void> {
     escrow: env.escrow,
     oracle: env.oracle,
     account: env.agentAccount,
+    payoutAddress: env.payoutAddress,
   });
 
   // Resumable backfill, then live follow.
@@ -89,6 +90,11 @@ async function main(): Promise<void> {
   while (!stopping) {
     const now = Math.floor(Date.now() / 1000);
     try {
+      // 0. re-read the store so we see the API process's writes (the API
+      //    registers orders + the cantonParty preimage; without this reload the
+      //    loop would never see the party and would refuse to deliver).
+      store.reload();
+
       // 2. deliver seen orders
       const delivered = await deliverSeenOrders(store, canton, {
         now,
