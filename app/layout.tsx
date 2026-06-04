@@ -3,6 +3,7 @@ import { Plus_Jakarta_Sans } from "next/font/google";
 import "./globals.css";
 
 import { WalletProvider } from "@/hooks/useWallet";
+import { LoopWalletProvider } from "@/hooks/useLoopWallet";
 import { AppShell } from "@/components/AppShell";
 import { QueryProvider } from "@/components/QueryProvider";
 import { ThemeProvider } from "@/components/ThemeProvider";
@@ -55,9 +56,11 @@ export default function RootLayout({
           disableTransitionOnChange
         >
           <QueryProvider>
-            <WalletProvider>
-              <AppShell>{children}</AppShell>
-            </WalletProvider>
+            <LoopWalletProvider>
+              <WalletProvider>
+                <AppShell>{children}</AppShell>
+              </WalletProvider>
+            </LoopWalletProvider>
           </QueryProvider>
         </ThemeProvider>
       </body>

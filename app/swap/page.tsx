@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useEvmWallet } from "@/hooks/useEvmWallet";
+import { useWallet } from "@/hooks/useWallet";
 import { truncatePartyId } from "@/lib/format";
 import {
   getQuote, submitOrder, getOrder, isTerminal, STATUS_LABEL,
@@ -33,18 +34,15 @@ const FLOW: SwapStatus[] = ["seen", "delivering", "delivered", "attested", "fina
 
 export default function SwapPage() {
   const evm = useEvmWallet();
+  const wallet = useWallet();
 
-  // DESTINATION party for the delivered cBTC.
-  //
-  // NOTE: the swap solver runs on the WarpX DEVNET synchronizer, so it can only
-  // deliver cBTC to a party known on that synchronizer. The Oranj login party
-  // (useWallet().partyId) is a MAINNET party on a different participant — the
-  // solver can't reach it (UNKNOWN_INFORMEES). Until the Loop wallet SDK is wired
-  // (so users connect a devnet party the solver can reach), we deliver to a fixed
-  // reachable devnet party. Override via NEXT_PUBLIC_SWAP_DEST_PARTY.
-  const destinationParty =
-    process.env.NEXT_PUBLIC_SWAP_DEST_PARTY ??
-    "8f5ca108eb208e8826f868952ede00a5::12200fe103931833a6cb6f080dff41df997dbb9abd8d06384e6405434a04efcf8e2b";
+  // DESTINATION party for the delivered cBTC = the user's CONNECTED LOOP WALLET
+  // party. Both the Loop wallet and the swap solver run on devnet, so the solver
+  // can deliver to it (and the user accepts the incoming cBTC in their own Loop
+  // wallet). NEXT_PUBLIC_SWAP_DEST_PARTY remains an optional override for testing
+  // against a fixed party.
+  const destinationParty = process.env.NEXT_PUBLIC_SWAP_DEST_PARTY ?? wallet.partyId;
+  const loopConnected = wallet.isConnected && !!wallet.partyId;
 
   const [amount, setAmount] = useState("0.0001");
   const [stage, setStage] = useState<Stage>({ kind: "idle" });
@@ -84,7 +82,7 @@ export default function SwapPage() {
   // --- 1. quote ---
   const handleQuote = useCallback(async () => {
     if (!evm.account) { fail("Connect your EVM wallet first."); return; }
-    if (!destinationParty) { fail("No destination Canton party configured."); return; }
+    if (!destinationParty) { fail("Connect your Loop wallet to set the destination."); return; }
     let wbtcAmount: bigint;
     try { wbtcAmount = parseWbtc(amount); } catch { fail("Enter a valid amount."); return; }
     if (wbtcAmount <= 0n) { fail("Amount must be greater than zero."); return; }
@@ -201,13 +199,27 @@ export default function SwapPage() {
           <div className="flex flex-col gap-3 rounded-lg bg-muted/40 p-3 text-sm">
             <ConnectionRow
               label="Canton (destination)"
-              value={truncatePartyId(destinationParty)}
-              ok={!!destinationParty}
+              value={destinationParty ? truncatePartyId(destinationParty) : "Connect Loop wallet"}
+              ok={loopConnected}
+              action={
+                !loopConnected ? (
+                  <Button
+                    size="sm" variant="outline"
+                    onClick={wallet.connectLoop}
+                    disabled={wallet.loopConnecting || !wallet.loopReady}
+                  >
+                    {wallet.loopConnecting ? "Connecting…" : wallet.loopReady ? "Connect Loop" : "Loading…"}
+                  </Button>
+                ) : undefined
+              }
             />
             <p className="text-[11px] text-muted-foreground -mt-1">
-              cBTC is delivered to a fixed devnet party the solver can reach
-              (Loop wallet connect coming soon).
+              cBTC is delivered to your connected Loop wallet — accept the incoming
+              transfer there once it arrives.
             </p>
+            {wallet.loopError && (
+              <p className="text-[11px] text-destructive -mt-1">{wallet.loopError}</p>
+            )}
             <ConnectionRow
               label="EVM (source)"
               value={evm.account ? `${evm.account.slice(0, 6)}…${evm.account.slice(-4)}` : "Not connected"}

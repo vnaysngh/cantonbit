@@ -26,7 +26,7 @@ const NAV = [
 export function TopNav() {
   const pathname = usePathname();
   const router = useRouter();
-  const { partyId, isLoading } = useWallet();
+  const { partyId, isLoading, connectLoop, loopConnecting, loopReady } = useWallet();
   const { total } = useBalance();
   const [copied, setCopied] = useState(false);
 
@@ -117,7 +117,26 @@ export function TopNav() {
                 <span className="material-symbols-outlined text-[20px]">logout</span>
               </button>
             </>
-          ) : null}
+          ) : (
+            <>
+              {/* Logged in but no Loop wallet connected yet — prompt to connect. */}
+              <button
+                onClick={connectLoop}
+                disabled={loopConnecting || !loopReady}
+                className="inline-flex h-9 items-center rounded-lg bg-primary px-4 text-body-md text-on-primary transition-all hover:opacity-90 active:scale-95 disabled:opacity-50"
+              >
+                {loopConnecting ? "Connecting…" : loopReady ? "Connect Loop" : "Loading…"}
+              </button>
+              <button
+                onClick={handleLogout}
+                title="Sign out"
+                aria-label="Sign out"
+                className="rounded-full p-2 text-on-surface-variant transition-all hover:bg-surface-container-high hover:text-on-surface"
+              >
+                <span className="material-symbols-outlined text-[20px]">logout</span>
+              </button>
+            </>
+          )}
         </div>
       </div>
     </header>

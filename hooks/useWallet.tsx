@@ -1,88 +1,116 @@
 "use client";
 
 import {
-  createContext,
-  useContext,
-  useEffect,
-  useState,
+  createContext, useContext, useEffect, useRef, useState,
   type ReactNode,
 } from "react";
 
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import { useLoopWallet } from "@/hooks/useLoopWallet";
 
-export type LoopProvider = null;
+/**
+ * App identity hook. The Canton party now comes from the user's CONNECTED LOOP
+ * WALLET (useLoopWallet), not from a validator-created party. On connect we
+ * register that party against the Supabase session (party_mappings) so the
+ * server can resolve "which party does this session own" for read queries.
+ *
+ * The shape (isConnected/partyId/email/isLoading) is unchanged so every existing
+ * consumer (dashboard, mint, redeem, balance, TopNav) keeps working — they just
+ * now get the Loop party. `provider` is added for screens that need to submit a
+ * user-signed Canton transaction via the Loop wallet.
+ */
+
+export type { LoopProvider } from "@/hooks/useLoopWallet";
 
 interface WalletState {
+  /** True once a Loop wallet is connected AND registered to the session. */
   isConnected: boolean;
+  /** The connected Loop wallet's Canton party (the user's identity). */
   partyId: string;
   email: string | null;
   isLoading: boolean;
+  /** Loop connect/logout passthrough so the UI can drive connection. */
+  connectLoop: () => Promise<void>;
+  logoutLoop: () => void;
+  loopReady: boolean;
+  loopConnecting: boolean;
+  loopError: string | null;
 }
 
 const WalletContext = createContext<WalletState>({
-  isConnected: false,
-  partyId: "",
-  email: null,
-  isLoading: true,
+  isConnected: false, partyId: "", email: null, isLoading: true,
+  connectLoop: async () => {}, logoutLoop: () => {},
+  loopReady: false, loopConnecting: false, loopError: null,
 });
 
 export function WalletProvider({ children }: { children: ReactNode }) {
-  const [state, setState] = useState<WalletState>({
-    isConnected: false,
-    partyId: "",
-    email: null,
-    isLoading: true,
-  });
+  const loop = useLoopWallet();
+  const [sessionEmail, setSessionEmail] = useState<string | null>(null);
+  const [registeredParty, setRegisteredParty] = useState<string>("");
+  const [registering, setRegistering] = useState(false);
+  const registeredFor = useRef<string>(""); // guard: register each party once
 
+  // Track the Supabase session email (app still uses Supabase for login/session).
   useEffect(() => {
     const supabase = createSupabaseBrowserClient();
-
-    const init = async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-
-      if (!user) {
-        setState({ isConnected: false, partyId: "", email: null, isLoading: false });
-        return;
-      }
-
-      // Allocate or fetch the Canton party for this user.
-      // Idempotent — safe to call on every page load.
-      try {
-        const res = await fetch("/api/parties/allocate", { method: "POST" });
-        const data = await res.json() as { partyId?: string; error?: string };
-
-        if (data.partyId) {
-          setState({
-            isConnected: true,
-            partyId: data.partyId,
-            email: user.email ?? null,
-            isLoading: false,
-          });
-        } else {
-          console.error("[useWallet] party allocation failed:", data.error);
-          setState({ isConnected: false, partyId: "", email: user.email ?? null, isLoading: false });
-        }
-      } catch (err) {
-        console.error("[useWallet] party allocation error:", err);
-        setState({ isConnected: false, partyId: "", email: user.email ?? null, isLoading: false });
-      }
-    };
-
-    init();
-
-    // Re-run when auth state changes (login/logout)
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(() => {
-      init();
+    void supabase.auth.getUser().then(({ data }) => setSessionEmail(data.user?.email ?? null));
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, session) => {
+      setSessionEmail(session?.user?.email ?? null);
     });
-
     return () => subscription.unsubscribe();
   }, []);
 
-  return (
-    <WalletContext.Provider value={state}>
-      {children}
-    </WalletContext.Provider>
-  );
+  // When the Loop wallet connects, register its party against the session.
+  useEffect(() => {
+    if (!loop.connected || !loop.party) {
+      setRegisteredParty("");
+      registeredFor.current = "";
+      return;
+    }
+    if (registeredFor.current === loop.party) return; // already registered this party
+    registeredFor.current = loop.party;
+    setRegistering(true);
+    void (async () => {
+      try {
+        const res = await fetch("/api/parties/register-loop", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ partyId: loop.party }),
+        });
+        const data = (await res.json()) as { partyId?: string; error?: string };
+        if (res.ok && data.partyId) {
+          setRegisteredParty(data.partyId);
+        } else {
+          // Registration failed (e.g. not logged in, or party owned by another
+          // account). Still expose the Loop party for read-only client use, but
+          // mark as unregistered so server actAs routes can reject if needed.
+          console.error("[useWallet] loop party registration failed:", data.error);
+          setRegisteredParty(loop.party);
+        }
+      } catch (err) {
+        console.error("[useWallet] register-loop error:", err);
+        setRegisteredParty(loop.party);
+      } finally {
+        setRegistering(false);
+      }
+    })();
+  }, [loop.connected, loop.party]);
+
+  const partyId = registeredParty || loop.party;
+
+  const value: WalletState = {
+    isConnected: loop.connected && !!partyId,
+    partyId,
+    email: loop.email ?? sessionEmail,
+    isLoading: !loop.ready || loop.connecting || registering,
+    connectLoop: loop.connect,
+    logoutLoop: loop.logout,
+    loopReady: loop.ready,
+    loopConnecting: loop.connecting,
+    loopError: loop.error,
+  };
+
+  return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>;
 }
 
 export function useWallet(): WalletState {

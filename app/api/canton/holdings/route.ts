@@ -33,16 +33,17 @@ export async function GET(request: Request) {
   try {
     const holdings = await getHoldings(partyId);
     console.log(`${TAG} returning ${holdings.length} holdings for partyId=${partyId.slice(0, 40)}...`);
-    for (const h of holdings) {
-      console.log(`${TAG} holding contractId=${h.contractId} payload=${JSON.stringify(h.payload)}`);
-    }
-    return NextResponse.json({
-      partyId,
-      count: holdings.length,
-      holdings,
-    });
+    return NextResponse.json({ partyId, count: holdings.length, holdings });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    // The app's m2m JWT can only read parties this validator hosts. A Loop wallet
+    // party lives on another participant, so the node refuses with 403
+    // "security-sensitive error". That's expected, not a server fault — return
+    // empty holdings (the balance is read client-side via the Loop provider).
+    if (message.includes("(403") || /security-sensitive/i.test(message)) {
+      console.warn(`${TAG} m2m JWT cannot read this party (403) — returning empty holdings`);
+      return NextResponse.json({ partyId, count: 0, holdings: [], unreadable: true });
+    }
     console.error(`${TAG} error:`, err);
     return NextResponse.json({ error: message }, { status: 500 });
   }

@@ -23,13 +23,23 @@ function readEnv(): {
   scope: string;
 } {
   const tokenUrl = process.env.KEYCLOAK_TOKEN_URL;
-  const clientId = process.env.KEYCLOAK_CLIENT_ID;
-  const clientSecret = process.env.KEYCLOAK_CLIENT_SECRET;
   const scope = process.env.KEYCLOAK_SCOPE ?? "daml_ledger_api";
+
+  // Network-aware credential selection. On devnet, prefer the dedicated devnet
+  // client_id + secret (KEYCLOAK_CLIENT_ID_DEVNET / KEYCLOAK_CLIENT_SECRET_DEVNET)
+  // so we don't pair the devnet client with the mainnet secret (→ invalid_grant).
+  // Falls back to the default KEYCLOAK_CLIENT_ID / KEYCLOAK_CLIENT_SECRET.
+  const isDevnet = process.env.NEXT_PUBLIC_NETWORK?.toLowerCase() === "devnet";
+  const clientId = isDevnet
+    ? process.env.KEYCLOAK_CLIENT_ID_DEVNET || process.env.KEYCLOAK_CLIENT_ID
+    : process.env.KEYCLOAK_CLIENT_ID;
+  const clientSecret = isDevnet
+    ? process.env.KEYCLOAK_CLIENT_SECRET_DEVNET || process.env.KEYCLOAK_CLIENT_SECRET
+    : process.env.KEYCLOAK_CLIENT_SECRET;
 
   if (!tokenUrl || !clientId || !clientSecret) {
     throw new Error(
-      "Missing Authentik OAuth env vars: KEYCLOAK_TOKEN_URL, KEYCLOAK_CLIENT_ID, KEYCLOAK_CLIENT_SECRET must all be set.",
+      "Missing Authentik OAuth env vars: KEYCLOAK_TOKEN_URL, KEYCLOAK_CLIENT_ID(_DEVNET), KEYCLOAK_CLIENT_SECRET(_DEVNET) must all be set.",
     );
   }
 
