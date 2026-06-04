@@ -35,13 +35,27 @@ Status legend: ✅ done · ⚠️ partial · ❌ not done / blocked
 
 ---
 
-## C. Contract deployment to Base mainnet (the "variables" you asked about)
+## C. Contract deployment — ✅ DONE on ARBITRUM ONE
 
-| # | Item | Status | Notes |
-|---|---|---|---|
-| C1 | Deploy **InputSettlerEscrow** to Base mainnet | ❌ | Via the (B1-updated) deploy script with `SWAP_NETWORK=mainnet`. |
-| C2 | Deploy **OranjAttestorOracle** to Base mainnet | ❌ | owner = cold key, attestor = hot key (see D2). |
-| C3 | Wire deployed addresses into mainnet `.env` | ❌ | `ESCROW_ADDRESS`, `ORACLE_ADDRESS`, `ESCROW_START_BLOCK`, `WBTC_ADDRESS=0x0555…`. |
+Deployed `2026-06` via `deploy.ts` (SWAP_NETWORK=mainnet EVM_CHAIN=arbitrum
+ALLOW_MAINNET=true DEPLOY_ENV_PATH=.env.mainnet WBTC_ADDRESS=0x2f2a2543…).
+Verified on-chain (code present; oracle owner==attestor==agent).
+
+| Contract | Arbitrum One address |
+|---|---|
+| **InputSettlerEscrow** | `0x306007585469a2dde4ca8ab47d2d6a76833815e0` |
+| **OranjAttestorOracle** | `0x77c1cd60f79379f00dfd66a5a31e0ae92c9b7073` |
+| **WBTC** (real) | `0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f` |
+| Start block | `470011441` |
+| Owner = attestor = deployer | `0x0B95ec…5A08` |
+
+Addresses live in **`swap-solver/.env.mainnet`** (separate from devnet `.env`).
+
+> ⚠️ **ENV LOAD ORDER (mainnet ops):** the devnet `.env` has a `WBTC_ADDRESS`
+> (the devnet mock) that will SHADOW the mainnet address. Always load
+> `.env.mainnet` AFTER `.env` for any mainnet command:
+> `node --env-file=.env --env-file=.env.mainnet …` — so the Arbitrum addresses
+> win. (Loading only `.env` points the solver at the dead devnet mock.)
 | C4 | **(Recommended) Verify contracts on Basescan** | ❌ | So the escrow/oracle are auditable by anyone before users lock funds. |
 | C5 | Set `ORIGIN_RPC_URL` to a reliable Base mainnet RPC | ❌ | Prefer a private/keyed RPC over a public one for finalise reliability. |
 

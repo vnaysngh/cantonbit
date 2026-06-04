@@ -34,7 +34,10 @@ import { arbitrum, base, baseSepolia } from "viem/chains";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 
 const OUT = "../contracts/out";
-const ENV_PATH = ".env";
+// Where to write the deployed addresses. Defaults to .env, but a mainnet deploy
+// should target a SEPARATE file (DEPLOY_ENV_PATH=.env.mainnet) so it never
+// clobbers the working devnet/testnet .env.
+const ENV_PATH = process.env.DEPLOY_ENV_PATH ?? ".env";
 
 /**
  * Per-EVM-chain mainnet WBTC. We swap from ARBITRUM (deep WBTC liquidity, ~7k
