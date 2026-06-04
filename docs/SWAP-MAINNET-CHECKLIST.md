@@ -15,7 +15,7 @@ Status legend: ✅ done · ⚠️ partial · ❌ not done / blocked
 | A1 | **Real cBTC float on a mainnet Canton party** | ❌ | We have DevNet cBTC only. Mainnet cBTC needs BitSafe/mint access (still pending per CLAUDE.md). **No float → nothing to deliver → swap can't complete.** This is the hard blocker. |
 | A2 | **Mainnet Canton m2m credentials** (KEYCLOAK_* for the mainnet ledger) | ❌ | DevNet creds won't auth against `ledger-api.validator.warpx.fivenorth.io`. Need mainnet client_id/secret + token URL from Five North/Authentik. |
 | A3 | **Mainnet Canton solver party** funded with the cBTC float | ❌ | A real party id on mainnet that holds A1's cBTC. |
-| A4 | **Real WBTC on Base mainnet, in the user/test wallet** | ❌ | Canonical Base WBTC = `0x0555E30da8f98308EdB960aa94C0Db47230d2B9c`. Cannot be minted — must be bought/bridged and held. |
+| A4 | **Real WBTC on Base mainnet, in the user/test wallet** | ❌ (user supplies) | Canonical Base WBTC = `0x0555E30da8f98308EdB960aa94C0Db47230d2B9c` — **VERIFIED** on Base mainnet: name "Wrapped BTC", symbol WBTC, **decimals 8** (matches our stack), ~60 WBTC supply. It's BitGo's LayerZero OFT ("WBTCOFT"). Cannot be minted — must be bought/bridged and held. User said they'll supply it. |
 | A5 | **Base mainnet ETH for gas** (agent + user wallets) | ❌ | Real ETH for attest + finalise + openFor gas. |
 | A6 | **cBTC mainnet instrument id + registry confirmed** | ⚠️ | CLAUDE.md lists mainnet admin `cbtc-network::12205af3b949a047…` + registry `https://api.utilities.digitalasset.com`. Confirmed values, but never exercised live. Verify the instrument resolves before relying on it. |
 
@@ -25,7 +25,8 @@ Status legend: ✅ done · ⚠️ partial · ❌ not done / blocked
 
 | # | Item | Status | File / action |
 |---|---|---|---|
-| B1 | **Deploy script: real-WBTC mainnet mode** | ❌ | `swap-solver/src/deploy.ts` hardcodes MockWBTC + free mint. Add a branch: on mainnet, skip MockWBTC, take `WBTC_ADDRESS` from env (the real `0x0555…`), do NOT mint. |
+| B1 | **Deploy script: real-WBTC mainnet mode** | ✅ DONE | `deploy.ts` is now SWAP_NETWORK-aware: mainnet uses the real Base WBTC (default `0x0555…`, asserts decimals==8), no MockWBTC, no mint, gated behind ALLOW_MAINNET=true. Also splits oracle owner (cold) / attestor (hot) via ORACLE_OWNER / ORACLE_ATTESTOR. |
+| B1b | **WBTC/Permit2 compatibility check** | ✅ DONE (static) | `check-wbtc-permit2.ts` confirms (read-only, no spend) decimals==8, ERC-20 surface, and Permit2 deployed on Base. Ran green against Base mainnet. The OFT-pull-via-Permit2 path still needs ONE live dust approve→openFor→refund before a real swap (flagged). |
 | B2 | **De-hardcode the E2E/diagnostic scripts** | ❌ | `e2e-full.ts`, `live-canton.ts`, `check-float.ts` have DevNet registry URL + `cbtc-network::12202a83…` admin party as string literals. They'd silently test DevNet even under mainnet env. Make them read from env (same source as `index.ts`). |
 | B3 | **Confirm `index.ts`/`env.ts` are fully env-driven** | ✅ | Already verified: the main loop reads network, RPC, escrow/oracle/wbtc, all Canton config + creds from env. No mainnet code change needed in the core runtime. |
 | B4 | **`ALLOW_MAINNET=true` gate** | ✅ | Already enforced in `env.ts` — refuses mainnet unless explicitly set. Keep it. |
