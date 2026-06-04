@@ -41,11 +41,15 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Missing or invalid partyId" }, { status: 400 });
     }
 
-    // 1. Identity from the session — never from the body.
+    // Identity now comes from the Loop wallet connection (no login gate). If a
+    // legacy Supabase session exists, we still persist the mapping for it; if
+    // not, registration is a no-op success — the client already holds the Loop
+    // party and uses it directly (user-signed Canton actions are authorized by
+    // the Loop wallet, not by a server session).
     const supabase = await createSupabaseServerClient();
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
-    if (authError || !user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
+    if (!user) {
+      return NextResponse.json({ partyId, isNew: false, sessionless: true });
     }
 
     const serviceClient = await createSupabaseServiceClient();

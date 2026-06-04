@@ -153,10 +153,10 @@ export function isTerminal(status: SwapStatus): boolean {
 /** Human-friendly status labels for the UI. */
 export const STATUS_LABEL: Record<SwapStatus, string> = {
   seen: "WBTC locked — solver notified",
-  delivering: "Delivering cBTC on Canton…",
-  delivered: "cBTC sent to your wallet — settling…",
+  delivering: "Delivering CBTC on Canton…",
+  delivered: "CBTC sent to your wallet — settling…",
   attested: "Fill attested — releasing WBTC…",
-  finalised: "Complete — cBTC sent ✓",
+  finalised: "Complete — CBTC sent ✓",
   refunded: "Refunded to your wallet",
   failed: "Swap failed",
 };

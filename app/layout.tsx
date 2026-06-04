@@ -4,6 +4,7 @@ import "./globals.css";
 
 import { WalletProvider } from "@/hooks/useWallet";
 import { LoopWalletProvider } from "@/hooks/useLoopWallet";
+import { EvmWalletProvider } from "@/hooks/useEvmWallet";
 import { AppShell } from "@/components/AppShell";
 import { QueryProvider } from "@/components/QueryProvider";
 import { ThemeProvider } from "@/components/ThemeProvider";
@@ -56,11 +57,13 @@ export default function RootLayout({
           disableTransitionOnChange
         >
           <QueryProvider>
-            <LoopWalletProvider>
-              <WalletProvider>
-                <AppShell>{children}</AppShell>
-              </WalletProvider>
-            </LoopWalletProvider>
+            <EvmWalletProvider>
+              <LoopWalletProvider>
+                <WalletProvider>
+                  <AppShell>{children}</AppShell>
+                </WalletProvider>
+              </LoopWalletProvider>
+            </EvmWalletProvider>
           </QueryProvider>
         </ThemeProvider>
       </body>

@@ -1,16 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import {
+  createContext, useCallback, useContext, useEffect, useRef, useState,
+  type ReactNode,
+} from "react";
 
 /**
- * Minimal EVM (MetaMask / EIP-1193) wallet hook — dependency-free.
+ * EVM (MetaMask / EIP-1193) wallet — dependency-free, app-wide via context.
  *
- * The swap flow needs the user to (1) connect an EVM account, (2) sign the
- * Permit2 typed data the solver returns, and (3) send an `approve` tx so Permit2
- * can pull WBTC. All via window.ethereum directly — no wagmi/viem in the app.
- *
- * Deliberately small: no chain switching UI, no multi-wallet. It exposes the
- * account, the chainId, and thin request helpers the page composes.
+ * Used for the swap's EVM leg: connect an account, sign the Permit2 typed data,
+ * send an `approve` tx, switch chain. Exposed app-wide (header + swap page share
+ * one connection) through EvmWalletProvider, so the header can show a connect/
+ * disconnect pill alongside the Loop wallet.
  */
 
 type Eip1193Provider = {
@@ -32,14 +33,12 @@ export interface EvmWallet {
   connecting: boolean;
   error: string | null;
   connect: () => Promise<void>;
-  /** Sign EIP-712 typed data (eth_signTypedData_v4). Returns the 0x signature. */
   signTypedData: (typedData: object) => Promise<string>;
-  /** Send a raw transaction (e.g. ERC20 approve). Returns the tx hash. */
   sendTransaction: (tx: { to: string; data: string; value?: string }) => Promise<string>;
-  /** eth_call for reads (returns hex). */
   call: (to: string, data: string) => Promise<string>;
-  /** Ask the wallet to switch to a chain (adds it if unknown). */
   switchChain: (chainId: number, params?: AddChainParams) => Promise<void>;
+  /** Forget the connection in-app (the wallet itself stays installed). */
+  disconnect: () => void;
 }
 
 export interface AddChainParams {
@@ -49,20 +48,30 @@ export interface AddChainParams {
   blockExplorerUrls?: string[];
 }
 
-export function useEvmWallet(): EvmWallet {
+/** localStorage flag: the user explicitly disconnected, so don't auto-rehydrate. */
+const DISCONNECTED_KEY = "oranj.evm.disconnected";
+
+const EvmContext = createContext<EvmWallet | null>(null);
+
+function useEvmWalletState(): EvmWallet {
   const [account, setAccount] = useState<string | null>(null);
   const [chainId, setChainId] = useState<number | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const available = typeof window !== "undefined" && !!getProvider();
+  const disconnected = useRef(false);
+  // `available` starts false (SSR-safe — window.ethereum doesn't exist on the
+  // server) and is set to its real value in the effect, so the first client
+  // render matches the server and there's no hydration mismatch.
+  const [available, setAvailable] = useState(false);
 
-  // React to account/chain changes from the wallet.
   useEffect(() => {
+    setAvailable(!!getProvider());
+    try { disconnected.current = localStorage.getItem(DISCONNECTED_KEY) === "1"; } catch { /* ignore */ }
     const p = getProvider();
     if (!p?.on) return;
     const onAccounts = (...args: unknown[]) => {
       const accts = args[0] as string[];
-      setAccount(accts?.[0] ?? null);
+      setAccount(disconnected.current ? null : (accts?.[0] ?? null));
     };
     const onChain = (...args: unknown[]) => {
       const cid = args[0] as string;
@@ -70,14 +79,16 @@ export function useEvmWallet(): EvmWallet {
     };
     p.on("accountsChanged", onAccounts);
     p.on("chainChanged", onChain);
-    // Hydrate current state if already authorized.
-    void p.request({ method: "eth_accounts" }).then((a) => {
-      const accts = a as string[];
-      if (accts?.[0]) setAccount(accts[0]);
-    });
-    void p.request({ method: "eth_chainId" }).then((c) => {
-      setChainId(c ? Number.parseInt(c as string, 16) : null);
-    });
+    // Hydrate current state if already authorized AND not manually disconnected.
+    if (!disconnected.current) {
+      void p.request({ method: "eth_accounts" }).then((a) => {
+        const accts = a as string[];
+        if (accts?.[0]) setAccount(accts[0]);
+      });
+      void p.request({ method: "eth_chainId" }).then((c) => {
+        setChainId(c ? Number.parseInt(c as string, 16) : null);
+      });
+    }
     return () => {
       p.removeListener?.("accountsChanged", onAccounts);
       p.removeListener?.("chainChanged", onChain);
@@ -90,6 +101,8 @@ export function useEvmWallet(): EvmWallet {
     setConnecting(true);
     setError(null);
     try {
+      disconnected.current = false;
+      try { localStorage.removeItem(DISCONNECTED_KEY); } catch { /* ignore */ }
       const accts = (await p.request({ method: "eth_requestAccounts" })) as string[];
       setAccount(accts?.[0] ?? null);
       const cid = (await p.request({ method: "eth_chainId" })) as string;
@@ -99,6 +112,13 @@ export function useEvmWallet(): EvmWallet {
     } finally {
       setConnecting(false);
     }
+  }, []);
+
+  const disconnect = useCallback(() => {
+    disconnected.current = true;
+    try { localStorage.setItem(DISCONNECTED_KEY, "1"); } catch { /* ignore */ }
+    setAccount(null);
+    setError(null);
   }, []);
 
   const signTypedData = useCallback(async (typedData: object): Promise<string> => {
@@ -135,18 +155,25 @@ export function useEvmWallet(): EvmWallet {
     try {
       await p.request({ method: "wallet_switchEthereumChain", params: [{ chainId: hexId }] });
     } catch (e) {
-      // 4902 = chain not added to the wallet. Add it, then it becomes current.
       const code = (e as { code?: number })?.code;
       if (code === 4902 && params) {
-        await p.request({
-          method: "wallet_addEthereumChain",
-          params: [{ chainId: hexId, ...params }],
-        });
+        await p.request({ method: "wallet_addEthereumChain", params: [{ chainId: hexId, ...params }] });
       } else {
         throw e;
       }
     }
   }, []);
 
-  return { available, account, chainId, connecting, error, connect, signTypedData, sendTransaction, call, switchChain };
+  return { available, account, chainId, connecting, error, connect, signTypedData, sendTransaction, call, switchChain, disconnect };
+}
+
+export function EvmWalletProvider({ children }: { children: ReactNode }) {
+  const value = useEvmWalletState();
+  return <EvmContext.Provider value={value}>{children}</EvmContext.Provider>;
+}
+
+export function useEvmWallet(): EvmWallet {
+  const ctx = useContext(EvmContext);
+  if (!ctx) throw new Error("useEvmWallet must be used within EvmWalletProvider");
+  return ctx;
 }

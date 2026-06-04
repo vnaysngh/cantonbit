@@ -25,6 +25,14 @@ export const ETHEREUM_CHAIN_ID = 1;
 interface SwapChain {
   id: number;
   name: string;
+  /**
+   * The WBTC token contract on this chain. A fixed public constant — used to
+   * read the user's own balance directly via eth_call. NOT sourced from the
+   * solver: reading your on-chain balance only needs the token + wallet address,
+   * so the balance must never depend on the solver being up. A blank string
+   * means "unknown for this chain" (balance just won't show).
+   */
+  wbtc: string;
   /** wallet_addEthereumChain params (for the "switch network" button). */
   rpcUrls: string[];
   blockExplorerUrls: string[];
@@ -32,30 +40,46 @@ interface SwapChain {
 
 const SWAP_CHAINS: Record<string, SwapChain> = {
   "base-sepolia": {
-    id: BASE_SEPOLIA_CHAIN_ID, name: "Base Sepolia",
+    id: BASE_SEPOLIA_CHAIN_ID,
+    name: "Base Sepolia",
+    // testnet mock WBTC — deployed per-environment, so it has no fixed address.
+    // Set NEXT_PUBLIC_WBTC_ADDRESS to show a balance on testnet.
+    wbtc: "",
     rpcUrls: ["https://sepolia.base.org"],
-    blockExplorerUrls: ["https://sepolia.basescan.org"],
+    blockExplorerUrls: ["https://sepolia.basescan.org"]
   },
   arbitrum: {
-    id: ARBITRUM_CHAIN_ID, name: "Arbitrum One",
+    id: ARBITRUM_CHAIN_ID,
+    name: "Arbitrum",
+    wbtc: "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f",
     rpcUrls: ["https://arb1.arbitrum.io/rpc"],
-    blockExplorerUrls: ["https://arbiscan.io"],
+    blockExplorerUrls: ["https://arbiscan.io"]
   },
   base: {
-    id: BASE_MAINNET_CHAIN_ID, name: "Base",
+    id: BASE_MAINNET_CHAIN_ID,
+    name: "Base",
+    wbtc: "0x0555E30da8f98308EdB960aa94C0Db47230d2B9c",
     rpcUrls: ["https://mainnet.base.org"],
-    blockExplorerUrls: ["https://basescan.org"],
+    blockExplorerUrls: ["https://basescan.org"]
   },
   ethereum: {
-    id: ETHEREUM_CHAIN_ID, name: "Ethereum",
+    id: ETHEREUM_CHAIN_ID,
+    name: "Ethereum",
+    wbtc: "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599",
     rpcUrls: ["https://eth.llamarpc.com"],
-    blockExplorerUrls: ["https://etherscan.io"],
-  },
+    blockExplorerUrls: ["https://etherscan.io"]
+  }
 };
 
 /** The configured swap origin chain. */
-export const SWAP_CHAIN: SwapChain =
-  SWAP_CHAINS[process.env.NEXT_PUBLIC_SWAP_CHAIN ?? "base-sepolia"] ?? SWAP_CHAINS["base-sepolia"];
+export const SWAP_CHAIN: SwapChain = (() => {
+  const base =
+    SWAP_CHAINS[process.env.NEXT_PUBLIC_SWAP_CHAIN ?? "base-sepolia"] ??
+    SWAP_CHAINS["base-sepolia"];
+  // Allow an explicit override (e.g. a testnet mock WBTC) without editing code.
+  const override = process.env.NEXT_PUBLIC_WBTC_ADDRESS;
+  return override ? { ...base, wbtc: override } : base;
+})();
 
 const MAX_UINT256 = "0x" + "f".repeat(64);
 
@@ -78,11 +102,14 @@ function encUint(v: bigint): string {
 const SELECTORS = {
   approve: "095ea7b3", // approve(address,uint256)
   allowance: "dd62ed3e", // allowance(address,address)
-  balanceOf: "70a08231", // balanceOf(address)
+  balanceOf: "70a08231" // balanceOf(address)
 } as const;
 
 /** Calldata for approve(spender, amount). */
-export function encodeApprove(spender: string, amount: bigint = BigInt(MAX_UINT256)): string {
+export function encodeApprove(
+  spender: string,
+  amount: bigint = BigInt(MAX_UINT256)
+): string {
   return "0x" + SELECTORS.approve + encAddress(spender) + encUint(amount);
 }
 
@@ -105,7 +132,10 @@ export function decodeUint(hex: string): bigint {
 /** Format WBTC base units (8dp) as a human BTC string. */
 export function formatWbtc(baseUnits: bigint): string {
   const whole = baseUnits / 100_000_000n;
-  const frac = (baseUnits % 100_000_000n).toString().padStart(8, "0").replace(/0+$/, "");
+  const frac = (baseUnits % 100_000_000n)
+    .toString()
+    .padStart(8, "0")
+    .replace(/0+$/, "");
   return frac ? `${whole}.${frac}` : `${whole}`;
 }
 
