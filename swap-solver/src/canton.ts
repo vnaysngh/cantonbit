@@ -303,20 +303,88 @@ export class CantonClient {
     };
     const updateId = submitJson.transactionTree?.updateId ?? "";
 
-    // The offer may already be GONE from the receiver's pending set if their
-    // wallet auto-accepts incoming transfers (one-step). That's not an error —
-    // the transfer completed. Return offerContractId="" + autoAccepted=true so
-    // the caller can treat it as delivered immediately. Otherwise return the
-    // pending offer's contract id for the manual two-step accept flow.
-    const offerContractId = await this.findOfferForInputs(params.receiverParty, inputHoldingCids);
-    return { updateId, offerContractId: offerContractId ?? "", autoAccepted: offerContractId === null };
+    // Decide whether the offer is PENDING (awaiting accept) or was AUTO-ACCEPTED
+    // (consumed instantly by the receiver's wallet).
+    //
+    // We CANNOT infer this from the receiver's offer set alone: our m2m token
+    // often cannot read the receiver's party (it lives on another participant →
+    // 403). "Can't read the offer" must NOT be confused with "offer was
+    // auto-accepted" — that's a correctness bug that releases the WBTC before the
+    // cBTC is really accepted.
+    //
+    // Decide PENDING vs AUTO-ACCEPTED. We CANNOT infer this from the receiver's
+    // offer set — our m2m token usually can't read the receiver's party (403),
+    // and "can't read" must never be confused with "auto-accepted" (that bug
+    // releases WBTC before the cBTC is accepted).
+    //
+    // The authoritative, solver-readable signal is the TransferInstruction
+    // contract: in the Canton token standard the SENDER (our float) is a
+    // stakeholder, so a pending instruction appears in OUR OWN active contracts
+    // and disappears once the receiver accepts/rejects. (Confirmed against the
+    // Loop SDK server docs + the live mainnet ledger.) A locked cBTC holding is
+    // a corroborating secondary signal.
+    const found = await this.findOfferForInputs(params.receiverParty, inputHoldingCids);
+    if (found.kind === "found") {
+      // We can see the pending offer directly → definitely pending.
+      return { updateId, offerContractId: found.contractId, autoAccepted: false };
+    }
+    const pending = await this.floatHasPendingTransfer(inputHoldingCids);
+    return { updateId, offerContractId: pending.cid ?? "", autoAccepted: !pending.pending };
   }
 
-  /** Find the offer just created for `receiver` that uses one of our inputs. */
+  /**
+   * Is a transfer the float just created still PENDING? Readable with our own
+   * token (the sender is a stakeholder), so this never hits the receiver-party
+   * 403. Pending ⇔ a TransferInstruction is active on our float, OR a cBTC
+   * holding we own is still locked (the in-flight transfer's lock).
+   *
+   * Returns the TransferInstruction contract id when found, so the caller can
+   * track it for the accept/expiry watch.
+   */
+  private async floatHasPendingTransfer(
+    inputHoldingCids: string[],
+  ): Promise<{ pending: boolean; cid?: string }> {
+    const jwt = await this.getJwt();
+    const offset = await this.getLedgerEnd(jwt);
+    const res = await fetch(`${this.cfg.ledgerHost}/v2/state/active-contracts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
+      body: JSON.stringify({
+        filter: { filtersByParty: { [this.cfg.solverParty]: { cumulative: [{ identifierFilter: { WildcardFilter: { value: { includeCreatedEventBlob: false } } } }] } } },
+        verbose: false,
+        activeAtOffset: offset,
+      }),
+    });
+    // Can't read our own float (shouldn't happen) → conservatively "pending" so
+    // we never wrongly auto-finalise.
+    if (!res.ok) return { pending: true };
+
+    const items = (await res.json()) as ActiveContractEntry[];
+    const wantInputs = new Set(inputHoldingCids);
+    let instructionCid: string | undefined;
+    let locked = false;
+    for (const item of items) {
+      const ev = item.contractEntry?.JsActiveContract?.createdEvent;
+      if (!ev) continue;
+      const tid = ev.templateId ?? "";
+      if (tid.includes("TransferInstruction")) {
+        instructionCid = ev.contractId; // a pending transfer the float is party to
+      } else if (tid.includes("Holding")) {
+        const arg = ev.createArgument as { lock?: unknown } | undefined;
+        // a locked holding, or one of our original inputs still active → in-flight
+        if (arg?.lock != null || wantInputs.has(ev.contractId)) locked = true;
+      }
+    }
+    return { pending: !!instructionCid || locked, cid: instructionCid };
+  }
+
+  /** Find the offer just created for `receiver` that uses one of our inputs.
+   *  Returns kind "found" with the cid, "absent" (not in the readable set), or
+   *  "unreadable" (the receiver's party isn't readable by our token — 403). */
   private async findOfferForInputs(
     receiverParty: string,
     sourceHoldingCids: string[],
-  ): Promise<string | null> {
+  ): Promise<{ kind: "found"; contractId: string } | { kind: "absent" } | { kind: "unreadable" }> {
     const jwt = await this.getJwt();
     const offset = await this.getLedgerEnd(jwt);
     const res = await fetch(`${this.cfg.ledgerHost}/v2/state/active-contracts`, {
@@ -336,7 +404,7 @@ export class CantonClient {
         activeAtOffset: offset,
       }),
     });
-    if (!res.ok) return null;
+    if (!res.ok) return { kind: "unreadable" }; // typically 403 on another participant's party
     const items = (await res.json()) as ActiveContractEntry[];
     const sourceSet = new Set(sourceHoldingCids);
     for (const item of items) {
@@ -347,9 +415,9 @@ export class CantonClient {
       }
       const cids = (ev.createArgument as { transfer?: { inputHoldingCids?: string[] } } | undefined)
         ?.transfer?.inputHoldingCids ?? [];
-      if (cids.some((c) => sourceSet.has(c))) return ev.contractId;
+      if (cids.some((c) => sourceSet.has(c))) return { kind: "found", contractId: ev.contractId };
     }
-    return null;
+    return { kind: "absent" };
   }
 
   // --- Task 7b: offer resolution (accepted / expired) ---

@@ -1,10 +1,37 @@
-# Mainnet Pre-Requisites Checklist — WBTC(Base) → cBTC(Canton) Swap
+# Mainnet Pre-Requisites Checklist — WBTC(Arbitrum) → cBTC(Canton) Swap
 
 > Before any mainnet test, EVERY item here must be ✅. Mainnet means **real WBTC
 > and real cBTC** — this is custodial, two-legged (NOT atomic) settlement, so a
 > bug or a missing guard means real lost funds. Do not shortcut this list.
 
 Status legend: ✅ done · ⚠️ partial · ❌ not done / blocked
+
+## ✅ FIRST MAINNET SWAP COMPLETED (real funds)
+
+`0.00001 WBTC (Arbitrum) → 0.00001 cBTC (Canton mainnet)`, both legs settled:
+- openFor (lock WBTC, Arbitrum): `0x873511703ebd47e898d8b57ade6879ba197298cfdca391b9ff477504beaded37`
+- attest: `0x70a727e4f749d51637527f7bf2c227db132fdeed7cc944ae0ac2387bb8be358a`
+- finalise (WBTC → treasury 0xF340…): `0x5176100f3b6552ea12216a39be3f2d5f6eb5e50fb41889cfa0b1588e4990fa7f`
+- cBTC delivered + accepted in the recipient's Loop wallet (float 0.00032 → 0.00031).
+
+**Verified on-chain:** treasury received WBTC, escrow drained, finalise success,
+float decremented 0.00001.
+
+### Bug found + fixed on this run (mainnet-only)
+`createOffer` inferred `autoAccepted=true` whenever it couldn't read the
+receiver's offer — but the m2m token CAN'T read a recipient on another
+participant (403). So it wrongly finalised the WBTC before the cBTC was accepted.
+**Fixed:** auto-accept is now decided from the SENDER-side signal (the float's own
+`TransferInstruction` / locked-holding state), never from "can't read the
+receiver." (Loop SDK server docs confirm no transfer-status API; the
+TransferInstruction template on getActiveContracts is the path.)
+
+### Known limitation (task A1, parked)
+Accept *detection* (accept-watch) still reads the receiver, so a swap to an
+UNREADABLE recipient sits in `delivering` (SAFE — never wrongly finalises — but
+doesn't auto-complete). Works for readable / auto-accepting recipients. The
+production fix is sender-side accept detection via the float's TransferInstruction
+lifecycle.
 
 ---
 

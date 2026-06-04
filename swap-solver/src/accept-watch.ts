@@ -68,7 +68,14 @@ export async function resolveDelivery(
     return { kind: "failed", reason: "no canton party" };
   }
 
-  // Resolve the offer's outcome from the ledger.
+  // KNOWN LIMITATION (task A1): resolveOffer/isOfferActive query the RECEIVER's
+  // party. When the recipient is on another participant (the common mainnet
+  // case) our m2m token can't read it → 403, so the accept can't be observed
+  // here and the order stays 'delivering' (SAFE — no premature finalise; the
+  // dangerous auto-accept-misdetection bug is fixed in canton.createOffer — but
+  // INCOMPLETE: it never finalises). The production fix is sender-side accept
+  // detection via the float's own TransferInstruction lifecycle. Until then this
+  // path only completes for readable / auto-accepting recipients.
   const resolution = await canton.resolveOffer({
     receiverParty: receiver,
     offerContractId: offerId,
