@@ -135,6 +135,16 @@ export function getOrder(orderId: string): Promise<OrderView> {
   return req<OrderView>(`/orders/${orderId}`);
 }
 
+/** Refund an expired, unfinalised order — returns the locked WBTC to the user. */
+export function refundOrder(orderId: string): Promise<{
+  orderId: string;
+  status: SwapStatus;
+  refundTx?: string;
+  alreadyRefunded?: boolean;
+}> {
+  return req(`/orders/${orderId}/refund`, { method: "POST" });
+}
+
 /** Terminal statuses where polling should stop. */
 export function isTerminal(status: SwapStatus): boolean {
   return status === "finalised" || status === "refunded" || status === "failed";

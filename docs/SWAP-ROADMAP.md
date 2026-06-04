@@ -38,9 +38,12 @@ Not blockers; do when convenient.
 1. **Validate the manual two-step accept path live.** Disable the wallet's
    admin-wide auto-accept toggle, re-run `e2e-full.ts`. The code/tests exist;
    only the live manual-accept branch is unverified (auto-accept was on during
-   testing).
-2. **Live refund/expiry E2E.** Proven in Foundry; run it once on testnet (lock,
-   don't finalise, let it expire, user refunds).
+   testing). NOTE: with Loop, the user accepts in their own Loop wallet — the
+   swap UI prompts "Accept the incoming cBTC in your Loop wallet".
+2. ✅ **Live refund/expiry E2E.** DONE — proven on-chain (`e2e-refund.ts`) AND
+   through the API endpoint (`api-refund.smoke.ts`): lock → expire → POST
+   `/orders/:id/refund` → WBTC returned. The swap UI exposes a "Refund my WBTC"
+   button when an order is past expiry and unfinalised (X1).
 3. **Backport the `getHoldings` fix to the Oranj app.** The solver's
    `getHoldings` falls back to `createArgument` when the interface view fails to
    render (DevNet's `NOT_CONNECTED_TO_ANY_SYNCHRONIZER` state). The app's

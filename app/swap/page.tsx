@@ -10,7 +10,7 @@ import { useEvmWallet } from "@/hooks/useEvmWallet";
 import { useWallet } from "@/hooks/useWallet";
 import { truncatePartyId } from "@/lib/format";
 import {
-  getQuote, submitOrder, getOrder, isTerminal, STATUS_LABEL,
+  getQuote, submitOrder, getOrder, refundOrder, isTerminal, STATUS_LABEL,
   type QuoteResponse, type OrderView, type SwapStatus,
 } from "@/lib/swap-api";
 import {
@@ -22,7 +22,8 @@ import {
 type Stage =
   | { kind: "idle" }
   | { kind: "quoting" }
-  | { kind: "quoted"; quote: QuoteResponse }
+  // `retryError` lets a rejected approve/sign return to the quote (don't lose it).
+  | { kind: "quoted"; quote: QuoteResponse; retryError?: string }
   | { kind: "approving"; quote: QuoteResponse }
   | { kind: "signing"; quote: QuoteResponse }
   | { kind: "submitting"; quote: QuoteResponse }
@@ -31,6 +32,9 @@ type Stage =
 
 /** The ordered set of statuses for the progress display. */
 const FLOW: SwapStatus[] = ["seen", "delivering", "delivered", "attested", "finalised"];
+
+/** localStorage key for resuming an in-flight order across a page refresh. */
+const ACTIVE_ORDER_KEY = "oranj.swap.activeOrder";
 
 export default function SwapPage() {
   const evm = useEvmWallet();
@@ -97,9 +101,32 @@ export default function SwapPage() {
     }
   }, [evm.account, destinationParty, amount, refreshBalance]);
 
+  // --- 5. poll status until terminal (defined before handleConfirm, which calls it) ---
+  const startTracking = useCallback((orderId: string) => {
+    // Persist so a page refresh resumes tracking instead of losing the order.
+    try { localStorage.setItem(ACTIVE_ORDER_KEY, orderId); } catch { /* ignore */ }
+    setStage({ kind: "tracking", orderId, order: null });
+    if (pollRef.current) clearInterval(pollRef.current);
+    const tick = async () => {
+      try {
+        const order = await getOrder(orderId);
+        setStage({ kind: "tracking", orderId, order });
+        if (isTerminal(order.status) && pollRef.current) {
+          clearInterval(pollRef.current);
+          pollRef.current = null;
+        }
+      } catch { /* keep polling */ }
+    };
+    void tick();
+    pollRef.current = setInterval(tick, 4000);
+  }, []);
+
   // --- 2. approve (if needed) + 3. sign + 4. submit ---
+  // Recoverable failures (rejected approve/sign, transient submit) return to the
+  // `quoted` stage with a retryError so the user can retry WITHOUT re-quoting.
   const handleConfirm = useCallback(async (quote: QuoteResponse) => {
-    if (!evm.account) { fail("Wallet disconnected."); return; }
+    const retry = (msg: string) => setStage({ kind: "quoted", quote, retryError: msg });
+    if (!evm.account) { retry("Wallet disconnected — reconnect and try again."); return; }
     const needed = BigInt(quote.order.inputs[0][1]);
 
     // 2. ensure Permit2 allowance
@@ -117,7 +144,8 @@ export default function SwapPage() {
         }
       }
     } catch (e) {
-      fail(e instanceof Error ? e.message : "Approve failed."); return;
+      retry(isUserReject(e) ? "Approval cancelled. Approve WBTC to continue." : `Approve failed: ${errMsg(e)}`);
+      return;
     }
 
     // 3. sign the Permit2 witness.
@@ -143,7 +171,8 @@ export default function SwapPage() {
         message: quote.permit2.message,
       });
     } catch (e) {
-      fail(e instanceof Error ? e.message : "Signature rejected."); return;
+      retry(isUserReject(e) ? "Signature cancelled. Sign to lock your WBTC and start the swap." : `Signature failed: ${errMsg(e)}`);
+      return;
     }
 
     // 4. submit to the solver (it submits openFor on Base)
@@ -152,31 +181,41 @@ export default function SwapPage() {
       const { orderId } = await submitOrder({ order: quote.order, signature, cantonParty: quote.cantonParty });
       startTracking(orderId);
     } catch (e) {
-      fail(e instanceof Error ? e.message : "Submit failed.");
+      // Submit failure is rarely user-recoverable (already-signed), so surface it
+      // but keep the quote so they can retry the submit.
+      retry(`Couldn't submit the swap: ${errMsg(e)}. Try again.`);
     }
-  }, [evm]);
+  }, [evm, startTracking]);
 
-  // --- 5. poll status until terminal ---
-  const startTracking = useCallback((orderId: string) => {
-    setStage({ kind: "tracking", orderId, order: null });
-    if (pollRef.current) clearInterval(pollRef.current);
-    const tick = async () => {
-      try {
-        const order = await getOrder(orderId);
-        setStage({ kind: "tracking", orderId, order });
-        if (isTerminal(order.status) && pollRef.current) {
-          clearInterval(pollRef.current);
-          pollRef.current = null;
-        }
-      } catch { /* keep polling */ }
-    };
-    void tick();
-    pollRef.current = setInterval(tick, 4000);
+  // Resume tracking an in-flight order across a page refresh. Deferred to a
+  // microtask so startTracking's setState doesn't run synchronously in the effect.
+  useEffect(() => {
+    let saved: string | null = null;
+    try { saved = localStorage.getItem(ACTIVE_ORDER_KEY); } catch { /* ignore */ }
+    if (saved && /^0x[0-9a-fA-F]{64}$/.test(saved)) {
+      const id = setTimeout(() => startTracking(saved!), 0);
+      return () => clearTimeout(id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // --- refund an expired, stuck order (solver submits it; funds → user) ---
+  const handleRefundOrder = useCallback(async (orderId: string): Promise<string | null> => {
+    try {
+      const res = await refundOrder(orderId);
+      // Re-poll once to reflect the refunded status.
+      const order = await getOrder(orderId).catch(() => null);
+      if (order) setStage({ kind: "tracking", orderId, order });
+      return res.refundTx ?? null;
+    } catch (e) {
+      return `__error__:${errMsg(e)}`;
+    }
   }, []);
 
   const reset = () => {
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = null;
+    try { localStorage.removeItem(ACTIVE_ORDER_KEY); } catch { /* ignore */ }
     setStage({ kind: "idle" });
   };
 
@@ -280,6 +319,7 @@ export default function SwapPage() {
           {stage.kind === "quoted" && (
             <QuoteSummary
               quote={stage.quote}
+              retryError={stage.retryError}
               onConfirm={() => handleConfirm(stage.quote)}
               onCancel={reset}
             />
@@ -296,7 +336,12 @@ export default function SwapPage() {
           )}
 
           {stage.kind === "tracking" && (
-            <TrackingView orderId={stage.orderId} order={stage.order} onReset={reset} />
+            <TrackingView
+              orderId={stage.orderId}
+              order={stage.order}
+              onReset={reset}
+              onRefund={handleRefundOrder}
+            />
           )}
         </CardContent>
       </Card>
@@ -322,7 +367,7 @@ function ConnectionRow({ label, value, ok, action }: { label: string; value: str
   );
 }
 
-function QuoteSummary({ quote, onConfirm, onCancel }: { quote: QuoteResponse; onConfirm: () => void; onCancel: () => void }) {
+function QuoteSummary({ quote, retryError, onConfirm, onCancel }: { quote: QuoteResponse; retryError?: string; onConfirm: () => void; onCancel: () => void }) {
   const wbtc = formatWbtc(BigInt(quote.order.inputs[0][1]));
   const cbtc = formatWbtc(BigInt(quote.cbtcAmount));
   return (
@@ -337,9 +382,16 @@ function QuoteSummary({ quote, onConfirm, onCancel }: { quote: QuoteResponse; on
         <Row label="To party" value={truncatePartyId(quote.cantonParty)} />
         <Row label="Refund after" value={new Date(quote.expires * 1000).toLocaleString()} />
       </div>
+      {retryError && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-foreground">
+          {retryError}
+        </div>
+      )}
       <div className="flex gap-2">
         <Button variant="outline" className="flex-1" onClick={onCancel}>Back</Button>
-        <Button className="flex-1" onClick={onConfirm}>Confirm swap</Button>
+        <Button className="flex-1" onClick={onConfirm}>
+          {retryError ? "Try again" : "Confirm swap"}
+        </Button>
       </div>
     </div>
   );
@@ -354,11 +406,41 @@ function BusyStep({ label }: { label: string }) {
   );
 }
 
-function TrackingView({ orderId, order, onReset }: { orderId: string; order: OrderView | null; onReset: () => void }) {
+function TrackingView({ orderId, order, onReset, onRefund }: {
+  orderId: string;
+  order: OrderView | null;
+  onReset: () => void;
+  onRefund: (orderId: string) => Promise<string | null>;
+}) {
+  const [refunding, setRefunding] = useState(false);
+  const [refundMsg, setRefundMsg] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
+
+  // Tick a clock so "expires in …" and the refund eligibility update live.
+  useEffect(() => {
+    const t = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
+    return () => clearInterval(t);
+  }, []);
+
   const status = order?.status;
   const done = status === "finalised";
-  const failedOrRefunded = status === "failed" || status === "refunded";
+  const refunded = status === "refunded";
+  const failed = status === "failed";
+  const failedOrRefunded = failed || refunded;
   const currentIdx = status ? FLOW.indexOf(status) : 0;
+
+  // The order is past its refund window and the WBTC hasn't been released.
+  const expired = !!order && now > order.expires && !done && !refunded;
+  // The user must accept the incoming cBTC in their Loop wallet while delivering.
+  const awaitingAccept = status === "delivering";
+
+  const doRefund = async () => {
+    setRefunding(true);
+    setRefundMsg(null);
+    const r = await onRefund(orderId);
+    setRefunding(false);
+    if (r?.startsWith("__error__:")) setRefundMsg(r.slice("__error__:".length));
+  };
 
   return (
     <div className="flex flex-col gap-4">
@@ -380,24 +462,64 @@ function TrackingView({ orderId, order, onReset }: { orderId: string; order: Ord
         })}
       </div>
 
-      {failedOrRefunded && (
-        <div className={`rounded-lg p-3 text-sm ${status === "refunded" ? "bg-muted/50 text-foreground" : "border border-destructive/30 bg-destructive/10 text-destructive"}`}>
-          {status === "refunded" ? "Your WBTC was refunded." : `Swap failed${order?.note ? `: ${order.note}` : "."}`}
+      {/* Action prompt: the user must accept the cBTC in their Loop wallet. */}
+      {awaitingAccept && (
+        <div className="rounded-lg border border-primary/30 bg-primary/10 p-3 text-sm text-foreground">
+          <span className="font-medium">Accept the incoming cBTC in your Loop wallet</span>
+          {" — "}the swap completes once you do. Open your Loop wallet to confirm the transfer.
         </div>
       )}
 
+      {/* Success. */}
       {done && (
         <div className="rounded-lg border border-green-500/30 bg-green-500/10 p-3 text-sm text-foreground">
-          ✓ Swap complete — cBTC delivered to your Canton party.
+          ✓ Swap complete — cBTC delivered to your Loop wallet.
           {order?.finaliseTxHash && (
             <div className="mt-1 break-all text-xs text-muted-foreground">finalise: {order.finaliseTxHash}</div>
           )}
         </div>
       )}
 
+      {/* Refunded. */}
+      {refunded && (
+        <div className="rounded-lg bg-muted/50 p-3 text-sm text-foreground">
+          Your WBTC was refunded to your wallet.
+        </div>
+      )}
+
+      {/* Failed — reassure the WBTC is safe and offer refund if eligible. */}
+      {failed && (
+        <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-foreground">
+          <span className="font-medium text-destructive">This swap didn’t complete.</span>
+          {order?.note ? <div className="mt-1 text-xs text-muted-foreground">Reason: {order.note}</div> : null}
+          <div className="mt-2">
+            Your WBTC is still locked in the escrow and is <span className="font-medium">safe</span>.
+            {expired
+              ? " You can refund it now."
+              : order ? ` It becomes refundable at ${new Date(order.expires * 1000).toLocaleTimeString()}.` : ""}
+          </div>
+        </div>
+      )}
+
+      {/* Stuck-but-not-failed past expiry (e.g. delivered, never finalised). */}
+      {!failed && !done && !refunded && expired && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-foreground">
+          This order has passed its deadline without releasing your WBTC. Your funds
+          are safe — you can refund them now.
+        </div>
+      )}
+
+      {/* Refund button when eligible. */}
+      {expired && (
+        <Button onClick={doRefund} disabled={refunding}>
+          {refunding ? "Refunding…" : "Refund my WBTC"}
+        </Button>
+      )}
+      {refundMsg && <div className="text-xs text-destructive">Refund failed: {refundMsg}</div>}
+
       <div className="break-all text-xs text-muted-foreground">order: {orderId}</div>
 
-      {(done || failedOrRefunded) && (
+      {(done || refunded || failed) && (
         <Button variant="outline" onClick={onReset}>New swap</Button>
       )}
     </div>
@@ -414,3 +536,15 @@ function Row({ label, value }: { label: string; value: string }) {
 }
 
 function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
+
+function errMsg(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+/** EIP-1193 user-rejection (code 4001) or common reject phrasings. */
+function isUserReject(e: unknown): boolean {
+  const code = (e as { code?: number })?.code;
+  if (code === 4001) return true;
+  const m = errMsg(e).toLowerCase();
+  return m.includes("user rejected") || m.includes("user denied") || m.includes("rejected the request");
+}

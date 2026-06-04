@@ -221,6 +221,50 @@ export function createApi(deps: ApiDeps) {
     return { orderId, status: "seen", openTx };
   }
 
+  /**
+   * POST /orders/:orderId/refund — return the locked WBTC to the user after the
+   * order has expired without finalising. refund() is PERMISSIONLESS (the escrow
+   * always sends inputs to order.user), so the solver can submit it on the user's
+   * behalf — the funds go to the user regardless of who pays gas. Safe by design.
+   */
+  async function handleRefund(orderId: Hex) {
+    store.reload();
+    const rec = store.get(orderId);
+    if (!rec) throw new ApiError(404, "order not found");
+    if (rec.status === "finalised") throw new ApiError(409, "order already finalised — nothing to refund");
+    if (rec.status === "refunded") return { orderId, status: "refunded", alreadyRefunded: true };
+
+    const now = nowSeconds();
+    if (now <= rec.order.expires) {
+      throw new ApiError(425, `not yet refundable — expires in ${rec.order.expires - now}s`);
+    }
+
+    const order = deserializeOrder(rec.order);
+    const escrowC = getContract({ address: cfg.escrow, abi: ESCROW_ABI, client: wallet });
+
+    // If it was already claimed on-chain by a late finalise, don't try to refund.
+    const onchain = Number(await escrowC.read.orderStatus([orderId]));
+    if (onchain === 2 /* Claimed */) {
+      store.update(orderId, { status: "finalised", note: "claimed on-chain (late finalise)" });
+      throw new ApiError(409, "order was finalised on-chain — not refundable");
+    }
+    if (onchain === 3 /* Refunded */) {
+      store.update(orderId, { status: "refunded", note: "already refunded on-chain" });
+      return { orderId, status: "refunded", alreadyRefunded: true };
+    }
+
+    let refundTx: Hex;
+    try {
+      refundTx = await escrowC.write.refund([order], { account, chain: null });
+      await pub.waitForTransactionReceipt({ hash: refundTx });
+    } catch (e) {
+      throw new ApiError(502, `refund submission failed: ${e instanceof Error ? e.message : e}`);
+    }
+
+    store.update(orderId, { status: "refunded", note: `refund ${refundTx}` });
+    return { orderId, status: "refunded", refundTx };
+  }
+
   async function handleHealth() {
     let floatSats: string | null = null;
     let floatError: string | null = null;
@@ -287,6 +331,11 @@ export function createApi(deps: ApiDeps) {
       const rec = store.get(m[1] as Hex);
       if (!rec) return send(res, 404, { error: "order not found" });
       return send(res, 200, publicOrder(rec));
+    }
+
+    const r = path.match(/^\/orders\/(0x[0-9a-fA-F]{64})\/refund$/);
+    if (method === "POST" && r) {
+      return send(res, 200, await handleRefund(r[1] as Hex));
     }
 
     return send(res, 404, { error: `no route for ${method} ${path}` });
