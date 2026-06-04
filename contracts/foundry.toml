@@ -1,0 +1,20 @@
+[profile.default]
+src = "src"
+out = "out"
+test = "test"
+script = "script"
+libs = ["lib"]
+# oif-contracts targets ^0.8.26; match it so InputSettlerEscrow/BaseInputOracle compile.
+solc = "0.8.28"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+# FFI is enabled so the differential encoding test can shell out to the TS
+# encoder and assert byte-equality against the on-chain lib. Scoped: only used
+# by EncodingParity.t.sol.
+ffi = true
+fs_permissions = [{ access = "read", path = "./" }]
+# Remappings are kept in remappings.txt so both our code and oif-contracts'
+# transitive imports (openzeppelin/, permit2/, the-compact/) resolve.
+
+# See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

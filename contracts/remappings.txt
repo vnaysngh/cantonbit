@@ -1,0 +1,9 @@
+forge-std/=lib/forge-std/src/
+ds-test/=lib/oif-contracts/lib/forge-std/lib/ds-test/src/
+oif-contracts/=lib/oif-contracts/
+openzeppelin/=lib/oif-contracts/lib/openzeppelin-contracts/contracts/
+@openzeppelin/=lib/oif-contracts/lib/openzeppelin-contracts/
+permit2/=lib/oif-contracts/lib/permit2/
+the-compact/=lib/oif-contracts/lib/the-compact/
+@eth-optimism/=lib/oif-contracts/lib/@eth-optimism/
+broadcaster/=lib/oif-contracts/lib/broadcaster/src/contracts/

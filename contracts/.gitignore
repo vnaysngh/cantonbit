@@ -1,0 +1,15 @@
+# Foundry build artifacts
+out/
+cache/
+broadcast/
+
+# Dependencies — vendored locally, NOT committed (kept on disk only, like .env).
+# Restore with: forge install foundry-rs/forge-std openintentsframework/oif-contracts
+lib/
+
+# Secrets + local
+.env
+.env.local
+
+# Upstream dep docs/audits (only present inside lib/, but belt-and-suspenders)
+docs/
