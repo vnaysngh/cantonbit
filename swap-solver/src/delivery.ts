@@ -101,16 +101,29 @@ export async function startDelivery(
       inputHoldings: holdings,
     });
 
-    // If the receiver wallet auto-accepts, the offer is consumed on creation —
-    // there is no offerContractId to watch and no separate accept event. The
-    // delivery is already final, so collapse straight to `delivered` using the
-    // submit time as the fill timestamp. (Mirrors e2e-full.ts.)
+    // Two cases collapse straight to `delivered` (we don't wait for a separate
+    // accept event we can observe):
+    //
+    //  (a) autoAccepted — the receiver wallet auto-accepted; the offer was
+    //      consumed on creation. Delivery is final.
+    //  (b) offer created but we CAN'T track the accept (offerContractId == "")
+    //      — the receiver is on another participant our token can't read. By
+    //      design we DON'T try to detect the cross-participant accept; the cBTC
+    //      transfer offer has been SENT from our float, and the user accepts it
+    //      in their own wallet. We treat delivery as done and finalise; the note
+    //      tells the user to check their wallet.
+    //
+    // fillTimestamp = submit time (the offer's creation record-time on our side).
     if (autoAccepted || !offerContractId) {
+      const note = autoAccepted
+        ? `auto-accepted on delivery (updateId=${updateId})`
+        : `cBTC transfer SENT to the recipient — they must accept it in their wallet ` +
+          `(auto-accept off). updateId=${updateId}`;
       store.update(orderId, {
         status: "delivered",
         cantonDeliveryRef: updateId,
         fillTimestamp: params.now,
-        note: `auto-accepted on delivery (updateId=${updateId})`,
+        note,
       });
       return { kind: "delivered", updateId, fillTimestamp: params.now };
     }

@@ -54,11 +54,11 @@ lifecycle.
 |---|---|---|---|
 | B1 | **Deploy script: real-WBTC mainnet mode** | ✅ DONE | `deploy.ts` is now SWAP_NETWORK-aware: mainnet uses the real Base WBTC (default `0x0555…`, asserts decimals==8), no MockWBTC, no mint, gated behind ALLOW_MAINNET=true. Also splits oracle owner (cold) / attestor (hot) via ORACLE_OWNER / ORACLE_ATTESTOR. |
 | B1b | **WBTC/Permit2 compatibility check** | ✅ DONE (static) | `check-wbtc-permit2.ts` confirms (read-only, no spend) decimals==8, ERC-20 surface, and Permit2 deployed on Base. Ran green against Base mainnet. The OFT-pull-via-Permit2 path still needs ONE live dust approve→openFor→refund before a real swap (flagged). |
-| B2 | **De-hardcode the E2E/diagnostic scripts** | ❌ | `e2e-full.ts`, `live-canton.ts`, `check-float.ts` have DevNet registry URL + `cbtc-network::12202a83…` admin party as string literals. They'd silently test DevNet even under mainnet env. Make them read from env (same source as `index.ts`). |
-| B3 | **Confirm `index.ts`/`env.ts` are fully env-driven** | ✅ | Already verified: the main loop reads network, RPC, escrow/oracle/wbtc, all Canton config + creds from env. No mainnet code change needed in the core runtime. |
-| B4 | **`ALLOW_MAINNET=true` gate** | ✅ | Already enforced in `env.ts` — refuses mainnet unless explicitly set. Keep it. |
-| B5 | **Amount-cap / max-order guard** | ❌ | Add a hard ceiling on per-order WBTC (e.g. start at 0.001 WBTC) so a bug or a malformed order can't move large sums during early mainnet runs. Not currently enforced. |
-| B6 | **Float pre-flight on startup** | ⚠️ | `delivery.ts` checks float per-order, but add a startup assertion that the mainnet float is non-zero and ≥ the amount cap, so we fail loudly before accepting orders. |
+| B2 | **De-hardcode the diagnostic scripts** | ✅ DONE (check-float) | `check-float.ts` is now network-aware (reads CANTON_*/SOLVER_CANTON_PARTY from env; prints the network/ledger host so it can't silently check the wrong net). The remaining hardcoded scripts (`e2e-full.ts`, `live-canton.ts`, `debug-*`) are dev-only diagnostics — left as-is; the mainnet e2e is `e2e-mainnet.ts` (fully env-driven). |
+| B3 | **Confirm `index.ts`/`env.ts` are fully env-driven** | ✅ | Verified live: the mainnet API + loop boot purely from env (Arbitrum + mainnet Canton). |
+| B4 | **`ALLOW_MAINNET=true` gate** | ✅ | Enforced in `env.ts` + `deploy.ts`. |
+| B5 | **Amount-cap / max-order guard** | ✅ DONE | `MAX_WBTC_PER_ORDER` enforced in the API `/quote` (rejects over-cap). Set to 10000 (0.0001 WBTC) in `.env.mainnet` for early runs. |
+| B6 | **Float pre-flight on startup** | ✅ DONE | `index.ts` reads the float before the watch loop: on **mainnet** it `exit(1)`s if the float is empty or unreadable (refuses to lock WBTC it can't fill); warns if below the per-order cap. Verified live (0.00031 cBTC). |
 
 ---
 

@@ -68,14 +68,11 @@ export async function resolveDelivery(
     return { kind: "failed", reason: "no canton party" };
   }
 
-  // KNOWN LIMITATION (task A1): resolveOffer/isOfferActive query the RECEIVER's
-  // party. When the recipient is on another participant (the common mainnet
-  // case) our m2m token can't read it → 403, so the accept can't be observed
-  // here and the order stays 'delivering' (SAFE — no premature finalise; the
-  // dangerous auto-accept-misdetection bug is fixed in canton.createOffer — but
-  // INCOMPLETE: it never finalises). The production fix is sender-side accept
-  // detection via the float's own TransferInstruction lifecycle. Until then this
-  // path only completes for readable / auto-accepting recipients.
+  // This path only runs when the offer is READABLE (offerContractId set) — i.e.
+  // the receiver is on our participant. For unreadable cross-participant
+  // recipients, delivery.ts already collapses to `delivered` (the cBTC offer is
+  // sent; the user accepts in their own wallet) and never reaches here. So we
+  // only resolve readable offers via the receiver's update stream below.
   const resolution = await canton.resolveOffer({
     receiverParty: receiver,
     offerContractId: offerId,

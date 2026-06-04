@@ -474,7 +474,12 @@ function TrackingView({ orderId, order, onReset, onRefund }: {
       {/* Success. */}
       {done && (
         <div className="rounded-lg border border-green-500/30 bg-green-500/10 p-3 text-sm text-foreground">
-          ✓ Swap complete — cBTC delivered to your Loop wallet.
+          <span className="font-medium">✓ Swap complete</span> — your WBTC is settled and the
+          cBTC has been sent to your Loop wallet.
+          <div className="mt-1 text-xs text-muted-foreground">
+            Open your Loop wallet and <span className="font-medium">accept the incoming cBTC</span> if
+            it isn’t auto-accepted.
+          </div>
           {order?.finaliseTxHash && (
             <div className="mt-1 break-all text-xs text-muted-foreground">finalise: {order.finaliseTxHash}</div>
           )}

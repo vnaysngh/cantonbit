@@ -58,6 +58,27 @@ async function main(): Promise<void> {
     env.canton.auth,
   );
 
+  // --- Float pre-flight (B6): fail/warn loudly before accepting any orders if
+  // the cBTC float can't be read or is below the per-order cap. On mainnet an
+  // empty/low float means we'd lock users' WBTC we can't fill — refuse to start.
+  const maxWbtcPerOrder = BigInt(process.env.MAX_WBTC_PER_ORDER ?? "0");
+  try {
+    const floatSats = await canton.getFloatSats();
+    const floatBtc = Number(floatSats) / 1e8;
+    console.log(`[preflight] cBTC float: ${floatBtc} cBTC (${floatSats} sats)`);
+    if (floatSats === 0n) {
+      const msg = "[preflight] FLOAT IS EMPTY — the solver cannot deliver cBTC. Refusing to start.";
+      if (env.network === "mainnet") { console.error(msg); process.exit(1); }
+      console.warn(msg + " (continuing on non-mainnet)");
+    } else if (maxWbtcPerOrder > 0n && floatSats < maxWbtcPerOrder) {
+      console.warn(`[preflight] WARNING: float ${floatSats} sats < per-order cap ${maxWbtcPerOrder} sats — some orders may fail the float check.`);
+    }
+  } catch (e) {
+    const msg = `[preflight] could not read the cBTC float: ${e instanceof Error ? e.message : e}`;
+    if (env.network === "mainnet") { console.error(msg + " — refusing to start on mainnet."); process.exit(1); }
+    console.warn(msg + " (continuing on non-mainnet)");
+  }
+
   const watcher = new OpenWatcher(
     { rpcUrl: env.originRpcUrl, escrow: env.escrow, startBlock: env.startBlock },
     store,
