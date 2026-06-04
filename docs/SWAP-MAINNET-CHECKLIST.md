@@ -92,12 +92,13 @@ Addresses live in **`swap-solver/.env.mainnet`** (separate from devnet `.env`).
 
 | # | Item | Status | Notes |
 |---|---|---|---|
-| D1 | **Separate hot (attestor) and cold (owner) keys** | ❌ | Today owner == attestor == one key (`0x0B95ec…`, a MetaMask test key). For mainnet, owner should be a cold/multisig that can rotate a dedicated hot attestor key. |
-| D2 | **Fresh mainnet agent key** (not the test MetaMask key) | ❌ | The current key was used all over testnet. Mainnet should use a clean, treasury-grade key. |
-| D3 | **Token-split for the Canton credential** | ❌ | The m2m token is ParticipantAdmin-grade (can act as warpx + every party). For mainnet, scope it down / isolate it to a backend-only service. (Roadmap follow-up #4.) |
-| D4 | **Refund/expiry path validated live** | ⚠️ | Proven in Foundry, never on a live network. Validate on testnet FIRST (lock, don't finalise, let expire, user refunds) before mainnet. |
-| D5 | **Manual two-step accept validated live** | ⚠️ | Only the auto-accept branch ran live. Validate the real accept-record-time branch on testnet first. |
-| D6 | **Monitoring + alerting wired for real** | ⚠️ | `monitor.ts`/`cli.ts` exist; ensure someone actually watches `[ALERT]`/critical output during mainnet runs (at-risk = real money mid-flight). |
+| D1 | **Separate hot (attestor) and cold (owner) keys** | ⏸️ DEFERRED (decision) | Today owner == attestor == `0x0B95ec…`. **Deliberately left as-is at test scale** (0.0001 WBTC). The oracle CAN rotate the attestor later (owner→setAttestor) without redeploy. Revisit before scaling value. |
+| D2 | **Fresh mainnet agent key** | ⏸️ DEFERRED (decision) | Same `0x0B95ec…` key. Accepted for small-value testing. Mitigated by D-below: collected WBTC does NOT sit on this key. |
+| D2b | **Treasury payout split from hot key** | ✅ DONE | `PAYOUT_ADDRESS=0xF340…` — finalise sends collected WBTC to a SEPARATE address, not the hot signing key. So a hot-key compromise can move the escrow but can't redirect the payout. (Proven live on the mainnet swap.) |
+| D3 | **Token-split for the Canton credential** | ⏸️ DEFERRED | m2m token is ParticipantAdmin-grade. Left as-is at test scale; scope it down before production volume. |
+| D4 | **Refund/expiry path validated live** | ✅ DONE | Proven on-chain (`e2e-refund.ts`) AND via the API endpoint (`api-refund.smoke.ts`): lock→expire→POST refund→WBTC returned. UI exposes "Refund my WBTC". |
+| D5 | **Manual two-step accept** | ✅ N/A (by design) | We do NOT detect cross-participant accept (task A1 decision). The user accepts in their own Loop wallet; the UI tells them to. Resolved, not pending. |
+| D6 | **Monitoring + alerting wired for real** | ⚠️ | `monitor.ts`/`cli.ts` + per-tick `[health]`/`[ALERT]` exist and run. For real mainnet volume, route `[ALERT]`/critical to a human channel. Adequate for supervised test runs. |
 
 ---
 
