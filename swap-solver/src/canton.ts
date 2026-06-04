@@ -14,6 +14,8 @@
 
 import { randomUUID } from "node:crypto";
 
+import { retry } from "./retry.js";
+
 /** The subset of Canton network config the solver needs. */
 export interface CantonConfig {
   ledgerHost: string;
@@ -184,12 +186,15 @@ export class CantonClient {
   }
 
   private async getLedgerEnd(jwt: string): Promise<number> {
-    const res = await fetch(`${this.cfg.ledgerHost}/v2/state/ledger-end`, {
-      headers: { Authorization: `Bearer ${jwt}` },
-    });
-    if (!res.ok) throw new Error(`getLedgerEnd failed (${res.status})`);
-    const { offset } = (await res.json()) as { offset: number };
-    return offset;
+    // Read-only + idempotent → safe to retry on transient RPC/network blips.
+    return retry(async () => {
+      const res = await fetch(`${this.cfg.ledgerHost}/v2/state/ledger-end`, {
+        headers: { Authorization: `Bearer ${jwt}` },
+      });
+      if (!res.ok) throw new Error(`getLedgerEnd failed (${res.status})`);
+      const { offset } = (await res.json()) as { offset: number };
+      return offset;
+    }, { label: "getLedgerEnd" });
   }
 
   // --- Phase 1: create the cBTC transfer offer (solver float → user party) ---

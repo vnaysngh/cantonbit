@@ -22,6 +22,7 @@ import { OpenWatcher } from "./watcher.js";
 import { deliverSeenOrders } from "./delivery.js";
 import { resolveDeliveringOrders } from "./accept-watch.js";
 import { Settler } from "./settle.js";
+import { buildHealthReport, summarize } from "./monitor.js";
 
 const STORE_PATH = process.env.STORE_PATH ?? ".oranj-swap/orders.json";
 
@@ -103,6 +104,23 @@ async function main(): Promise<void> {
       // 4. settle delivered orders (attest + finalise)
       const settled = await settler.settleReady(store);
       logOutcomes("settle", settled.map((s) => ({ id: s.orderId, o: s.outcome.kind })));
+
+      // 5. health check each tick — surface at-risk / stuck / critical states.
+      const health = buildHealthReport(store, {
+        now,
+        staleSeenSeconds: 30 * 60,
+        deadlineWarnSeconds: 30 * 60,
+      });
+      const line = `[health] ${summarize(health)}`;
+      if (health.status === "critical") console.error(line);
+      else if (health.status === "warn") console.warn(line);
+      else console.log(line);
+      // Loud, explicit alert for capital-at-risk orders past their deadline.
+      for (const o of health.atRisk) {
+        if (o.order.fillDeadline < now) {
+          console.error(`[ALERT] order ${o.orderId.slice(0, 16)}… is ${o.status} PAST fillDeadline — cBTC delivered but finalise may be impossible. Manual review needed.`);
+        }
+      }
     } catch (e) {
       console.error("[loop] tick error:", e instanceof Error ? e.message : e);
     }
