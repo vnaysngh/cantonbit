@@ -42,6 +42,7 @@ export interface LoopProvider {
   email?: string;
   getHolding: () => Promise<unknown[]>;
   getAccount: () => Promise<unknown>;
+  getActiveContracts: (params?: { templateId?: string; interfaceId?: string }) => Promise<unknown[]>;
   submitTransaction: (payload: unknown, options?: unknown) => Promise<unknown>;
   submitAndWaitForTransaction: (payload: unknown, options?: unknown) => Promise<unknown>;
 }

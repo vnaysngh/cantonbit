@@ -7,7 +7,9 @@ import { BalanceBadge } from "@/components/BalanceBadge";
 import { Button } from "@/components/ui/button";
 import { useBalance } from "@/hooks/useBalance";
 import { useWallet } from "@/hooks/useWallet";
+import { useLoopWallet } from "@/hooks/useLoopWallet";
 import { formatSatoshis } from "@/lib/format";
+import { readLoopCbtcBalance } from "@/lib/loop-holdings";
 import {
   createDepositAccount,
   getDepositAddress,
@@ -25,7 +27,16 @@ type Stage =
 
 export default function MintPage() {
   const { partyId } = useWallet();
+  const { provider } = useLoopWallet();
   const { total, refetch: refetchBalance } = useBalance();
+
+  // Reads the user's unlocked cBTC balance from their Loop wallet. Used to
+  // snapshot a baseline and observe cBTC landing after a deposit. Returns "0"
+  // if the Loop wallet isn't connected.
+  const readBalance = useCallback(async (): Promise<string> => {
+    if (!provider) return "0";
+    return (await readLoopCbtcBalance(provider)).total;
+  }, [provider]);
 
   const [stage, setStage] = useState<Stage>({ kind: "recovering" });
   // Presentational only — copy-to-clipboard feedback for the deposit address.
@@ -92,7 +103,7 @@ export default function MintPage() {
         };
         // Baseline = the USER's current balance. We poll the user party and flip
         // to "minted" when CBTC lands there (delivered by the server-side cron).
-        const baseline = await snapshotHoldingBalance(partyId);
+        const baseline = await snapshotHoldingBalance(readBalance);
         baselineRef.current = baseline;
         setStage({
           kind: "ready",
@@ -104,7 +115,7 @@ export default function MintPage() {
         setStage({ kind: "idle" });
       }
     })();
-  }, [partyId]);
+  }, [partyId, readBalance]);
 
   const start = useCallback(async () => {
     if (!partyId) return;
@@ -112,7 +123,7 @@ export default function MintPage() {
     // If we already have a deposit account, reuse it — don't create another Canton contract.
     if (existingAccountRef.current) {
       const { depositAccountCid, address } = existingAccountRef.current;
-      const baseline = await snapshotHoldingBalance(partyId);
+      const baseline = await snapshotHoldingBalance(readBalance);
       baselineRef.current = baseline;
       setStage({ kind: "ready", depositAccountCid, address });
       return;
@@ -127,7 +138,7 @@ export default function MintPage() {
       const address = await getDepositAddress(depositAccountCid);
 
       existingAccountRef.current = { depositAccountCid, address };
-      const baseline = await snapshotHoldingBalance(partyId);
+      const baseline = await snapshotHoldingBalance(readBalance);
       baselineRef.current = baseline;
 
       setStage({ kind: "ready", depositAccountCid, address });
@@ -137,7 +148,7 @@ export default function MintPage() {
         message: err instanceof Error ? err.message : String(err)
       });
     }
-  }, [partyId]);
+  }, [partyId, readBalance]);
 
   // Poll every 30s once the deposit address is shown. READ-ONLY.
   //
@@ -160,7 +171,7 @@ export default function MintPage() {
       try {
         // Observe the USER's own balance (not warpx). It rises only once the
         // cron has delivered the mint into the user's party.
-        const currentBalance = await snapshotHoldingBalance(partyId);
+        const currentBalance = await snapshotHoldingBalance(readBalance);
         const baseline = baselineRef.current ?? "0";
 
         const currentSats = Math.round(parseFloat(currentBalance) * 1e8);
@@ -179,7 +190,7 @@ export default function MintPage() {
     }, 30_000);
 
     return () => clearInterval(poll);
-  }, [stage.kind, partyId, refetchBalance]);
+  }, [stage.kind, partyId, refetchBalance, readBalance]);
 
   // "Mint more" / "Try again": reuse existing account if we have one,
   // otherwise go to idle so user can generate a new address.

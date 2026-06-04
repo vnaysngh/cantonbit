@@ -59,9 +59,10 @@ see `docs/SWAP-UI-RUNBOOK.md`.
 
 Canton is per-network: **devnet, testnet, and mainnet are separate ledgers.** A
 party on one network cannot receive a transfer from a sender on another — that is
-what the earlier `UNKNOWN_INFORMEES` actually was (the Oranj app runs on
-**mainnet** per `NEXT_PUBLIC_NETWORK=mainnet`, so its login party was a mainnet
-party, but the swap solver runs on **devnet** — cross-network, impossible).
+what the earlier `UNKNOWN_INFORMEES` actually was (the app was on **mainnet** while
+the swap solver ran on **devnet** — cross-network, impossible). The app is now on
+devnet (`NEXT_PUBLIC_NETWORK=devnet`) to match, with network-aware KEYCLOAK creds
+in `lib/auth.ts` (devnet client_id + secret).
 
 Cross-**participant** delivery WITHIN a network works fine — the solver already
 delivers to `8f5ca108…` (a different participant than the warpx float) every
@@ -73,9 +74,35 @@ the solver (devnet).** The hook hardcodes `network: devnet` (override via
 app's mainnet setting. A devnet Loop party + a devnet solver = same ledger =
 delivery works regardless of which participant hosts each party.
 
+## Per-screen Loop status
+
+| Screen | Reads | Writes | Loop status |
+|---|---|---|---|
+| **Balance** (TopNav, dashboard) | `provider.getHolding()` aggregate | — | ✅ done |
+| **Swap** | — | user signs Permit2 (Base) + accepts cBTC in Loop | ✅ done (proven live) |
+| **Mint** | `provider.getHolding()` for before/after snapshot | deposit acct on warpx (m2m) — mint never spends | ✅ done |
+| **Redeem** | needs per-UTXO contract ids | burn must be **user-signed** | ❌ **NOT migrated** — see below |
+
+### Redeem is NOT yet Loop-compatible (known gap)
+
+Redeem still uses the server m2m JWT path, which **fails for a Loop party**:
+1. **List holdings** — `lib/redeem.ts:listSpendableHoldings` calls
+   `/api/canton/holdings` (m2m), which 403s on a Loop party. Needs
+   `provider.getActiveContracts({interfaceId: Holding})` for per-UTXO contract ids
+   (Loop's `getHolding()` aggregate has no contract ids). [task R1]
+2. **The burn** — `app/api/redeem/submit-withdraw` exercises
+   `CBTCWithdrawAccount_Withdraw` as `actAs:[userParty]` via m2m; a Loop party on
+   another participant can't be acted-as by our JWT. The burn must be
+   **user-signed** via `provider.submitTransaction(...)`. [task R2]
+
+Until R1/R2 land, a Loop user cannot redeem. The holdings route returns empty
+gracefully (no crash), but redeem will report "insufficient balance".
+
 ## Not done / future
 
-- `provider.submitTransaction` is wired/available but the app does NOT build an
+- Redeem migration (R1/R2 above) — the burn needs live round-trips to nail the
+  Daml exercise command + choice-context shape.
+- `provider.submitTransaction` is wired/available but the swap does NOT build an
   in-app accept UI — the user accepts in their Loop wallet by design.
 - BTC-address ↔ party mapping (mint deposit accounts) now keys off the Loop
   party via `party_mappings`; existing deposit_accounts rows tied to old

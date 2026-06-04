@@ -14,9 +14,6 @@
  * Minimum mint amount: 0.001 BTC
  */
 
-import { NETWORK } from "./constants";
-import { formatSatoshis } from "./format";
-import type { Holding } from "@/lib/types";
 
 const TAG = "[mint]";
 
@@ -84,52 +81,21 @@ export async function getDepositAddress(
   return data.address;
 }
 
+/** A reader for the user's current unlocked cBTC balance (BTC string). The mint
+ *  page supplies one backed by the Loop wallet (provider.getHolding). */
+export type BalanceReader = () => Promise<string>;
+
 /**
- * Snapshot a party's current unlocked CBTC holding balance, for mint polling.
- * Fetches from the server route GET /api/canton/holdings (m2m JWT — no Loop SDK).
+ * Snapshot the user's current unlocked CBTC balance, for mint polling. The
+ * balance now comes from the user's CONNECTED LOOP WALLET (the app's m2m JWT
+ * cannot read a Loop party on another participant). The caller passes a
+ * `read` function — typically backed by the Loop provider — so this stays a
+ * pure helper.
  *
- * @param partyId  Which party's balance to read. The mint page passes the
- *   USER's party so it observes CBTC actually LANDING in the user wallet
- *   (delivered by the server-side cron processor). Defaults to the warpx
- *   holding party for backward compatibility.
- *
- * Poll every 30s — mint complete for this party when balance > snapshot.
+ * Poll every 30s — mint complete when balance > snapshot.
  */
-export async function snapshotHoldingBalance(
-  partyId: string = NETWORK.warpxPartyId,
-): Promise<string> {
-  const res = await fetch(
-    `/api/canton/holdings?partyId=${encodeURIComponent(partyId)}`
-  );
-
-  const data = (await res.json()) as {
-    holdings?: Holding[];
-    error?: string;
-  };
-
-  if (!res.ok) {
-    throw new Error(data.error ?? `Holdings fetch failed (${res.status})`);
-  }
-
-  const holdings = data.holdings ?? [];
-
-  // Filter to unlocked CBTC only (same logic as useBalance).
-  const cbtcUnlocked = holdings.filter(
-    (h) =>
-      h.payload.instrumentId.id === NETWORK.instrumentId.id &&
-      h.payload.instrumentId.admin === NETWORK.instrumentId.admin &&
-      (h.payload.lock === null || h.payload.lock === undefined)
-  );
-
-  let totalSats = 0;
-  for (const h of cbtcUnlocked) {
-    const n = parseFloat(h.payload.amount ?? "0");
-    if (!isNaN(n)) totalSats += Math.round(n * 1e8);
-  }
-
-  const total = formatSatoshis(BigInt(totalSats));
-  console.log(
-    `${TAG} snapshotHoldingBalance holdings=${cbtcUnlocked.length} total=${total} BTC`
-  );
+export async function snapshotHoldingBalance(read: BalanceReader): Promise<string> {
+  const total = await read();
+  console.log(`${TAG} snapshotHoldingBalance total=${total} BTC`);
   return total;
 }
