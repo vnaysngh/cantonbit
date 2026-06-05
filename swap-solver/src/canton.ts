@@ -218,6 +218,19 @@ export class CantonClient {
     }, { label: "getLedgerEnd" });
   }
 
+  /**
+   * Has the receiver ACCEPTED the delivery for these locked input holdings?
+   * Detected from the SOLVER's own ACS (sender-readable, no 403): while the offer
+   * is pending, a TransferInstruction / locked Holding for these inputs is in our
+   * active contracts; once accepted (or rejected), it disappears. This is the
+   * reliable accept signal — we cannot read the receiver's offer set directly.
+   * Returns true only when we can confirm the pending transfer is gone.
+   */
+  async isDeliveryAccepted(inputHoldingCids: string[]): Promise<boolean> {
+    const { pending } = await this.floatHasPendingTransfer(inputHoldingCids);
+    return !pending;
+  }
+
   // --- Phase 1: create the cBTC transfer offer (solver float → user party) ---
 
   /**
@@ -230,7 +243,7 @@ export class CantonClient {
     receiverParty: string;
     amountBtc: string;
     inputHoldings: HoldingLite[];
-  }): Promise<{ updateId: string; offerContractId: string; autoAccepted: boolean }> {
+  }): Promise<{ updateId: string; offerContractId: string; autoAccepted: boolean; inputHoldingCids: string[] }> {
     const jwt = await this.getJwt();
     const now = new Date().toISOString();
     const executeBefore = new Date(Date.now() + TRANSFER_TTL_MS).toISOString();
@@ -351,10 +364,10 @@ export class CantonClient {
     const found = await this.findOfferForInputs(params.receiverParty, inputHoldingCids);
     if (found.kind === "found") {
       // We can see the pending offer directly → definitely pending.
-      return { updateId, offerContractId: found.contractId, autoAccepted: false };
+      return { updateId, offerContractId: found.contractId, autoAccepted: false, inputHoldingCids };
     }
     const pending = await this.floatHasPendingTransfer(inputHoldingCids);
-    return { updateId, offerContractId: pending.cid ?? "", autoAccepted: !pending.pending };
+    return { updateId, offerContractId: pending.cid ?? "", autoAccepted: !pending.pending, inputHoldingCids };
   }
 
   // --- Allocation (cBTC escrow) — lock / release / refund ----------------------

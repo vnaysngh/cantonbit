@@ -136,7 +136,7 @@ async function main() {
   // === 3. Canton: deliver cBTC ===
   log("3. CANTON: deliver cBTC (transfer offer)");
   const holdings = await canton.getHoldings(floatParty);
-  const { updateId, offerContractId, autoAccepted } = await canton.createOffer({ receiverParty: recipient, amountBtc: CBTC_BTC, inputHoldings: holdings });
+  const { updateId, offerContractId, autoAccepted, inputHoldingCids } = await canton.createOffer({ receiverParty: recipient, amountBtc: CBTC_BTC, inputHoldings: holdings });
   console.log(`offer created ✓  updateId: ${updateId}`);
   console.log(autoAccepted ? "(auto-accepted)" : `offerId: ${offerContractId} — ACCEPT IT NOW in the receiving wallet`);
   store.update(orderId, { status: "delivering", cantonDeliveryRef: offerContractId || updateId });
@@ -150,13 +150,18 @@ async function main() {
     console.log("auto-accepted → using submit time");
   } else {
     console.log(`>>> ACCEPT the incoming ${CBTC_BTC} CBTC transfer in the receiving wallet <<<`);
+    // Detect the accept via the SOLVER's own ACS (sender-readable): once the user
+    // accepts, the pending TransferInstruction / locked Holding for these inputs
+    // disappears. We CANNOT read the receiver's offer (403), so the old
+    // isOfferActive(offerContractId) check was useless (offerContractId is empty).
     let resolved = false; fillTimestamp = now;
     for (let i = 0; i < 120; i++) {
-      const active = await canton.isOfferActive(recipient, offerContractId).catch(() => true);
-      if (!active) {
-        const r = await canton.resolveOffer({ receiverParty: recipient, offerContractId, fromOffset: 0 });
-        if (r.kind === "accepted") { fillTimestamp = recordTimeToUnixSeconds(r.recordTime); console.log(`\naccepted at ${r.recordTime} ✓`); summary["4. accept record-time"] = r.recordTime; resolved = true; break; }
-        if (r.kind === "expired") throw new Error("offer expired unaccepted");
+      const accepted = await canton.isDeliveryAccepted(inputHoldingCids).catch(() => false);
+      if (accepted) {
+        fillTimestamp = Math.floor(Date.now() / 1000);
+        console.log(`\naccepted (detected via solver ACS) ✓`);
+        summary["4. accept"] = "detected via solver float";
+        resolved = true; break;
       }
       process.stdout.write(`  waiting for accept… (${i * 5}s)\r`); await sleep(5000);
     }
