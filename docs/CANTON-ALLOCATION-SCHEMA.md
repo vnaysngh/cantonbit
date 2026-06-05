@@ -80,6 +80,30 @@ timeout-refund, instead of fire-and-forward-transfer + our own oracle. See
 `docs/ATOMIC-SWAP-DESIGN.md` (Canton-side audit) for why this is the best
 achievable EVM→Canton design.
 
+## Verification spikes (2026-06-05) — all 3 pre-build gaps closed live
+
+- **GAP 1 — allocate envelope shape: VERIFIED.** Posting the full envelope (mirrored
+  on our working transfer-factory: `choiceArguments.{expectedAdmin, allocation:
+  {settlement, transferLegId, transferLeg}, requestedAt, inputHoldingCids,
+  extraArgs:{context,meta}}`) to the LIVE registry returned
+  `404 {"error":"No holdings provided"}` — a BUSINESS-logic error, meaning the
+  registry parsed every nested field and only rejected the empty holdings list.
+  The shape is accepted; real call needs real `inputHoldingCids` + parties.
+- **GAP 2 — executor / release authority: VERIFIED (Splice source).**
+  `allocationControllers = [settlement.executor, transferLeg.sender,
+  transferLeg.receiver]`; `Allocation_ExecuteTransfer` is controlled by ALL THREE.
+  BUT the Daml comment: *"Typically this authorization is granted by sender and
+  receiver to the executor as part of the contract"* — i.e. consent is delegated
+  to the executor UP FRONT, so our solver (as executor, and as sender of its own
+  float) can fire the release without the user online at release time. The user
+  authorizes once at setup (same touch-point as today's "accept in Loop wallet").
+- **GAP 3 — EVM pre-flight (eth_call openFor): VERIFIED.** `eth_call` of `openFor`
+  with empty and junk signatures both REVERTED → eth_call executes the real
+  validation, so simulating `openFor` before delivering cBTC is a usable
+  claimability gate (our substitute for CoW's atomic revert). NOTE: revert reason
+  came back undecoded ("unknown") — production should decode the escrow's custom
+  errors to distinguish bad-sig vs insufficient-balance vs expired.
+
 ## Build note
 
 Mirror the existing transfer-factory client (`swap-solver/src/canton.ts`
