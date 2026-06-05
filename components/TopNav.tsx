@@ -2,7 +2,6 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
 
 import { useEffect, useRef, useState } from "react";
 
@@ -12,19 +11,11 @@ import { useEvmWallet } from "@/hooks/useEvmWallet";
 import { SWAP_CHAIN } from "@/lib/swap-evm";
 import { cn } from "@/lib/utils";
 
-const NAV = [
-  { href: "/", label: "Dashboard" },
-  { href: "/mint", label: "Mint" },
-  // Send/Receive hidden for now — flows still in progress, mint+redeem are the primary user actions.
-  // { href: "/send", label: "Send" },
-  // { href: "/receive", label: "Receive" },
-  { href: "/redeem", label: "Redeem" },
-  { href: "/swap", label: "Swap" },
-  { href: "/activity", label: "Activity" }
-] as const;
+// Swap is the only surfaced page right now, so the header has no nav items —
+// just the brand and the wallets dropdown. (Dashboard/Mint/Redeem/Activity
+// routes still exist but are intentionally not linked.)
 
 export function TopNav() {
-  const pathname = usePathname();
   const { partyId, connectLoop, logoutLoop, loopConnecting, loopReady } = useWallet();
   const evm = useEvmWallet();
   const evmWrongChain = evm.chainId != null && evm.chainId !== SWAP_CHAIN.id;
@@ -44,7 +35,7 @@ export function TopNav() {
     <header className="sticky top-0 z-50 border-b border-outline-variant bg-surface/80 backdrop-blur-md">
       <div className="mx-auto flex h-16 w-full max-w-[1200px] items-center justify-between gap-4 px-container-padding">
         {/* Brand */}
-        <Link href="/" aria-label="Oranj — home" className="flex items-center gap-2">
+        <Link href="/swap" aria-label="Oranj — home" className="flex items-center gap-2">
           <Image
             src="/logo.png"
             alt="Oranj"
@@ -54,30 +45,6 @@ export function TopNav() {
             priority
           />
         </Link>
-
-        {/* Center navigation */}
-        <nav className="hidden items-center gap-8 md:flex">
-          {NAV.map((item) => {
-            const active =
-              item.href === "/"
-                ? pathname === "/"
-                : pathname?.startsWith(item.href);
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={cn(
-                  "text-body-md transition-colors",
-                  active
-                    ? "border-b-2 border-primary pb-1 text-primary"
-                    : "text-on-surface-variant hover:text-on-surface"
-                )}
-              >
-                {item.label}
-              </Link>
-            );
-          })}
-        </nav>
 
         {/* Actions — a single Wallets dropdown */}
         <div className="flex items-center gap-3">
