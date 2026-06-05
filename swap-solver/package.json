@@ -8,7 +8,9 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/**/*.test.ts",
     "dev": "tsx watch src/index.ts",
-    "start": "tsx src/index.ts"
+    "start": "tsx src/index.ts",
+    "api": "tsx --env-file=.env --env-file=../.env.local --env-file=.env.mainnet src/serve.ts",
+    "watch": "tsx --env-file=.env --env-file=../.env.local --env-file=.env.mainnet src/index.ts"
   },
   "dependencies": {
     "viem": "^2.21.0"

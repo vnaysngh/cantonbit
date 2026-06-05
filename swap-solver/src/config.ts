@@ -87,10 +87,14 @@ export function makeNetworkConfig(params: {
     wbtc: getAddress(params.wbtc),
     cantonChainId: CANTON_CHAIN_BASE + CANTON_CHAIN_OFFSET[params.network],
     cantonSettlerId: CANTON_SETTLER_SENTINEL,
-    // Sensible defaults: ~2h to fill (covers Canton delivery + margin), ~24h to
-    // expiry (refund window for the user). fillDeadline MUST be < expires.
-    fillDeadlineSeconds: params.fillDeadlineSeconds ?? 2 * 60 * 60,
-    expiresSeconds: params.expiresSeconds ?? 24 * 60 * 60,
+    // A cross-chain fill (Canton delivery + accept) takes seconds-to-minutes, so
+    // these are deliberately tight: the user's locked WBTC should never be a
+    // day-long hostage on a stall. ~10m to fill, ~20m to expiry (when the user's
+    // refund unlocks and the watch loop auto-refunds). fillDeadline MUST be <
+    // expires. Overridable via env/CLI for testing. The escrow enforces no
+    // minimum, so short windows are safe.
+    fillDeadlineSeconds: params.fillDeadlineSeconds ?? 10 * 60,
+    expiresSeconds: params.expiresSeconds ?? 20 * 60,
   };
 }
 

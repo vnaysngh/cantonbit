@@ -37,6 +37,7 @@ import { buildOpenForTypedData } from "./open-for.js";
 import { ESCROW_ABI } from "./abi.js";
 import { OrderStore, type OrderRecord, type SerializedOrder } from "./store.js";
 import { serializeOrder, deserializeOrder } from "./convert.js";
+import { refundOrder, type RefundDeps } from "./refund.js";
 import { allOrders } from "./monitor.js";
 import { CantonClient } from "./canton.js";
 
@@ -227,42 +228,28 @@ export function createApi(deps: ApiDeps) {
    * always sends inputs to order.user), so the solver can submit it on the user's
    * behalf — the funds go to the user regardless of who pays gas. Safe by design.
    */
+  // Shared refund deps — the same logic the watch loop's auto-refund sweep uses,
+  // so on-demand and automatic refunds behave identically.
+  const refundDeps: RefundDeps = { store, escrow: cfg.escrow, wallet, account, pub };
+
   async function handleRefund(orderId: Hex) {
     store.reload();
     const rec = store.get(orderId);
     if (!rec) throw new ApiError(404, "order not found");
-    if (rec.status === "finalised") throw new ApiError(409, "order already finalised — nothing to refund");
-    if (rec.status === "refunded") return { orderId, status: "refunded", alreadyRefunded: true };
 
-    const now = nowSeconds();
-    if (now <= rec.order.expires) {
-      throw new ApiError(425, `not yet refundable — expires in ${rec.order.expires - now}s`);
+    const outcome = await refundOrder(rec, refundDeps, nowSeconds());
+    switch (outcome.kind) {
+      case "refunded":
+        return { orderId, status: "refunded", refundTx: outcome.refundTx };
+      case "alreadyRefunded":
+        return { orderId, status: "refunded", alreadyRefunded: true };
+      case "alreadyFinalised":
+        throw new ApiError(409, "order already finalised — nothing to refund");
+      case "notYet":
+        throw new ApiError(425, `not yet refundable — expires in ${outcome.secondsLeft}s`);
+      case "error":
+        throw new ApiError(502, `refund submission failed: ${outcome.message}`);
     }
-
-    const order = deserializeOrder(rec.order);
-    const escrowC = getContract({ address: cfg.escrow, abi: ESCROW_ABI, client: wallet });
-
-    // If it was already claimed on-chain by a late finalise, don't try to refund.
-    const onchain = Number(await escrowC.read.orderStatus([orderId]));
-    if (onchain === 2 /* Claimed */) {
-      store.update(orderId, { status: "finalised", note: "claimed on-chain (late finalise)" });
-      throw new ApiError(409, "order was finalised on-chain — not refundable");
-    }
-    if (onchain === 3 /* Refunded */) {
-      store.update(orderId, { status: "refunded", note: "already refunded on-chain" });
-      return { orderId, status: "refunded", alreadyRefunded: true };
-    }
-
-    let refundTx: Hex;
-    try {
-      refundTx = await escrowC.write.refund([order], { account, chain: null });
-      await pub.waitForTransactionReceipt({ hash: refundTx });
-    } catch (e) {
-      throw new ApiError(502, `refund submission failed: ${e instanceof Error ? e.message : e}`);
-    }
-
-    store.update(orderId, { status: "refunded", note: `refund ${refundTx}` });
-    return { orderId, status: "refunded", refundTx };
   }
 
   async function handleHealth() {

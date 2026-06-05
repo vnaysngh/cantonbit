@@ -23,6 +23,7 @@ import { deliverSeenOrders } from "./delivery.js";
 import { resolveDeliveringOrders } from "./accept-watch.js";
 import { Settler } from "./settle.js";
 import { buildHealthReport, summarize } from "./monitor.js";
+import { refundExpiredOrders, type RefundDeps } from "./refund.js";
 
 const STORE_PATH = process.env.STORE_PATH ?? ".oranj-swap/orders.json";
 
@@ -92,6 +93,16 @@ async function main(): Promise<void> {
     payoutAddress: env.payoutAddress,
   });
 
+  // Clients for the auto-refund sweep (returns locked WBTC to users on expiry).
+  const { createWalletClient, createPublicClient, http } = await import("viem");
+  const refundDeps: RefundDeps = {
+    store,
+    escrow: env.escrow,
+    account: env.agentAccount,
+    wallet: createWalletClient({ account: env.agentAccount, transport: http(env.originRpcUrl) }),
+    pub: createPublicClient({ transport: http(env.originRpcUrl) }),
+  };
+
   // Resumable backfill, then live follow.
   console.log("[watch] backfilling…");
   await watcher.backfill();
@@ -131,6 +142,19 @@ async function main(): Promise<void> {
       // 4. settle delivered orders (attest + finalise)
       const settled = await settler.settleReady(store);
       logOutcomes("settle", settled.map((s) => ({ id: s.orderId, o: s.outcome.kind })));
+
+      // 4b. auto-refund: return locked WBTC to users on any order past its expiry
+      //     that never finalised. Permissionless — funds always go to the user.
+      //     This is what makes a stalled cross-chain swap self-heal: it can't be
+      //     atomic like a single-chain DEX, but it refunds without user action.
+      const refunds = await refundExpiredOrders(refundDeps, now);
+      for (const r of refunds) {
+        if (r.outcome.kind === "refunded") {
+          console.log(`[refund] ${r.orderId.slice(0, 12)}… auto-refunded → ${r.outcome.refundTx}`);
+        } else if (r.outcome.kind === "error") {
+          console.error(`[refund] ${r.orderId.slice(0, 12)}… FAILED: ${r.outcome.message}`);
+        }
+      }
 
       // 5. health check each tick — surface at-risk / stuck / critical states.
       const health = buildHealthReport(store, {

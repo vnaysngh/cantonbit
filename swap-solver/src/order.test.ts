@@ -76,8 +76,9 @@ test("attestTuple mirrors the output exactly", () => {
 test("fillDeadline is strictly before expires", () => {
   const built = buildOrder(cfg(), req(), NOW);
   assert.ok(built.order.fillDeadline < built.order.expires);
-  assert.equal(built.order.fillDeadline, NOW + 2 * 60 * 60);
-  assert.equal(built.order.expires, NOW + 24 * 60 * 60);
+  // Tight cross-chain windows: ~10m to fill, ~20m to expiry (auto-refund unlocks).
+  assert.equal(built.order.fillDeadline, NOW + 10 * 60);
+  assert.equal(built.order.expires, NOW + 20 * 60);
 });
 
 test("canton chainId is a high non-colliding sentinel, per-network distinct", () => {
