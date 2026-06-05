@@ -88,8 +88,71 @@ Ran `probe-allocation-mainnet.mts` against LIVE mainnet cBTC (0.00001). Findings
    holding as input (C4 double-allocate). **FIX: getHoldings must read `lock` and
    exclude/flag locked holdings.** Applies to the CURRENT transfer flow too.
 
-**Still untested:** B4/B5 (executeTransfer release — happy path), B6 (execute fails
-after settleBefore), C1/C2 (full cross-leg happy + sad), C5 (crash recovery).
+**Still untested:** B6 (execute fails after settleBefore), C1/C2 (full cross-leg
+happy + sad), C5 (crash recovery).
+
+### 🔴 PIVOTAL FINDING (2026-06-05) — B4/B5: solver CANNOT release unilaterally
+
+Running MODE=happy returned `DAML_AUTHORIZATION_ERROR`:
+> `DvpLegAllocation requires authorizers <RECEIVER>, <SOLVER>, but only <SOLVER>
+> were given`
+
+`Allocation_ExecuteTransfer` is controlled by `[executor, sender, receiver]` —
+ALL THREE jointly (confirmed in Splice `allocationControllers`). On the cBTC
+registry, the receiver's consent is **NOT pre-delegated to the executor** (the
+Daml said "typically" — this registry doesn't). Our solver can't `actAs` the
+user's party (different participant). So:
+
+**The solver canNOT release the allocated cBTC by itself. The RECEIVER (user) must
+co-authorize the release.** This invalidates the assumption (old GAP 2) that the
+solver could deliver-then-release unilaterally.
+
+Checked escape hatches, both ABSENT on the cBTC registry:
+- `transfer-preapproval` (receiver pre-consents to incoming): **404 / not in
+  metadata** — no "auto-accept all incoming" path.
+- The only receiver-consent mechanism is `allocation-request` (FOUND): the APP
+  requests, and the USER's wallet creates/accepts the allocation, baking in
+  consent. I.e. the user must actively participate in the settlement, not just
+  sign an EVM order.
+
+**Design impact:** the cBTC-side release requires the user's Canton-wallet
+participation at settlement time — exactly like today's "accept the incoming cBTC
+in your Loop wallet" step. So the no-pre-lock cross-chain swap CANNOT be "user
+signs once on EVM, solver does everything else." The user must ALSO act on Canton
+to receive/authorize the cBTC. This is the same UX touch-point we already have —
+but it means the Allocation primitive does NOT remove the user's Canton-side step;
+it just makes the SENDER (solver) side a proper lock-with-refund instead of a
+plain transfer.
+
+Net: Allocation upgrades the SOLVER's float safety (lock + timeout refund) but
+does NOT make release solver-unilateral. The receiver consent is unavoidable on
+this registry. Rows B4/B5 require the user-in-the-loop release flow to test.
+
+## FULL RUN RESULTS (2026-06-05) — final matrix status
+
+EVM leg:
+- A1 ✅ eth_call(openFor) reverts on bad sig (live)
+- A2 ✅ eth_call(openFor) SUCCEEDS on a VALID signed order (live) — pre-flight accepts good orders
+- A3 ✅ same signature still simulates clean after an 8s delay (live) — held-and-submitted-later viable
+- A5 ✅ revert reasons DECODE with the full OIF error ABI: SignatureNotSupported(0xNN),
+  WrongChain(1,42161); source also defines InvalidSigner/TimestampPassed/InvalidOrderStatus
+- A6 ✅ replay guarded: openFor reverts InvalidOrderStatus if orderId already Deposited
+  (source L140/200; can't double-open)
+- A4 ⏳ a valid openFor actually PULLS WBTC — not run (moves real funds; deferred to a full cycle)
+- A7 ⏳ Permit2 deadline == fillDeadline binding — to build
+- A8 (D3) reorg in pull window — accepted residual
+
+Canton leg:
+- B2 ✅ allocate succeeds (live)   B3 ✅ solver = sender (live)
+- B6/B7 ✅ withdraw works AFTER settleBefore — refund robust past timeout (live)
+- B8 ✅ locked holdings excluded from float (fix verified live: 21000→20000→21000)
+- B4/B5 🔴 BLOCKED: Allocation_ExecuteTransfer needs receiver (user) authorization;
+  solver canNOT release unilaterally; no transfer-preapproval on this registry.
+  Requires the user-in-the-loop Canton release flow (see PIVOTAL FINDING above).
+
+Orchestration:
+- C1/C2 ⏳ full cross-leg happy/sad — blocked by B4/B5 (needs user Canton participation)
+- C3 (exposure caps), C4 (concurrency: now mitigated by the locked-float fix), C5 (crash recovery) ⏳ to build
 
 ## "Done auditing" =
 Every ❌/🟡 above is either flipped to ✅ by the e2e run, or moved to section D with
