@@ -53,7 +53,7 @@ function mockCanton(opts: {
   createThrows?: unknown;
 }): CantonClient {
   const holdings: HoldingLite[] = [
-    { contractId: "h1", amount: "10", createdEventBlob: "blob" },
+    { contractId: "h1", amount: "10", createdEventBlob: "blob", locked: false },
   ];
   return {
     solverParty: "solver::1220aaa",

@@ -103,13 +103,24 @@ export class CantonClient {
    * Sum of the solver party's spendable cBTC holdings, in satoshis (bigint).
    * Used to refuse delivery when the float is insufficient (never half-deliver).
    */
+  /**
+   * Spendable cBTC float = sum of UNLOCKED holdings only. Locked holdings (e.g.
+   * allocated to an in-flight settlement) are excluded — counting them would
+   * over-report the float and let the solver try to spend the same cBTC twice.
+   */
   async getFloatSats(): Promise<bigint> {
     const holdings = await this.getHoldings(this.cfg.solverParty);
     let total = 0n;
     for (const h of holdings) {
+      if (h.locked) continue; // exclude locked-in-allocation holdings
       total += btcStringToSats(h.amount);
     }
     return total;
+  }
+
+  /** Only the spendable (unlocked) holdings — for transfer/allocate inputs. */
+  async getSpendableHoldings(party: string): Promise<HoldingLite[]> {
+    return (await this.getHoldings(party)).filter((h) => !h.locked);
   }
 
   /** Holdings (contractId + amount + blob) owned by `party`. Minimal shape. */
@@ -151,6 +162,7 @@ export class CantonClient {
     }
     const raw = (await res.json()) as unknown[];
     const out: HoldingLite[] = [];
+    const nowIso = new Date().toISOString();
     for (const entry of raw) {
       const ev = (entry as ActiveContractEntry).contractEntry?.JsActiveContract?.createdEvent;
       if (!ev?.contractId) continue;
@@ -167,19 +179,28 @@ export class CantonClient {
       // createArgument still carries amount/owner, so we read it as the fallback.
       const iv = ev.interfaceViews?.[0];
       const view = (iv && !iv.viewStatus?.code ? iv.viewValue : undefined) as
-        | { amount?: string; owner?: string }
+        | { amount?: string; owner?: string; lock?: HoldingLock | null }
         | undefined;
-      const arg = ev.createArgument as { amount?: string; owner?: string } | undefined;
+      const arg = ev.createArgument as
+        | { amount?: string; owner?: string; lock?: HoldingLock | null }
+        | undefined;
 
       const amount = view?.amount ?? arg?.amount;
       const owner = view?.owner ?? arg?.owner;
       if (!amount) continue;
       if (owner && owner !== party) continue;
 
+      // Read the lock from whichever source rendered (view preferred, arg
+      // fallback) — a locked holding is unspendable and must be flagged so it's
+      // excluded from float/transfer/allocate inputs.
+      const lock = view?.lock ?? arg?.lock ?? null;
+      const locked = isActivelyLocked(lock, nowIso);
+
       out.push({
         contractId: ev.contractId,
         amount,
         createdEventBlob: ev.createdEventBlob ?? "",
+        locked,
       });
     }
     return out;
@@ -214,7 +235,11 @@ export class CantonClient {
     const now = new Date().toISOString();
     const executeBefore = new Date(Date.now() + TRANSFER_TTL_MS).toISOString();
 
-    const picked = selectHoldings(params.inputHoldings, params.amountBtc);
+    // Never fund from a locked holding — exclude them before selection.
+    const picked = selectHoldings(
+      params.inputHoldings.filter((h) => !h.locked),
+      params.amountBtc,
+    );
     const inputHoldingCids = picked.map((h) => h.contractId);
 
     // Registry: fetch the TransferFactory + disclosed contracts.
@@ -330,6 +355,205 @@ export class CantonClient {
     }
     const pending = await this.floatHasPendingTransfer(inputHoldingCids);
     return { updateId, offerContractId: pending.cid ?? "", autoAccepted: !pending.pending };
+  }
+
+  // --- Allocation (cBTC escrow) — lock / release / refund ----------------------
+  // Mirrors createOffer exactly (same registry-factory → submit pattern). The
+  // ONLY difference is the choice (AllocationFactory_Allocate) and the args. The
+  // allocation LOCKS the solver's cBTC until either the executor releases it
+  // (Allocation_ExecuteTransfer, after verifying WBTC) or it's refunded
+  // (Allocation_Withdraw). settleBefore is the timeout after which release is
+  // impossible and the cBTC is recoverable by the sender.
+
+  /**
+   * Lock cBTC into an Allocation (solver float → held for `receiverParty`).
+   * Returns the created Allocation contractId + the locked holding cids.
+   */
+  async allocate(params: {
+    receiverParty: string;
+    amountBtc: string;
+    inputHoldings: HoldingLite[];
+    settlementId: string;
+    settleBefore: Date;
+    allocateBefore?: Date;
+  }): Promise<{ updateId: string; allocationCid: string; lockedHoldingCids: string[] }> {
+    const jwt = await this.getJwt();
+    const now = new Date().toISOString();
+    const allocateBefore = (params.allocateBefore ?? params.settleBefore).toISOString();
+    const settleBefore = params.settleBefore.toISOString();
+
+    // Never fund from a locked holding — exclude them before selection.
+    const picked = selectHoldings(
+      params.inputHoldings.filter((h) => !h.locked),
+      params.amountBtc,
+    );
+    const inputHoldingCids = picked.map((h) => h.contractId);
+
+    const registryUrl = `${this.cfg.registryUrl}/api/token-standard/v0/registrars/${this.cfg.decentralizedPartyId}/registry/allocation-instruction/v1/allocation-factory`;
+    const allocation = {
+      settlement: {
+        executor: this.cfg.solverParty, // solver releases after verifying WBTC
+        settlementRef: { id: params.settlementId, cid: null },
+        requestedAt: now,
+        allocateBefore,
+        settleBefore,
+        meta: { values: {} },
+      },
+      transferLegId: "leg-0",
+      transferLeg: {
+        sender: this.cfg.solverParty,
+        receiver: params.receiverParty,
+        amount: params.amountBtc,
+        instrumentId: this.cfg.instrumentId,
+        meta: { values: {} },
+      },
+    };
+    const factoryRes = await fetch(registryUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        choiceArguments: {
+          expectedAdmin: this.cfg.decentralizedPartyId,
+          allocation,
+          requestedAt: now,
+          inputHoldingCids,
+          extraArgs: { context: { values: {} }, meta: { values: {} } },
+        },
+      }),
+    });
+    if (!factoryRes.ok) {
+      const text = await factoryRes.text().catch(() => "<no body>");
+      throw new Error(`AllocationFactory registry call failed (${factoryRes.status}): ${text}`);
+    }
+    const factory = (await factoryRes.json()) as TransferFactoryResponse;
+
+    const disclosed: DisclosedContract[] = [
+      ...factory.choiceContext.disclosedContracts.map((dc) => ({
+        ...dc,
+        synchronizerId: dc.synchronizerId ?? "",
+      })),
+      ...picked.map((h) => ({
+        templateId: HOLDING_TEMPLATE_FQN,
+        contractId: h.contractId,
+        createdEventBlob: h.createdEventBlob,
+        synchronizerId: "",
+      })),
+    ];
+
+    const { updateId, createdCids } = await this.submitExercise({
+      jwt,
+      workflow: "swap-allocate",
+      templateId: ALLOCATION_FACTORY_INTERFACE,
+      contractId: factory.factoryId,
+      choice: "AllocationFactory_Allocate",
+      choiceArgument: {
+        expectedAdmin: this.cfg.decentralizedPartyId,
+        allocation,
+        requestedAt: now,
+        inputHoldingCids,
+        extraArgs: { context: factory.choiceContext.choiceContextData, meta: { values: {} } },
+      },
+      disclosed,
+    });
+    // The created Allocation contract is the new non-holding contract in the tree.
+    const allocationCid = createdCids[0] ?? "";
+    return { updateId, allocationCid, lockedHoldingCids: inputHoldingCids };
+  }
+
+  /** Release locked cBTC to the receiver (executor authority). Before settleBefore. */
+  async executeAllocation(allocationCid: string): Promise<{ updateId: string }> {
+    const jwt = await this.getJwt();
+    const { updateId } = await this.submitExercise({
+      jwt,
+      workflow: "swap-allocation-execute",
+      templateId: ALLOCATION_INTERFACE,
+      contractId: allocationCid,
+      choice: "Allocation_ExecuteTransfer",
+      choiceArgument: { extraArgs: { context: { values: {} }, meta: { values: {} } } },
+      disclosed: [],
+    });
+    return { updateId };
+  }
+
+  /** Refund locked cBTC back to the sender (solver). The escape hatch / timeout path. */
+  async withdrawAllocation(allocationCid: string): Promise<{ updateId: string }> {
+    const jwt = await this.getJwt();
+    const { updateId } = await this.submitExercise({
+      jwt,
+      workflow: "swap-allocation-withdraw",
+      templateId: ALLOCATION_INTERFACE,
+      contractId: allocationCid,
+      choice: "Allocation_Withdraw",
+      choiceArgument: { extraArgs: { context: { values: {} }, meta: { values: {} } } },
+      disclosed: [],
+    });
+    return { updateId };
+  }
+
+  /**
+   * Shared submit helper — exercises a choice as the solver and returns the
+   * updateId + any created contract ids (non-holding). Extracted so the
+   * allocate/execute/withdraw paths share the exact submit semantics createOffer
+   * uses inline.
+   */
+  private async submitExercise(p: {
+    jwt: string;
+    workflow: string;
+    templateId: string;
+    contractId: string;
+    choice: string;
+    choiceArgument: unknown;
+    disclosed: DisclosedContract[];
+  }): Promise<{ updateId: string; createdCids: string[] }> {
+    const commandId = randomUUID();
+    const res = await fetch(
+      `${this.cfg.ledgerHost}/v2/commands/submit-and-wait-for-transaction-tree`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${p.jwt}` },
+        body: JSON.stringify({
+          applicationId: "cbtc-app",
+          workflowId: `${p.workflow}-${commandId}`,
+          commandId,
+          actAs: [this.cfg.solverParty],
+          readAs: [this.cfg.solverParty],
+          commands: [
+            {
+              ExerciseCommand: {
+                templateId: p.templateId,
+                contractId: p.contractId,
+                choice: p.choice,
+                choiceArgument: p.choiceArgument,
+              },
+            },
+          ],
+          disclosedContracts: p.disclosed,
+        }),
+      },
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => "<no body>");
+      throw new Error(`${p.choice} submit failed (${res.status}): ${text}`);
+    }
+    const json = (await res.json()) as {
+      transactionTree?: {
+        updateId: string;
+        eventsById?: Record<string, { CreatedTreeEvent?: { value?: { contractId?: string; templateId?: string } } }>;
+      };
+    };
+    const tree = json.transactionTree;
+    const createdCids: string[] = [];
+    for (const ev of Object.values(tree?.eventsById ?? {})) {
+      const c = ev.CreatedTreeEvent?.value;
+      if (!c?.contractId) continue;
+      const tpl = c.templateId ?? "";
+      // Keep the Allocation contract; skip plain Holding change-outputs. NOTE the
+      // Allocation template path is "...V0.Holding.Allocation:DvpLegAllocation"
+      // — it CONTAINS "Holding", so match on the entity name, not a substring.
+      const isPlainHolding = tpl.endsWith(":Holding") || tpl.includes("Holding.V0.Holding:Holding");
+      if (!isPlainHolding) createdCids.push(c.contractId);
+    }
+    return { updateId: tree?.updateId ?? "", createdCids };
   }
 
   /**
@@ -534,6 +758,36 @@ export interface HoldingLite {
   contractId: string;
   amount: string; // BTC string
   createdEventBlob: string;
+  /**
+   * True if this holding is currently locked by an ACTIVE (non-expired) lock —
+   * e.g. allocated to a settlement. Locked holdings are NOT spendable and MUST be
+   * excluded from float / transfer / allocate inputs. A holding with an EXPIRED
+   * lock is spendable again (the registry allows it as an input), so it is NOT
+   * marked locked. Verified against the live cBTC registry: lock = {holders,
+   * expiresAt, expiresAfter, context}; null when free.
+   */
+  locked: boolean;
+}
+
+/** The HoldingView.lock shape from the live cBTC registry. */
+interface HoldingLock {
+  expiresAt?: string | null;
+  expiresAfter?: string | null;
+}
+
+/**
+ * A lock makes a holding unspendable UNLESS it has expired. Per the token
+ * standard: "Registries SHOULD allow holdings with expired locks as inputs."
+ * So: no lock → spendable; lock with a past `expiresAt` → spendable; otherwise
+ * (indefinite lock, or future expiry) → locked. We treat `expiresAfter`
+ * (relative) conservatively as "still locked" since we can't resolve it to an
+ * absolute time without the lock's creation time.
+ */
+export function isActivelyLocked(lock: HoldingLock | null | undefined, nowIso: string): boolean {
+  if (lock == null) return false;
+  if (lock.expiresAt) return lock.expiresAt > nowIso; // future expiry → locked
+  if (lock.expiresAfter) return true; // relative expiry we can't resolve → treat as locked
+  return true; // indefinite lock (expiresAt & expiresAfter both null) → locked
 }
 
 /** Outcome of an offer once it leaves the receiver's active set. */
@@ -584,6 +838,12 @@ const HOLDING_TEMPLATE_FQN =
 const TRANSFER_FACTORY_INTERFACE =
   "#splice-api-token-transfer-instruction-v1:Splice.Api.Token.TransferInstructionV1:TransferFactory";
 const TRANSFER_TTL_MS = 24 * 60 * 60 * 1000;
+
+// --- Allocation (cBTC escrow) interfaces — siblings of the transfer ones. ---
+const ALLOCATION_FACTORY_INTERFACE =
+  "#splice-api-token-allocation-instruction-v1:Splice.Api.Token.AllocationInstructionV1:AllocationFactory";
+const ALLOCATION_INTERFACE =
+  "#splice-api-token-allocation-v1:Splice.Api.Token.AllocationV1:Allocation";
 
 /** Largest-first holding selection to cover an amount; throws if insufficient. */
 export function selectHoldings(holdings: HoldingLite[], amountBtc: string): HoldingLite[] {
