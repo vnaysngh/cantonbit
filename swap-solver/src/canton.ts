@@ -243,6 +243,15 @@ export class CantonClient {
     receiverParty: string;
     amountBtc: string;
     inputHoldings: HoldingLite[];
+    /**
+     * Deterministic command id for LEDGER-ENFORCED dedup. Pass a stable id keyed
+     * by the swap (e.g. `deliver-<orderId>`). Two submissions with the same
+     * (actAs, userId, commandId) inside the dedup window are rejected by Canton
+     * (DUPLICATE_COMMAND / SUBMISSION_ALREADY_IN_FLIGHT) — the ledger guarantees
+     * at-most-once delivery, the same way CoW's filledAmount / UniswapX's Permit2
+     * nonce do on the EVM. Falls back to a random UUID if omitted (no dedup).
+     */
+    commandId?: string;
   }): Promise<{ updateId: string; offerContractId: string; autoAccepted: boolean; inputHoldingCids: string[] }> {
     const jwt = await this.getJwt();
     const now = new Date().toISOString();
@@ -286,7 +295,11 @@ export class CantonClient {
     const factory = (await factoryRes.json()) as TransferFactoryResponse;
 
     // Submit TransferFactory_Transfer as the solver (sender).
-    const commandId = randomUUID();
+    // LEDGER-ENFORCED DEDUP: a deterministic commandId (keyed by the swap) makes
+    // Canton reject a concurrent/repeat delivery of the SAME order with the same
+    // change id — the chain-level guard, like CoW's filledAmount. Random fallback
+    // only for callers that don't pass one (e.g. ad-hoc tests).
+    const commandId = params.commandId ?? randomUUID();
     const disclosed: DisclosedContract[] = [
       ...factory.choiceContext.disclosedContracts.map((dc) => ({
         ...dc,
@@ -309,6 +322,17 @@ export class CantonClient {
           applicationId: "cbtc-app",
           workflowId: `swap-transfer-${commandId}`,
           commandId,
+          // LEDGER-ENFORCED at-most-once (the CoW-aligned, chain-level guard):
+          //  (1) deterministic commandId → Canton rejects a same-change-id
+          //      submission already in-flight (SUBMISSION_ALREADY_IN_FLIGHT).
+          //  (2) STRONGER, intrinsic: this transfer exercises a CONSUMING choice
+          //      that archives the input holdings, so a duplicate that reaches
+          //      the ledger is rejected with CONTRACT_NOT_ACTIVE (a contract can
+          //      be archived at most once) — Canton's docs guarantee this with no
+          //      configuration. This is our equivalent of CoW's filledAmount.
+          // NOTE: an explicit `deduplicationPeriod` is intentionally omitted until
+          // its exact JSON-Ledger-API-v2 shape is verified — (1)+(2) already give
+          // at-most-once; shipping an unverified field could break every delivery.
           actAs: [this.cfg.solverParty],
           readAs: [this.cfg.solverParty],
           commands: [

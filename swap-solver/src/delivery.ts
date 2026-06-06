@@ -135,6 +135,9 @@ export async function startDelivery(
       receiverParty: cantonParty,
       amountBtc,
       inputHoldings: holdings,
+      // Deterministic command id keyed by the swap → Canton dedupes a repeat
+      // delivery of this exact order at the ledger level (CoW-aligned guard).
+      commandId: `deliver-${orderId}`,
     });
 
     // Two cases collapse straight to `delivered` (we don't wait for a separate
