@@ -181,6 +181,31 @@ export class OrderStore {
     return rec;
   }
 
+  /**
+   * Atomic compare-and-set on status — the claim primitive that prevents
+   * double-processing under concurrency. Reloads latest disk state, and ONLY if
+   * the order is still in `expected` status, transitions it to `next` (+ patch)
+   * and persists. Returns true if THIS caller won the claim, false if someone
+   * else already moved it. reload+check+flush is synchronous (no await between),
+   * so two callers can't both observe `expected` and both win.
+   *
+   * Used to claim a `seen` order into `delivering` BEFORE the async delivery, so
+   * a racing process (API + watch loop) can't deliver the same order twice.
+   */
+  claimStatus(
+    orderId: Hex,
+    expected: OrderStatus,
+    next: OrderStatus,
+    patch: Partial<Omit<OrderRecord, "orderId" | "createdAt" | "status">> = {},
+  ): boolean {
+    this.reloadInto();
+    const rec = this.data.orders[orderId];
+    if (!rec || rec.status !== expected) return false;
+    Object.assign(rec, patch, { status: next, updatedAt: new Date().toISOString() });
+    this.flush();
+    return true;
+  }
+
   /** Atomic persist: write to a tmp file then rename over the real path. */
   private flush(): void {
     const tmp = `${this.path}.tmp`;

@@ -28,6 +28,14 @@ export interface DeliveryParams {
   now: number;
   /** cBTC decimals for converting the on-chain amount to a BTC string. */
   cbtcDecimals: number;
+  /**
+   * C3 — optional hard ceiling on TOTAL cBTC value in-flight (sats), summed over
+   * orders that are delivering/delivered but not yet finalised/refunded. 0 or
+   * undefined = no extra cap. This is DEFENSE IN DEPTH: the float bound +
+   * per-order cap + locked-float exclusion already prevent over-delivery; this
+   * caps the blast radius of any unforeseen accounting error to a known limit.
+   */
+  maxInflightSats?: bigint;
 }
 
 export type DeliveryOutcome =
@@ -92,6 +100,34 @@ export async function startDelivery(
     return fail(store, orderId, `insufficient cBTC float: have ${floatSats} sats, need ${needSats} sats`);
   }
 
+  // --- GUARD 3 (C3): total in-flight exposure cap (defense in depth). Sum the
+  // cBTC value of orders already delivering/delivered (not yet finalised); if
+  // adding this one would exceed the configured ceiling, skip until something
+  // settles. Bounds the blast radius of any accounting error to a known limit. ---
+  if (params.maxInflightSats && params.maxInflightSats > 0n) {
+    let inflight = 0n;
+    for (const r of [...store.byStatus("delivering"), ...store.byStatus("delivered")]) {
+      const o = r.order.outputs[0];
+      if (o) inflight += BigInt(o.amount);
+    }
+    if (inflight + needSats > params.maxInflightSats) {
+      return { kind: "skipped", reason: `in-flight cap: ${inflight}+${needSats} > ${params.maxInflightSats} sats — waiting for settlement` };
+    }
+  }
+
+  // --- CONCURRENCY CLAIM (C4): atomically transition seen → delivering BEFORE
+  // the async createOffer. If a racing caller (API + watch loop, or two ticks)
+  // already claimed it, this returns false and we skip — preventing the same
+  // order from being delivered twice (double-spending the float). The status
+  // guard at the top of this function is NOT sufficient alone because of the
+  // await gap between it and the first status write; the claim closes that gap. ---
+  const won = store.claimStatus(orderId, "seen", "delivering", {
+    note: "claimed for delivery",
+  });
+  if (!won) {
+    return { kind: "skipped", reason: "another worker already claimed this order (concurrency guard)" };
+  }
+
   // --- Create the offer (Phase 1). ---
   try {
     const holdings = await canton.getHoldings(canton.solverParty);
@@ -138,7 +174,14 @@ export async function startDelivery(
     if (e instanceof InsufficientFloatError) {
       return fail(store, orderId, e.message);
     }
-    // Transient submit/registry error — leave as 'seen' so it retries.
+    // Transient submit/registry error — RELEASE the delivery claim (delivering →
+    // seen) so a later tick retries. Without this rollback the order would be
+    // stuck in `delivering` forever (we claimed it, then the offer failed). The
+    // createOffer either fully succeeded (we'd have returned above) or fully
+    // failed here, so it's safe to revert to seen and retry cleanly.
+    store.claimStatus(orderId, "delivering", "seen", {
+      note: `offer creation failed, released for retry: ${errMsg(e)}`,
+    });
     return { kind: "skipped", reason: `offer creation failed (will retry): ${errMsg(e)}` };
   }
 }

@@ -154,6 +154,28 @@ Orchestration:
 - C1/C2 ⏳ full cross-leg happy/sad — blocked by B4/B5 (needs user Canton participation)
 - C3 (exposure caps), C4 (concurrency: now mitigated by the locked-float fix), C5 (crash recovery) ⏳ to build
 
+## FAILURE-PATH RESULTS (2026-06-06) — C3/C4/C5 tested, bug found+fixed
+
+- **C4 (concurrency / double-delivery): BUG FOUND & FIXED.** The status guard at the
+  top of startDelivery was NOT atomic — the `await createOffer` gap let two racing
+  callers (API + watch loop) both pass `status==='seen'` and deliver the SAME order
+  twice (double-spending float). Test proved it (createOffer called 2x). FIX: added
+  `store.claimStatus()` (atomic compare-and-set seen→delivering BEFORE the async
+  delivery) + rollback-to-seen on transient failure. Re-tested: 1 createOffer, the
+  other caller cleanly skipped. Also: Canton's ledger is the ultimate guard —
+  createOffer consumes specific holding cids, so a same-holding double-spend fails
+  with a contention error and our catch rolls back for retry. ✅
+- **C3 (exposure caps): SATISFIED + defense-in-depth added.** The float bound +
+  per-order cap + locked-float exclusion + C4 claim already prevent over-delivery
+  (the solver can't deliver more cBTC than it holds free). ADDED an optional total
+  in-flight cap (`MAX_INFLIGHT_SATS`) as belt-and-suspenders to bound blast radius.
+  Tested both over-cap (skip) and under-cap (proceed). ✅
+- **C5 (crash recovery): SAFE.** (a) a stuck `seen` order past its fillDeadline is
+  SKIPPED (won't deliver late) → its WBTC refunds via escrow timeout. (b) in-flight
+  order state persists across restart (crash-safe store: reload + tmp-rename). ✅
+
+59/59 tests pass. New: failure-paths.test.ts (C3/C4/C5), store.claimStatus (CAS).
+
 ## "Done auditing" =
 Every ❌/🟡 above is either flipped to ✅ by the e2e run, or moved to section D with
 an explicit reason. Until then, we are NOT done.

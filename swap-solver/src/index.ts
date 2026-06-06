@@ -132,6 +132,11 @@ async function main(): Promise<void> {
         now,
         minSecondsBeforeDeadline: 30 * 60, // 30 min margin for accept + settle
         cbtcDecimals: 8,
+        // C3: optional total in-flight exposure cap (sats). Defense in depth on
+        // top of the per-order cap + float bound. Set MAX_INFLIGHT_SATS to enable.
+        maxInflightSats: process.env.MAX_INFLIGHT_SATS
+          ? BigInt(process.env.MAX_INFLIGHT_SATS)
+          : undefined,
       });
       logOutcomes("deliver", delivered.map((d) => ({ id: d.order.orderId, o: d.outcome.kind })));
 
