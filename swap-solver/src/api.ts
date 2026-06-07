@@ -38,8 +38,8 @@ import { ESCROW_ABI } from "./abi.js";
 import { OrderStore, type OrderRecord, type SerializedOrder } from "./store.js";
 import { serializeOrder, deserializeOrder } from "./convert.js";
 import { refundOrder, type RefundDeps } from "./refund.js";
-import { allOrders } from "./monitor.js";
 import { CantonClient } from "./canton.js";
+import { resolveDelivery } from "./accept-watch.js";
 
 export interface ApiDeps {
   cfg: SwapNetworkConfig;
@@ -66,22 +66,62 @@ export interface ApiDeps {
 function jsonReplacer(_k: string, v: unknown): unknown {
   return typeof v === "bigint" ? v.toString() : v;
 }
+// SECURITY (HIGH-4): CORS origin is configurable. Defaults to "*" for local dev
+// (the API is loopback-bound, so cross-origin browser calls only come from the
+// local UI), but a real deployment MUST set API_CORS_ORIGIN to the exact UI
+// origin so a malicious site can't script the user's browser against the API.
+const CORS_ORIGIN = process.env.API_CORS_ORIGIN ?? "*";
 function send(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body, jsonReplacer);
   res.writeHead(status, {
     "content-type": "application/json",
-    "access-control-allow-origin": "*",
+    "access-control-allow-origin": CORS_ORIGIN,
     "access-control-allow-headers": "content-type",
     "access-control-allow-methods": "GET,POST,OPTIONS",
   });
   res.end(payload);
+}
+// SECURITY (CoW DoS benchmark): tight body cap. The largest legitimate body is a
+// signed order, well under 8 KiB; CoW caps at 16 KiB. We use 16 KiB.
+const MAX_BODY_BYTES = 16 * 1024;
+
+/**
+ * Per-IP token-bucket rate limiter (CoW has a rate-limiter + sim timeout +
+ * request-sharing; we lacked any throttle — the one real off-chain DoS GAP).
+ * Refills `RATE_RPS` tokens/sec up to `RATE_BURST`. Cheap, in-memory, no deps.
+ * Configurable via API_RATE_RPS / API_RATE_BURST; set API_RATE_RPS=0 to disable.
+ */
+const RATE_RPS = Number(process.env.API_RATE_RPS ?? 10);
+const RATE_BURST = Number(process.env.API_RATE_BURST ?? 30);
+const buckets = new Map<string, { tokens: number; ts: number }>();
+function rateLimitOk(ip: string, nowMs: number): boolean {
+  if (RATE_RPS <= 0) return true; // disabled
+  const b = buckets.get(ip) ?? { tokens: RATE_BURST, ts: nowMs };
+  // Refill since last seen.
+  const refill = ((nowMs - b.ts) / 1000) * RATE_RPS;
+  b.tokens = Math.min(RATE_BURST, b.tokens + refill);
+  b.ts = nowMs;
+  if (b.tokens < 1) {
+    buckets.set(ip, b);
+    return false;
+  }
+  b.tokens -= 1;
+  buckets.set(ip, b);
+  // Opportunistic cleanup so the map can't grow unbounded.
+  if (buckets.size > 10_000) {
+    for (const [k, v] of buckets) if (nowMs - v.ts > 60_000) buckets.delete(k);
+  }
+  return true;
+}
+function clientIp(req: IncomingMessage): string {
+  return req.socket.remoteAddress ?? "unknown";
 }
 function readBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     let raw = "";
     req.on("data", (c) => {
       raw += c;
-      if (raw.length > 1_000_000) reject(new Error("body too large"));
+      if (raw.length > MAX_BODY_BYTES) reject(new ApiError(413, "request body too large"));
     });
     req.on("end", () => {
       if (!raw) return resolve({});
@@ -111,6 +151,13 @@ export function createApi(deps: ApiDeps) {
   const pub = createPublicClient({ transport: viemHttp(rpcUrl) });
   const wallet = createWalletClient({ account, transport: viemHttp(rpcUrl) });
 
+  // Intake validity bounds (CoW OrderValidPeriodConfiguration analogue). A
+  // submitted order's fillDeadline must leave at least this margin (so we can
+  // actually deliver+settle), and not exceed the max lock window. Derived from
+  // the configured windows so they stay consistent with what /quote builds.
+  const minFillDeadlineMargin = Math.max(60, Math.floor(cfg.fillDeadlineSeconds / 3));
+  const maxOrderValiditySeconds = cfg.expiresSeconds + 5 * 60; // a little slack over the quote window
+
   async function handleQuote(body: Record<string, unknown>) {
     const user = body.user as Address;
     if (typeof user !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(user)) {
@@ -139,6 +186,12 @@ export function createApi(deps: ApiDeps) {
     };
     const built = buildOrder(cfg, req, nowSeconds());
 
+    // NOTE: we deliberately do NOT persist anything here (SECURITY: MED-1).
+    // /quote is unauthenticated; writing to the store on every quote let an
+    // attacker flood the on-disk recovery map. The cantonParty recovery is
+    // instead written in /orders (handleCreateOrder) as part of the write-ahead,
+    // BEFORE the irreversible openFor — so the crash-recovery guarantee is
+    // preserved, but only ONE entry is ever written per real on-chain order.
     const typed = buildOpenForTypedData({ order: built.order, escrow: cfg.escrow, chainId: cfg.originChainId });
 
     return {
@@ -193,6 +246,40 @@ export function createApi(deps: ApiDeps) {
       throw new ApiError(400, "cantonParty does not match the order's recipient commitment");
     }
 
+    // INTAKE VALIDATION — benchmarked against CoW's OrderValidPeriodConfiguration
+    // .validate_period (services/crates/shared/src/order_validation.rs). CoW
+    // rejects an order at POST time if validTo is too soon (can't be filled) or
+    // too far (absurd). We do the same BEFORE the irreversible openFor, so a
+    // malformed order can't lock the user's WBTC only to immediately fail the
+    // delivery guard and need a refund. Our windows: fillDeadline must leave
+    // enough margin to deliver+accept+settle; expires must be > fillDeadline and
+    // not absurdly far out.
+    {
+      const now = nowSeconds();
+      const fillDeadline = sorder.fillDeadline;
+      const expires = sorder.expires;
+      // CoW: too-soon → Insufficient. We need at least the delivery margin left.
+      if (fillDeadline - now < minFillDeadlineMargin) {
+        throw new ApiError(
+          400,
+          `order fillDeadline too soon: ${fillDeadline - now}s left, need ≥ ${minFillDeadlineMargin}s`,
+        );
+      }
+      // CoW: too-far → Excessive. Cap the lock window so a bad client can't lock
+      // WBTC for an unreasonable time.
+      if (fillDeadline - now > maxOrderValiditySeconds) {
+        throw new ApiError(
+          400,
+          `order fillDeadline too far: ${fillDeadline - now}s, max ${maxOrderValiditySeconds}s`,
+        );
+      }
+      // The escrow invariant the whole settlement relies on: expires > fillDeadline
+      // (the user's refund window must open only after the fill window closes).
+      if (!(fillDeadline < expires)) {
+        throw new ApiError(400, "order invariant violated: fillDeadline must be < expires");
+      }
+    }
+
     const escrowC = getContract({ address: cfg.escrow, abi: ESCROW_ABI, client: wallet });
     const orderId = (await escrowC.read.orderIdentifier([order])) as Hex;
 
@@ -202,23 +289,44 @@ export function createApi(deps: ApiDeps) {
       return { orderId, status: existing.status, alreadyRegistered: true };
     }
 
-    // Submit openFor on Base. The user's signature authorizes the WBTC pull;
-    // the agent only pays gas to submit (permissionless).
+    // WRITE-AHEAD: persist the order + cantonParty BEFORE submitting openFor.
+    // openFor is IRREVERSIBLE (it pulls + locks the user's WBTC). If we submitted
+    // first and the process died (crash / restart / dropped connection) before the
+    // store write, the WBTC would be locked on-chain with NO record of the
+    // cantonParty preimage — and since the chain only commits keccak256(party),
+    // that preimage would be unrecoverable and the order could never be delivered
+    // (only refunded). Recording first means a crash leaves a recoverable record:
+    // the order is in the store WITH its cantonParty; the watcher/loop reconciles
+    // its true on-chain status (Deposited) on the next tick and proceeds. The
+    // openBlock is backfilled below once openFor mines.
+    store.insertSeen(orderId, 0, sorder);
+    store.update(orderId, { cantonParty, note: "registered; submitting openFor" });
+    // Recovery map (MED-1): one entry per REAL order, written here (not at /quote)
+    // so the unauthenticated /quote can't flood it. Lets the delivery path recover
+    // the party if the record is ever lost (e.g. watcher-discovered order).
+    store.rememberParty(orderId, cantonParty);
+
+    // Submit openFor on the origin chain. The user's signature authorizes the
+    // WBTC pull; the agent only pays gas to submit (permissionless).
     let openTx: Hex;
     try {
       openTx = await escrowC.write.openFor([order, order.user, sig], { account, chain: null });
       await pub.waitForTransactionReceipt({ hash: openTx });
     } catch (e) {
+      // openFor failed (reverted, or we lost the receipt). The record stays so the
+      // failure is visible and recoverable, but mark it so the loop doesn't try to
+      // deliver against a lock that may not exist. If openFor actually reverted, no
+      // WBTC was locked; if the receipt was merely lost, the next reconcile tick
+      // reads the real on-chain status. Surface the error to the UI either way.
+      store.update(orderId, { note: `openFor submit error: ${e instanceof Error ? e.message : e}` });
       throw new ApiError(502, `openFor submission failed: ${e instanceof Error ? e.message : e}`);
     }
 
-    // Register in the store so the solver loop picks it up. Record the openBlock
-    // best-effort; the watcher would also catch it, but registering here makes
-    // the UI's order visible immediately.
+    // openFor mined — record the block (best-effort) and keep status `seen`.
     const blockNumber = await pub.getBlockNumber().catch(() => 0n);
-    store.insertSeen(orderId, Number(blockNumber), sorder);
-    store.update(orderId, { cantonParty, note: `openFor ${openTx}` });
+    store.update(orderId, { openBlock: Number(blockNumber), note: `openFor ${openTx}` });
 
+    console.log(`[api] order ${orderId.slice(0, 12)}… registered + openFor ${openTx.slice(0, 12)}… (WBTC locked)`);
     return { orderId, status: "seen", openTx };
   }
 
@@ -228,6 +336,38 @@ export function createApi(deps: ApiDeps) {
    * always sends inputs to order.user), so the solver can submit it on the user's
    * behalf — the funds go to the user regardless of who pays gas. Safe by design.
    */
+  /**
+   * POST /orders/:orderId/accepted — ADVISORY hint that the user's app saw the
+   * cBTC delivery resolve. This endpoint is UNAUTHENTICATED, so its body is NOT
+   * trusted to change order state (SECURITY: HIGH-2/HIGH-3). It only triggers an
+   * immediate AUTHORITATIVE re-check via `resolveDelivery` — the exact same
+   * on-ledger verification the watch loop runs — which advances `delivering →
+   * delivered` ONLY if the solver's OWN ACS confirms the accept actually
+   * happened. A malicious caller cannot:
+   *   - force a finalise: `completed` does nothing unless the ledger shows the
+   *     accept (a `delivering` order whose offer is still pending stays pending);
+   *   - grief into `failed`: we never mark `failed` off a request body; the
+   *     ledger check decides. (A genuine reject is detected by the watch loop and
+   *     the order self-heals via the auto-refund sweep.)
+   * The endpoint just makes the happy path feel instant; correctness comes
+   * entirely from the on-ledger re-check, never from the caller.
+   */
+  async function handleAccepted(orderId: Hex, _body: Record<string, unknown>) {
+    store.reload();
+    const rec = store.get(orderId);
+    if (!rec) throw new ApiError(404, "order not found");
+    if (rec.status === "finalised" || rec.status === "refunded" || rec.status === "failed") {
+      return { orderId, status: rec.status, alreadyTerminal: true };
+    }
+    // Authoritative re-check (ignores the request body entirely). Only advances
+    // the order if the solver's own ledger view confirms the accept.
+    await resolveDelivery(store, canton, orderId, { now: nowSeconds(), fromOffset: 0 }).catch(
+      () => undefined,
+    );
+    const updated = store.get(orderId);
+    return { orderId, status: updated?.status ?? rec.status };
+  }
+
   // Shared refund deps — the same logic the watch loop's auto-refund sweep uses,
   // so on-demand and automatic refunds behave identically.
   const refundDeps: RefundDeps = { store, escrow: cfg.escrow, wallet, account, pub };
@@ -288,6 +428,17 @@ export function createApi(deps: ApiDeps) {
 
     if (method === "OPTIONS") return send(res, 204, {});
 
+    // SECURITY: per-IP rate limit on everything except /health (which monitors
+    // poll). Cheap in-memory token bucket; the one real off-chain DoS gap vs CoW.
+    if (path !== "/health" && !rateLimitOk(clientIp(req), Date.now())) {
+      return send(res, 429, { error: "rate limit exceeded — slow down" });
+    }
+
+    // Request log: write paths and errors are the ones we care about; GET /orders
+    // polling would spam, so only log the meaningful actions + any non-2xx.
+    const logReq = method !== "GET";
+    if (logReq) console.log(`[api] ${method} ${path}`);
+
     if (method === "GET" && path === "/health") return send(res, 200, await handleHealth());
 
     if (method === "POST" && path === "/quote") {
@@ -300,16 +451,12 @@ export function createApi(deps: ApiDeps) {
       return send(res, 201, await handleCreateOrder(body));
     }
 
-    if (method === "GET" && path === "/orders") {
-      // Re-read from disk: the solver LOOP process advances order state on disk;
-      // this API process must reload or it serves a stale snapshot.
-      store.reload();
-      const recent = allOrders(store)
-        .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
-        .slice(0, 50)
-        .map(publicOrder);
-      return send(res, 200, { orders: recent });
-    }
+    // NOTE (SECURITY: HIGH-4): the global `GET /orders` list endpoint was REMOVED.
+    // It returned every recent order's id, full cantonParty preimage, and amounts
+    // to any anonymous caller — an information leak AND the enumeration primitive
+    // that made other attacks turnkey. No UI path used it (the UI tracks a single
+    // order by id via GET /orders/:id). An authenticated admin/activity view, if
+    // ever needed, must be gated + scoped to the caller's own orders.
 
     const m = path.match(/^\/orders\/(0x[0-9a-fA-F]{64})$/);
     if (method === "GET" && m) {
@@ -325,6 +472,13 @@ export function createApi(deps: ApiDeps) {
       return send(res, 200, await handleRefund(r[1] as Hex));
     }
 
+    // The user's app reports the cBTC delivery outcome (from their Loop history).
+    const ac = path.match(/^\/orders\/(0x[0-9a-fA-F]{64})\/accepted$/);
+    if (method === "POST" && ac) {
+      const body = (await readBody(req)) as Record<string, unknown>;
+      return send(res, 200, await handleAccepted(ac[1] as Hex, body));
+    }
+
     return send(res, 404, { error: `no route for ${method} ${path}` });
   }
 
@@ -332,17 +486,21 @@ export function createApi(deps: ApiDeps) {
 }
 
 /** Project an OrderRecord to a UI-safe shape (no internal-only churn). */
+// The fields the UI tracking view needs, and only those. SECURITY (HIGH-4): we
+// do NOT echo the full cantonParty preimage — the order is only reachable by
+// someone who knows its 64-hex id (the user's own order), and the UI already
+// holds the party from the quote. `note` is kept (the user's own failure reason,
+// shown in the UI). The global list endpoint that leaked these across all users
+// was removed.
 function publicOrder(rec: OrderRecord) {
   return {
     orderId: rec.orderId,
     status: rec.status,
-    cantonParty: rec.cantonParty,
     cbtcAmount: rec.order.outputs[0]?.amount,
     wbtcAmount: rec.order.inputs[0]?.[1],
     fillDeadline: rec.order.fillDeadline,
     expires: rec.order.expires,
     fillTimestamp: rec.fillTimestamp,
-    cantonDeliveryRef: rec.cantonDeliveryRef,
     attestTxHash: rec.attestTxHash,
     finaliseTxHash: rec.finaliseTxHash,
     note: rec.note,

@@ -40,6 +40,8 @@ export interface LoopProvider {
   party_id: string;
   public_key: string;
   email?: string;
+  getAuthToken: () => string;
+  signMessage: (message: string) => Promise<unknown>;
   getHolding: () => Promise<unknown[]>;
   getAccount: () => Promise<unknown>;
   getActiveContracts: (params?: { templateId?: string; interfaceId?: string }) => Promise<unknown[]>;

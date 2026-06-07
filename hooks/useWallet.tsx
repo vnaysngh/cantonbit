@@ -1,12 +1,12 @@
 "use client";
 
 import {
-  createContext, useContext, useEffect, useRef, useState,
+  createContext, useCallback, useContext, useEffect, useRef, useState,
   type ReactNode,
 } from "react";
 
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
-import { useLoopWallet } from "@/hooks/useLoopWallet";
+import { useLoopWallet, type LoopProvider } from "@/hooks/useLoopWallet";
 
 /**
  * App identity hook. The Canton party now comes from the user's CONNECTED LOOP
@@ -35,12 +35,21 @@ interface WalletState {
   loopReady: boolean;
   loopConnecting: boolean;
   loopError: string | null;
+  /**
+   * The live Loop SDK provider — for screens that need USER-SIGNED reads/actions
+   * (e.g. signing the "Exchange API Key" message to check the cBTC auto-accept
+   * gate and read delivery history). Null until connected. Every action through
+   * it is approved by the user in their Loop wallet (no private key leaves the
+   * wallet, no server authority over the user).
+   */
+  provider: LoopProvider | null;
 }
 
 const WalletContext = createContext<WalletState>({
   isConnected: false, partyId: "", email: null, isLoading: true,
   connectLoop: async () => {}, logoutLoop: () => {},
   loopReady: false, loopConnecting: false, loopError: null,
+  provider: null,
 });
 
 export function WalletProvider({ children }: { children: ReactNode }) {
@@ -96,7 +105,28 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     })();
   }, [loop.connected, loop.party]);
 
+  // NOTE: the swap's Loop JWT session is NOT minted here at connect — it's a
+  // prerequisite the SWAP SCREEN establishes (one "Exchange API Key" signature)
+  // when the user actually goes to swap. Minting at connect would prompt every
+  // user app-wide (dashboard/mint/redeem) for a signature they may not need. We
+  // only CLEAR the session here on logout (below), so a different account that
+  // connects next doesn't inherit the prior JWT cookie.
+
   const partyId = registeredParty || loop.party;
+
+  // Logout: drop the Loop wallet AND clear the server-side swap JWT session, so
+  // a different account that connects next doesn't inherit the prior JWT cookie.
+  const logoutLoop = useCallback(() => {
+    void (async () => {
+      try {
+        const { clearSwapSession } = await import("@/lib/swap-accept");
+        await clearSwapSession();
+      } catch {
+        /* ignore — logging out anyway */
+      }
+    })();
+    loop.logout();
+  }, [loop]);
 
   const value: WalletState = {
     isConnected: loop.connected && !!partyId,
@@ -104,10 +134,11 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     email: loop.email ?? sessionEmail,
     isLoading: !loop.ready || loop.connecting || registering,
     connectLoop: loop.connect,
-    logoutLoop: loop.logout,
+    logoutLoop,
     loopReady: loop.ready,
     loopConnecting: loop.connecting,
     loopError: loop.error,
+    provider: loop.provider,
   };
 
   return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>;

@@ -53,6 +53,22 @@ export async function refundOrder(
   if (rec.status === "finalised") return { kind: "alreadyFinalised" };
   if (rec.status === "refunded") return { kind: "alreadyRefunded" };
 
+  // SECURITY (HIGH-1) — the bulletproof guard: NEVER refund an order whose cBTC
+  // the user has already accepted. `cbtcAccepted` is set the moment an accept is
+  // detected ANYWHERE (auto-accept on delivery, ACS detection, even accepted-but-
+  // too-late-to-finalise), independent of status. Refunding such an order would
+  // hand the user BOTH legs (cBTC + refunded WBTC) at the treasury's expense.
+  // This also protects the public POST /orders/:id/refund endpoint from being
+  // used to refund a delivered order. Status check is the coarse signal;
+  // cbtcAccepted is the precise one (catches the `failed`-but-accepted case).
+  if (rec.cbtcAccepted || rec.status === "delivered" || rec.status === "attested") {
+    return {
+      kind: "error",
+      message:
+        "refusing to refund — the cBTC was already accepted by the user; this must be finalised (or manually reviewed), not refunded",
+    };
+  }
+
   // The signed order carries its own immutable expiry; honor it exactly.
   if (now <= rec.order.expires) {
     return { kind: "notYet", secondsLeft: rec.order.expires - now };
@@ -93,12 +109,20 @@ export async function refundExpiredOrders(
   now: number
 ): Promise<{ orderId: Hex; outcome: RefundOutcome }[]> {
   const { store } = deps;
-  // Candidates: anything locked but not settled. `seen`/`delivering`/`delivered`
-  // are the non-terminal states where WBTC is still in escrow.
+  // Candidates: ONLY orders where the cBTC has NOT yet been handed to the user —
+  // `seen` (no delivery) and `delivering` (offer created, NOT yet accepted). For
+  // these, refunding the WBTC is loss-free: the solver still holds its cBTC.
+  //
+  // SECURITY (HIGH-1): `delivered`/`attested` are DELIBERATELY EXCLUDED. In those
+  // states the user has ALREADY accepted the cBTC on Canton — auto-refunding the
+  // WBTC there would hand the user BOTH legs (cBTC + refunded WBTC) and the
+  // treasury eats the loss. A `delivered` order past expiry must be SETTLED
+  // (finalise keeps working after expiry on-chain), never refunded; the watch
+  // loop keeps retrying attest+finalise and a stuck one needs manual review, not
+  // an auto-refund.
   const candidates = [
     ...store.byStatus("seen"),
     ...store.byStatus("delivering"),
-    ...store.byStatus("delivered"),
   ].filter((o) => now > o.order.expires);
 
   const results: { orderId: Hex; outcome: RefundOutcome }[] = [];

@@ -27,6 +27,17 @@ import { refundExpiredOrders, type RefundDeps } from "./refund.js";
 
 const STORE_PATH = process.env.STORE_PATH ?? ".oranj-swap/orders.json";
 
+// How much time must remain before an order's fillDeadline for the solver to
+// START delivering it. This covers the whole remaining lifecycle: deliver cBTC
+// (seconds) + accept (seconds–minutes) + attest + finalise (~1–2 min).
+//
+// HARD INVARIANT (the bug that stalled every live swap): this MUST be
+// comfortably LESS than the quote's fillDeadlineSeconds (config.ts). If the
+// margin is >= the fill window, every order is born already too close to its
+// deadline to ever be delivered. Current config: fill window 30m, margin 10m →
+// 20m of slack. Keep margin <= fillDeadlineSeconds / 3.
+const DELIVERY_MARGIN_SECONDS = 10 * 60;
+
 async function main(): Promise<void> {
   const env = loadEnv();
 
@@ -47,6 +58,30 @@ async function main(): Promise<void> {
     oracle: env.oracle,
     wbtc: env.wbtc,
   });
+
+  // FAIL-FAST on the timing contradiction that silently stalled every live swap:
+  // if the delivery margin is not comfortably below the order's fill window, no
+  // order can ever be delivered (born past the deliverable threshold). Refuse to
+  // start rather than accept orders we can never fill (and then refund).
+  if (DELIVERY_MARGIN_SECONDS >= cfg.fillDeadlineSeconds) {
+    console.error(
+      `[preflight] FATAL config: delivery margin (${DELIVERY_MARGIN_SECONDS}s) >= fill window ` +
+        `(${cfg.fillDeadlineSeconds}s). Every order would be unfillable. ` +
+        `Increase fillDeadlineSeconds or lower DELIVERY_MARGIN_SECONDS (keep margin <= fill/3).`,
+    );
+    process.exit(1);
+  }
+  if (cfg.fillDeadlineSeconds >= cfg.expiresSeconds) {
+    console.error(
+      `[preflight] FATAL config: fillDeadline (${cfg.fillDeadlineSeconds}s) >= expires ` +
+        `(${cfg.expiresSeconds}s). The escrow requires fillDeadline < expires.`,
+    );
+    process.exit(1);
+  }
+  console.log(
+    `[preflight] timing OK: fill ${cfg.fillDeadlineSeconds / 60}m, expires ${cfg.expiresSeconds / 60}m, ` +
+      `delivery margin ${DELIVERY_MARGIN_SECONDS / 60}m (${(cfg.fillDeadlineSeconds - DELIVERY_MARGIN_SECONDS) / 60}m slack).`,
+  );
 
   const canton = new CantonClient(
     {
@@ -130,13 +165,18 @@ async function main(): Promise<void> {
       // 2. deliver seen orders
       const delivered = await deliverSeenOrders(store, canton, {
         now,
-        minSecondsBeforeDeadline: 30 * 60, // 30 min margin for accept + settle
+        minSecondsBeforeDeadline: DELIVERY_MARGIN_SECONDS, // see invariant above
         cbtcDecimals: 8,
         // C3: optional total in-flight exposure cap (sats). Defense in depth on
         // top of the per-order cap + float bound. Set MAX_INFLIGHT_SATS to enable.
         maxInflightSats: process.env.MAX_INFLIGHT_SATS
           ? BigInt(process.env.MAX_INFLIGHT_SATS)
           : undefined,
+        // PRE-FLIGHT: never deliver cBTC unless the WBTC is securely claimable
+        // (Deposited + comfortable margin before expiry) → the two legs pass-or-
+        // fail together. 10 min margin so finalise can't lose to the refund window.
+        verifyClaimable: (orderId, expires) =>
+          settler.verifyClaimable(orderId, expires, now, 10 * 60),
       });
       logOutcomes("deliver", delivered.map((d) => ({ id: d.order.orderId, o: d.outcome.kind })));
 

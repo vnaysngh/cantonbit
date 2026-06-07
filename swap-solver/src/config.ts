@@ -87,14 +87,17 @@ export function makeNetworkConfig(params: {
     wbtc: getAddress(params.wbtc),
     cantonChainId: CANTON_CHAIN_BASE + CANTON_CHAIN_OFFSET[params.network],
     cantonSettlerId: CANTON_SETTLER_SENTINEL,
-    // A cross-chain fill (Canton delivery + accept) takes seconds-to-minutes, so
-    // these are deliberately tight: the user's locked WBTC should never be a
-    // day-long hostage on a stall. ~10m to fill, ~20m to expiry (when the user's
-    // refund unlocks and the watch loop auto-refunds). fillDeadline MUST be <
-    // expires. Overridable via env/CLI for testing. The escrow enforces no
-    // minimum, so short windows are safe.
-    fillDeadlineSeconds: params.fillDeadlineSeconds ?? 10 * 60,
-    expiresSeconds: params.expiresSeconds ?? 20 * 60,
+    // Order time windows. CRITICAL INVARIANT: fillDeadline must give the solver
+    // COMFORTABLY MORE time than its own delivery margin
+    // (DELIVERY_MARGIN_SECONDS in index.ts), or every order is born already too
+    // close to its deadline to ever be delivered (the bug that stalled live
+    // swaps: 10m fill window vs 30m delivery margin → unfillable). Budget:
+    //   deliver cBTC (secs) + accept (secs–mins) + attest + finalise (~1–2m).
+    // So: 30m to fill (margin is 10m → 20m of real slack), 45m to expiry (when
+    // the user's refund unlocks + the watch loop auto-refunds). fillDeadline MUST
+    // be < expires. Overridable via env/CLI. Keep fill > 3× the delivery margin.
+    fillDeadlineSeconds: params.fillDeadlineSeconds ?? 30 * 60,
+    expiresSeconds: params.expiresSeconds ?? 45 * 60,
   };
 }
 

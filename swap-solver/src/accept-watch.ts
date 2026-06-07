@@ -68,11 +68,53 @@ export async function resolveDelivery(
     return { kind: "failed", reason: "no canton party" };
   }
 
-  // This path only runs when the offer is READABLE (offerContractId set) — i.e.
-  // the receiver is on our participant. For unreadable cross-participant
-  // recipients, delivery.ts already collapses to `delivered` (the cBTC offer is
-  // sent; the user accepts in their own wallet) and never reaches here. So we
-  // only resolve readable offers via the receiver's update stream below.
+  // CROSS-PARTICIPANT path (the mainnet case): the receiver's offer isn't readable
+  // by our token (403), so we detect the accept from the SOLVER's OWN ACS — the
+  // pending TransferInstruction / locked holding for our input cids disappears
+  // once the user accepts (or rejects). Sender-readable, no 403. This is what lets
+  // us WAIT for the accept before finalising even when we can't read the receiver.
+  const cids = rec.inputHoldingCids;
+  if (cids && cids.length > 0) {
+    const accepted = await canton.isDeliveryAccepted(cids).catch(() => false);
+    if (accepted) {
+      // The pending transfer is gone → accepted (or rejected). We can't read the
+      // exact accept record-time cross-participant, so use submit time bounded by
+      // the deadline. If past the deadline, the float would have returned to us —
+      // treat as failed so we never finalise after fillDeadline.
+      if (params.now > rec.order.fillDeadline) {
+        // SECURITY (HIGH-1): the cBTC WAS accepted — mark cbtcAccepted so this is
+        // NEVER auto-refunded (that would give the user both legs). It can't
+        // finalise (past fillDeadline → proof invalid); it needs manual review.
+        store.update(orderId, {
+          status: "failed",
+          cbtcAccepted: true,
+          note: "accept detected but past fillDeadline — cannot finalise; MANUAL REVIEW (not refundable: cBTC delivered)",
+        });
+        return { kind: "failed", reason: "accepted/cleared past fillDeadline" };
+      }
+      const fillTimestamp = rec.fillTimestamp ?? params.now;
+      store.update(orderId, {
+        status: "delivered",
+        cbtcAccepted: true,
+        fillTimestamp,
+        note: `cBTC accept detected via solver ACS (cross-participant). updateId=${rec.cantonDeliveryRef}`,
+      });
+      return { kind: "delivered", fillTimestamp, recordTime: String(fillTimestamp) };
+    }
+    // Still pending. If past the fillDeadline, the swap can't complete — abandon
+    // so the user refunds (we never delivered-and-finalised one-sided).
+    if (params.now > rec.order.fillDeadline) {
+      store.update(orderId, {
+        status: "failed",
+        note: "cBTC offer unaccepted past fillDeadline (cross-participant) — user refunds",
+      });
+      return { kind: "failed", reason: "unaccepted past fillDeadline (xpart)" };
+    }
+    return { kind: "pending" };
+  }
+
+  // READABLE-offer path (receiver on our participant): resolve via the receiver's
+  // update stream. (Legacy / same-participant.)
   const resolution = await canton.resolveOffer({
     receiverParty: receiver,
     offerContractId: offerId,
@@ -106,15 +148,19 @@ export async function resolveDelivery(
 
   // Critical: the fill must be <= fillDeadline or the proof is invalid.
   if (fillTimestamp > rec.order.fillDeadline) {
+    // SECURITY (HIGH-1): cBTC WAS accepted (just too late to finalise). Mark
+    // cbtcAccepted so it's NEVER auto-refunded; needs manual review.
     store.update(orderId, {
       status: "failed",
-      note: `accepted too late: record-time ${fillTimestamp} > fillDeadline ${rec.order.fillDeadline}; cannot finalise, user will refund`,
+      cbtcAccepted: true,
+      note: `accepted too late: record-time ${fillTimestamp} > fillDeadline ${rec.order.fillDeadline}; cannot finalise — MANUAL REVIEW (not refundable: cBTC delivered)`,
     });
     return { kind: "failed", reason: "accepted after fillDeadline" };
   }
 
   store.update(orderId, {
     status: "delivered",
+    cbtcAccepted: true,
     fillTimestamp,
     note: `cBTC accepted by user at ${resolution.recordTime} (updateId=${resolution.updateId})`,
   });

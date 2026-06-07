@@ -63,14 +63,36 @@ test("sweep ignores terminal orders even if 'expired'", async () => {
   assert.equal(results.length, 0);
 });
 
-test("sweep targets expired non-terminal orders", async () => {
+test("sweep targets ONLY pre-delivery expired orders (seen/delivering)", async () => {
   const s = tmpStore();
   seed(s, "seen", NOW - 600);
   seed(s, "delivering", NOW - 600);
+  // SECURITY (HIGH-1): `delivered` must NOT be a candidate — its cBTC is already
+  // with the user. Seed one to prove it's excluded from the sweep.
   seed(s, "delivered", NOW - 600);
-  // These reach the chain call (the trap throws → caught → 'error' outcome). We
-  // only assert they were SELECTED as candidates, not that the refund succeeded.
   const results = await refundExpiredOrders(trapDeps(s), NOW);
-  assert.equal(results.length, 3);
+  // Only the 2 pre-delivery orders are selected; `delivered` is excluded.
+  assert.equal(results.length, 2);
   for (const r of results) assert.equal(r.outcome.kind, "error");
+});
+
+test("HIGH-1: an expired DELIVERED order is NEVER auto-refunded (would double-pay)", async () => {
+  const s = tmpStore();
+  const id = seed(s, "delivered", NOW - 600); // cBTC accepted, then expired
+  const results = await refundExpiredOrders(trapDeps(s), NOW);
+  // Not even selected as a candidate → no chain touch, no refund.
+  assert.equal(results.length, 0, "a delivered order must not be a refund candidate");
+  // And its status is untouched (still delivered, awaiting finalise/manual review).
+  assert.equal(s.get(id)!.status, "delivered");
+});
+
+test("HIGH-1: a 'failed' order whose cBTC was accepted is NOT refundable", async () => {
+  const { refundOrder } = await import("./refund.js");
+  const s = tmpStore();
+  const id = seed(s, "failed", NOW - 600);
+  s.update(id, { cbtcAccepted: true }); // accepted-but-too-late case
+  const rec = s.get(id)!;
+  const out = await refundOrder(rec, trapDeps(s), NOW);
+  assert.equal(out.kind, "error", "must refuse to refund a cbtcAccepted order");
+  assert.match((out as { message: string }).message, /already accepted/);
 });

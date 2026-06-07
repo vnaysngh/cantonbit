@@ -76,9 +76,32 @@ test("attestTuple mirrors the output exactly", () => {
 test("fillDeadline is strictly before expires", () => {
   const built = buildOrder(cfg(), req(), NOW);
   assert.ok(built.order.fillDeadline < built.order.expires);
-  // Tight cross-chain windows: ~10m to fill, ~20m to expiry (auto-refund unlocks).
-  assert.equal(built.order.fillDeadline, NOW + 10 * 60);
-  assert.equal(built.order.expires, NOW + 20 * 60);
+  // Windows must give the solver real slack to deliver: 30m to fill, 45m to
+  // expiry (auto-refund unlocks). See the timing invariant in index.ts — the
+  // fill window MUST exceed the solver's delivery margin, or orders are
+  // unfillable from birth (the bug that stalled every live swap).
+  assert.equal(built.order.fillDeadline, NOW + 30 * 60);
+  assert.equal(built.order.expires, NOW + 45 * 60);
+});
+
+test("INVARIANT: fill window comfortably exceeds the solver delivery margin", () => {
+  // The solver (index.ts) refuses to deliver unless DELIVERY_MARGIN_SECONDS (10m)
+  // remains before fillDeadline. If the fill window isn't well above that margin,
+  // no order can ever be delivered. Guard the relationship here so a future
+  // window change can't silently reintroduce the unfillable-order bug.
+  const DELIVERY_MARGIN_SECONDS = 10 * 60;
+  const built = buildOrder(cfg(), req(), NOW);
+  const fillWindow = built.order.fillDeadline - NOW;
+  assert.ok(
+    fillWindow > DELIVERY_MARGIN_SECONDS,
+    `fill window ${fillWindow}s must exceed delivery margin ${DELIVERY_MARGIN_SECONDS}s`,
+  );
+  // Keep healthy slack (margin <= fill/3) so brief solver downtime can't make
+  // orders unfillable.
+  assert.ok(
+    DELIVERY_MARGIN_SECONDS <= fillWindow / 3,
+    `delivery margin ${DELIVERY_MARGIN_SECONDS}s should be <= fill window / 3 (${fillWindow / 3}s)`,
+  );
 });
 
 test("canton chainId is a high non-colliding sentinel, per-network distinct", () => {

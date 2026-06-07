@@ -36,6 +36,17 @@ export interface DeliveryParams {
    * caps the blast radius of any unforeseen accounting error to a known limit.
    */
   maxInflightSats?: bigint;
+  /**
+   * PRE-FLIGHT: verify the WBTC collection is GUARANTEED before we deliver the
+   * cBTC, so the two legs pass-or-fail together (never user-gets-cBTC-but-we-
+   * lose-WBTC). Returns ok=false to ABORT the delivery (we never hand over cBTC
+   * we can't get paid for). Provided by the solver (it has the escrow client).
+   * If undefined, delivery proceeds without the guarantee (e.g. tests).
+   */
+  verifyClaimable?: (
+    orderId: Hex,
+    expires: number,
+  ) => Promise<{ ok: true } | { ok: false; reason: string }>;
 }
 
 export type DeliveryOutcome =
@@ -76,14 +87,27 @@ export async function startDelivery(
   const amountBtc = formatUnits(BigInt(out.amount), params.cbtcDecimals);
 
   // The full Canton party the solver must deliver to. The order only commits to
-  // keccak256(party) (output.recipient); the preimage is supplied off-chain and
-  // stored on the record. Refuse to deliver if we don't have a party...
-  const cantonParty = rec.cantonParty;
+  // keccak256(party) (output.recipient); the preimage is supplied off-chain. It
+  // normally lives on the record (set by POST /orders), but if it's missing —
+  // e.g. the order was discovered on-chain by the watcher, or a store write was
+  // lost mid-submit — RECOVER it from the party-by-orderId map (written at quote
+  // time). This is what makes an order deliverable even after a crash between
+  // openFor and the store write. Refuse to deliver only if neither has it...
+  let cantonParty = rec.cantonParty;
   if (!cantonParty) {
-    return { kind: "skipped", reason: "no Canton party preimage yet (awaiting off-chain request match)" };
+    const recovered = store.recallParty(orderId);
+    if (recovered) {
+      cantonParty = recovered;
+      // Persist back onto the record so subsequent ticks don't re-recover.
+      store.update(orderId, { cantonParty: recovered, note: "cantonParty recovered from quote-time map" });
+    }
+  }
+  if (!cantonParty) {
+    return { kind: "skipped", reason: "no Canton party preimage (not on record, none remembered at quote time)" };
   }
   // ...and SECURITY-CRITICAL: the preimage must hash to the committed recipient.
-  // Otherwise a wrong/malicious party could redirect the cBTC.
+  // Otherwise a wrong/malicious party could redirect the cBTC. This re-checks the
+  // RECOVERED party too — a poisoned recovery map can't redirect cBTC.
   if (!verifyCantonParty(cantonParty, out.recipient)) {
     return fail(store, orderId, "Canton party does not match the on-chain recipient commitment — refusing to deliver");
   }
@@ -115,6 +139,20 @@ export async function startDelivery(
     }
   }
 
+  // --- GUARD 4 (PRE-FLIGHT): WBTC collection must be GUARANTEED before we hand
+  // over the cBTC, so the two legs pass-or-fail together. If the WBTC isn't
+  // securely claimable (not Deposited, or too close to the refund window), we
+  // ABORT — we never deliver cBTC we can't get paid for. This is the safeguard
+  // against "user gets cBTC but we lose the WBTC". ---
+  if (params.verifyClaimable) {
+    const v = await params.verifyClaimable(orderId, rec.order.expires);
+    if (!v.ok) {
+      // Not safe to deliver yet — leave as `seen` to retry (transient: e.g. the
+      // Deposit not yet visible) or it'll eventually expire + refund the user.
+      return { kind: "skipped", reason: `pre-flight: WBTC not securely claimable — ${v.reason}` };
+    }
+  }
+
   // --- CONCURRENCY CLAIM (C4): atomically transition seen → delivering BEFORE
   // the async createOffer. If a racing caller (API + watch loop, or two ticks)
   // already claimed it, this returns false and we skip — preventing the same
@@ -131,7 +169,7 @@ export async function startDelivery(
   // --- Create the offer (Phase 1). ---
   try {
     const holdings = await canton.getHoldings(canton.solverParty);
-    const { updateId, offerContractId, autoAccepted } = await canton.createOffer({
+    const { updateId, offerContractId, autoAccepted, inputHoldingCids } = await canton.createOffer({
       receiverParty: cantonParty,
       amountBtc,
       inputHoldings: holdings,
@@ -140,37 +178,35 @@ export async function startDelivery(
       commandId: `deliver-${orderId}`,
     });
 
-    // Two cases collapse straight to `delivered` (we don't wait for a separate
-    // accept event we can observe):
-    //
-    //  (a) autoAccepted — the receiver wallet auto-accepted; the offer was
-    //      consumed on creation. Delivery is final.
-    //  (b) offer created but we CAN'T track the accept (offerContractId == "")
-    //      — the receiver is on another participant our token can't read. By
-    //      design we DON'T try to detect the cross-participant accept; the cBTC
-    //      transfer offer has been SENT from our float, and the user accepts it
-    //      in their own wallet. We treat delivery as done and finalise; the note
-    //      tells the user to check their wallet.
-    //
-    // fillTimestamp = submit time (the offer's creation record-time on our side).
-    if (autoAccepted || !offerContractId) {
-      const note = autoAccepted
-        ? `auto-accepted on delivery (updateId=${updateId})`
-        : `cBTC transfer SENT to the recipient — they must accept it in their wallet ` +
-          `(auto-accept off). updateId=${updateId}`;
+    // ONLY a confirmed auto-accept collapses straight to `delivered` — the offer
+    // was CONSUMED on creation (the pending transfer for our inputs is already
+    // gone), so the cBTC is accepted and delivery is final.
+    if (autoAccepted) {
       store.update(orderId, {
         status: "delivered",
+        cbtcAccepted: true, // SECURITY (HIGH-1): cBTC handed over → never auto-refund
         cantonDeliveryRef: updateId,
         fillTimestamp: params.now,
-        note,
+        note: `auto-accepted on delivery (updateId=${updateId})`,
+        inputHoldingCids,
       });
       return { kind: "delivered", updateId, fillTimestamp: params.now };
     }
 
+    // Otherwise the offer is PENDING the user's accept. We must WAIT for it before
+    // finalising (else we'd take the WBTC before the user has the cBTC). We track
+    // the accept from the SOLVER's OWN ACS (isDeliveryAccepted, sender-readable,
+    // no 403) using inputHoldingCids — works even cross-participant where the
+    // receiver's offer isn't readable. resolveDeliveringOrders advances it to
+    // `delivered` once the pending transfer disappears (accepted), or `failed`
+    // past the fillDeadline (then the user refunds).
     store.update(orderId, {
       status: "delivering",
-      cantonDeliveryRef: offerContractId,
-      note: `offer created (updateId=${updateId})`,
+      cantonDeliveryRef: offerContractId || updateId,
+      inputHoldingCids,
+      note: offerContractId
+        ? `offer created (updateId=${updateId})`
+        : `cBTC offer sent — awaiting accept (cross-participant; tracked via float). updateId=${updateId}`,
     });
     return { kind: "delivering", offerContractId, updateId };
   } catch (e) {

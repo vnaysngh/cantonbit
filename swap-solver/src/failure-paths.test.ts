@@ -56,6 +56,15 @@ function seedSeen(store: OrderStore, o: SerializedOrder): Hex {
   return id;
 }
 
+/** Seed an order whose record LACKS cantonParty (the crash-between-openFor-and-
+ *  store-write case), optionally with the party remembered in the recovery map. */
+function seedSeenNoParty(store: OrderStore, o: SerializedOrder, remember: boolean): Hex {
+  const id = pad(`0x${Math.floor(Math.random() * 1e9).toString(16)}`, { size: 32 }) as Hex;
+  store.insertSeen(id, 100, o); // NO cantonParty on the record
+  if (remember) store.rememberParty(id, PARTY); // but remembered at quote time
+  return id;
+}
+
 // ---------- C4: concurrency / double-delivery race ----------
 
 test("C4: two concurrent startDelivery on the SAME order — does the status guard prevent double-delivery?", async () => {
@@ -94,6 +103,86 @@ test("C4b: an already-delivering order is SKIPPED (no re-delivery)", async () =>
   store.update(id, { status: "delivering" }); // already in progress
   const out = await startDelivery(store, canton, id, params);
   assert.equal(out.kind, "skipped", "a non-seen order must be skipped");
+});
+
+// ---------- RECOVERY: cantonParty preimage durability (the real prod bug) ----------
+// This is the bug that locked a real user's WBTC: POST /orders submitted openFor
+// (locked the WBTC), then the process was interrupted BEFORE the store write, so
+// the order had no cantonParty and could never be delivered. The fix: remember
+// the party at QUOTE time; the delivery path recovers it.
+
+test("RECOVERY: an order with NO cantonParty on record IS delivered when the party was remembered at quote time", async () => {
+  const store = tmpStore();
+  let createCalls = 0;
+  const canton = mockCanton({ floatSats: 100_000n, holdings: [{ contractId: "h1", amount: "1", createdEventBlob: "b", locked: false }], onCreate: () => { createCalls++; } });
+  // Crash case: record lacks cantonParty, but it was remembered at quote time.
+  const id = seedSeenNoParty(store, order("1000"), /* remember */ true);
+  assert.equal(store.get(id)!.cantonParty, undefined, "precondition: record has no cantonParty");
+
+  const out = await startDelivery(store, canton, id, params);
+
+  assert.ok(["delivering", "delivered"].includes((out as any).kind), `must deliver via recovery, got ${(out as any).kind}`);
+  assert.equal(createCalls, 1, "the cBTC offer must be created once the party is recovered");
+  // The recovered party is written back onto the record so later ticks don't re-recover.
+  assert.equal(store.get(id)!.cantonParty, PARTY, "recovered party persisted back onto the record");
+  console.log("[RECOVERY] ✓ order with lost cantonParty was recovered from the quote-time map and delivered.");
+});
+
+test("RECOVERY: an order with NO cantonParty AND none remembered is SKIPPED (not delivered blind)", async () => {
+  const store = tmpStore();
+  let createCalls = 0;
+  const canton = mockCanton({ floatSats: 100_000n, holdings: [{ contractId: "h1", amount: "1", createdEventBlob: "b", locked: false }], onCreate: () => { createCalls++; } });
+  const id = seedSeenNoParty(store, order("1000"), /* remember */ false);
+
+  const out = await startDelivery(store, canton, id, params);
+
+  assert.equal(out.kind, "skipped", "must NOT deliver without a party preimage from anywhere");
+  assert.equal(createCalls, 0, "no cBTC offer when the party can't be recovered");
+  console.log("[RECOVERY] ✓ no blind delivery when the party is truly unknown.");
+});
+
+test("RECOVERY: a POISONED recovery map (wrong party) is REJECTED by the recipient-hash check", async () => {
+  const store = tmpStore();
+  let createCalls = 0;
+  const canton = mockCanton({ floatSats: 100_000n, holdings: [{ contractId: "h1", amount: "1", createdEventBlob: "b", locked: false }], onCreate: () => { createCalls++; } });
+  const id = pad(`0x${Math.floor(Math.random() * 1e9).toString(16)}`, { size: 32 }) as Hex;
+  store.insertSeen(id, 100, order("1000")); // recipient commits to PARTY
+  store.rememberParty(id, "attacker::1220dead"); // but the map says a DIFFERENT party
+
+  const out = await startDelivery(store, canton, id, params);
+
+  assert.equal(out.kind, "failed", "a recovered party that doesn't hash to the commitment must be rejected");
+  assert.equal(createCalls, 0, "no cBTC offer when the recovered party is wrong (no redirect)");
+  console.log("[RECOVERY] ✓ poisoned recovery map can't redirect cBTC — recipient-hash check holds.");
+});
+
+// ---------- PRE-FLIGHT: WBTC must be claimable before delivering cBTC ----------
+
+test("PRE-FLIGHT: aborts delivery when WBTC is NOT securely claimable", async () => {
+  const store = tmpStore();
+  let createCalls = 0;
+  const canton = mockCanton({ floatSats: 100_000n, holdings: [{ contractId: "h1", amount: "1", createdEventBlob: "b", locked: false }], onCreate: () => { createCalls++; } });
+  const id = seedSeen(store, order("1000"));
+  const out = await startDelivery(store, canton, id, {
+    ...params,
+    verifyClaimable: async () => ({ ok: false, reason: "WBTC not Deposited" }),
+  });
+  assert.equal(out.kind, "skipped", "must NOT deliver when WBTC isn't claimable");
+  assert.equal(createCalls, 0, "must NOT create the cBTC offer when pre-flight fails");
+  // order stays 'seen' (not delivering) so nothing is half-done.
+  assert.equal(store.get(id)!.status, "seen");
+  console.log("[PRE-FLIGHT] ✓ delivery aborted; no cBTC sent when WBTC not guaranteed.");
+});
+
+test("PRE-FLIGHT: proceeds when WBTC IS claimable", async () => {
+  const store = tmpStore();
+  const canton = mockCanton({ floatSats: 100_000n, holdings: [{ contractId: "h1", amount: "1", createdEventBlob: "b", locked: false }] });
+  const id = seedSeen(store, order("1000"));
+  const out = await startDelivery(store, canton, id, {
+    ...params,
+    verifyClaimable: async () => ({ ok: true }),
+  });
+  assert.ok(["delivering", "delivered"].includes((out as any).kind), "delivers when WBTC is claimable");
 });
 
 // ---------- C3: total in-flight exposure cap ----------

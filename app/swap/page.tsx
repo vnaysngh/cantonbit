@@ -6,6 +6,11 @@ import { ChainIcon } from "@/components/ChainIcon";
 import { useEvmWallet } from "@/hooks/useEvmWallet";
 import { useWallet } from "@/hooks/useWallet";
 import { useBalance } from "@/hooks/useBalance";
+import {
+  hasCbtcAutoAccept,
+  swapSessionActive,
+  mintSwapSession
+} from "@/lib/swap-accept";
 import { truncatePartyId } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import {
@@ -14,10 +19,16 @@ import {
   getOrder,
   refundOrder,
   isTerminal,
-  STATUS_LABEL,
+  SWAP_STEPS,
+  STEP_FOR_PROGRESS,
+  deriveProgress,
+  PROGRESS_COPY,
+  PENDING_BUFFER_SECONDS,
+  getSwapErrorMessage,
+  isUserRejection,
+  ApiError,
   type QuoteResponse,
-  type OrderView,
-  type SwapStatus
+  type OrderView
 } from "@/lib/swap-api";
 import {
   PERMIT2_ADDRESS,
@@ -40,15 +51,6 @@ type Stage =
   | { kind: "submitting"; quote: QuoteResponse }
   | { kind: "tracking"; orderId: string; order: OrderView | null }
   | { kind: "error"; message: string };
-
-/** The ordered set of statuses for the progress display. */
-const FLOW: SwapStatus[] = [
-  "seen",
-  "delivering",
-  "delivered",
-  "attested",
-  "finalised"
-];
 
 /** localStorage key for resuming an in-flight order across a page refresh. */
 const ACTIVE_ORDER_KEY = "oranj.swap.activeOrder";
@@ -110,6 +112,28 @@ export default function SwapPage() {
     return () => { cancelled = true; };
   }, [evm.account, wrongChain, refreshBalance]);
 
+  // --- CBTC auto-accept (preapproval) gate. With it ON, the delivered CBTC
+  //     auto-accepts → solver finalises safely (accept-first, pay-second).
+  //     Checked on the Review-swap click (the JWT session already exists by then,
+  //     so NO signature). false → show the enable-auto-accept popup. ---
+  const [autoAccept, setAutoAccept] = useState<boolean | null>(null);
+
+  // --- SIGN PREREQUISITE. Before any swapping, we need a Loop JWT session (one
+  //     "Exchange API Key" signature). This is a PREREQUISITE shown as our own
+  //     popup on entering the swap screen — NOT something that fires on the
+  //     Review-swap click. null = checking, false = needs signing (show popup),
+  //     true = ready. signing = the sign action is in flight. ---
+  const [sessionReady, setSessionReady] = useState<boolean | null>(null);
+  const [signing, setSigning] = useState(false);
+  const [signError, setSignError] = useState<string | null>(null);
+
+  // --- ENABLE-AUTO-ACCEPT popup. Shown when Review finds preapproval OFF. The
+  //     CTA first sends the user to Loop settings; on return it flips to a
+  //     "confirm" CTA that re-checks the status. ---
+  const [showEnablePopup, setShowEnablePopup] = useState(false);
+  const [enableVisited, setEnableVisited] = useState(false); // user went to settings
+  const [enableChecking, setEnableChecking] = useState(false);
+
   // --- cleanup polling on unmount ---
   useEffect(
     () => () => {
@@ -117,6 +141,48 @@ export default function SwapPage() {
     },
     []
   );
+
+  // --- SIGN PREREQUISITE: when the swap screen is open and the Loop wallet is
+  //     connected, check whether we already have a valid JWT session. If yes →
+  //     ready. If no → the sign popup is shown (sessionReady=false), blocking the
+  //     form until the user signs. This is a pure probe (NO signature). ---
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      if (!loopConnected || !wallet.provider) {
+        if (!cancelled) setSessionReady(null);
+        return;
+      }
+      if (!cancelled) setSessionReady(null); // checking
+      const active = await swapSessionActive();
+      if (!cancelled) setSessionReady(active);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [loopConnected, wallet.provider]);
+
+  // --- The explicit "Sign in your Loop wallet" action (driven by the prerequisite
+  //     popup CTA). One signature → mints the JWT session → unblocks the form. ---
+  const handleSign = useCallback(async () => {
+    if (!wallet.provider) return;
+    setSignError(null);
+    setSigning(true);
+    try {
+      const ok = await mintSwapSession(wallet.provider);
+      setSessionReady(ok);
+      if (!ok) {
+        setSignError(
+          "Signature was declined or couldn't be verified. Please try again to continue."
+        );
+      }
+    } catch {
+      setSessionReady(false);
+      setSignError("Something went wrong while signing. Please try again.");
+    } finally {
+      setSigning(false);
+    }
+  }, [wallet.provider]);
 
   const fail = (message: string) => setStage({ kind: "error", message });
 
@@ -156,6 +222,37 @@ export default function SwapPage() {
       return;
     }
 
+    // PREREQUISITE: a JWT session must already exist (the user signed once on
+    // entering the swap screen). If somehow not ready, surface the sign popup
+    // instead of quoting — never sign implicitly on this click.
+    if (sessionReady !== true) {
+      setSessionReady(false); // shows the sign popup
+      return;
+    }
+
+    // GATE: CBTC auto-accept must be ON, else the swap would finalise (take the
+    // WBTC) before the user accepts the CBTC. The session already exists, so this
+    // reads the preapproval with NO signature. Outcomes:
+    //   true  → proceed to quote.
+    //   false → preapproval OFF → open the enable-auto-accept popup.
+    //   null  → couldn't read (session expired mid-flow) → show error.
+    if (wallet.provider) {
+      setStage({ kind: "quoting" }); // brief "Checking…" during the read
+      const ok = await hasCbtcAutoAccept(wallet.provider);
+      setAutoAccept(ok);
+      if (ok === false) {
+        setStage({ kind: "idle" });
+        setEnableVisited(false);
+        setShowEnablePopup(true); // popup with the "enable in Loop settings" CTA
+        return;
+      }
+      if (ok === null) {
+        setStage({ kind: "idle" });
+        setSessionReady(false); // likely the session lapsed — re-show the sign gate
+        return;
+      }
+    }
+
     setStage({ kind: "quoting" });
     try {
       const quote = await getQuote({
@@ -168,7 +265,37 @@ export default function SwapPage() {
     } catch (e) {
       fail(e instanceof Error ? e.message : "Quote failed.");
     }
-  }, [evm.account, destinationParty, amount, refreshBalance]);
+  }, [evm.account, destinationParty, amount, refreshBalance, wallet.provider, sessionReady]);
+
+  // --- ENABLE-AUTO-ACCEPT popup actions ---
+  // CTA 1: open Loop settings in a new tab and flip the CTA to "confirm".
+  const handleOpenLoopSettings = useCallback(() => {
+    setEnableVisited(true);
+    window.open("https://cantonloop.com/settings", "_blank", "noopener,noreferrer");
+  }, []);
+
+  // CTA 2 (after returning): re-check the preapproval status. ON → close popup,
+  // proceed to quote. Still OFF → keep the popup with a "still off" hint.
+  const handleConfirmAutoAccept = useCallback(async () => {
+    if (!wallet.provider) return;
+    setEnableChecking(true);
+    try {
+      const ok = await hasCbtcAutoAccept(wallet.provider);
+      setAutoAccept(ok);
+      if (ok === true) {
+        setShowEnablePopup(false);
+        void handleQuote(); // continue the swap now that it's enabled
+      }
+      // ok === false → stay open; the popup shows it's still off.
+      // ok === null → session lapsed; surface the sign gate.
+      if (ok === null) {
+        setShowEnablePopup(false);
+        setSessionReady(false);
+      }
+    } finally {
+      setEnableChecking(false);
+    }
+  }, [wallet.provider, handleQuote]);
 
   // --- 5. poll status until terminal (defined before handleConfirm, which calls it) ---
   const startTracking = useCallback((orderId: string) => {
@@ -180,16 +307,56 @@ export default function SwapPage() {
     }
     setStage({ kind: "tracking", orderId, order: null });
     if (pollRef.current) clearInterval(pollRef.current);
+
+    const stopPolling = () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+    // Forget a dead order so it never haunts a future page load (the ghost
+    // "Swapping…" bug). Mirrors how CoW prunes orders the backend no longer
+    // knows / that have expired — a tracked order must always resolve to a
+    // definite end state, never spin forever.
+    const forget = () => {
+      try { localStorage.removeItem(ACTIVE_ORDER_KEY); } catch { /* ignore */ }
+    };
+
+    // Tolerate a brief window right after submit where the solver may 404 the
+    // order before it's registered; only give up after several consecutive 404s.
+    let notFoundStreak = 0;
+    const NOT_FOUND_GIVEUP = 4; // ~16s at the 4s cadence
+
     const tick = async () => {
       try {
         const order = await getOrder(orderId);
+        notFoundStreak = 0;
         setStage({ kind: "tracking", orderId, order });
-        if (isTerminal(order.status) && pollRef.current) {
-          clearInterval(pollRef.current);
-          pollRef.current = null;
+        if (isTerminal(order.status)) {
+          stopPolling();
+          if (order.status === "refunded" || order.status === "failed") forget();
+          // (finalised stays in localStorage only until the user hits "New swap";
+          //  the resume effect treats a terminal order as done, not in-flight.)
         }
-      } catch {
-        /* keep polling */
+      } catch (e) {
+        // A 404 means the solver doesn't know this order. Right after submit that
+        // can be transient; sustained, it means the order is gone (e.g. it
+        // expired + the solver pruned it, or a store reset). Resolve to a clean
+        // end state instead of spinning "Swapping…" forever.
+        if (e instanceof ApiError && e.status === 404) {
+          notFoundStreak += 1;
+          if (notFoundStreak >= NOT_FOUND_GIVEUP) {
+            stopPolling();
+            forget();
+            setStage({
+              kind: "error",
+              message:
+                "This order is no longer being tracked (it may have expired and refunded). Your WBTC is safe — start a new swap.",
+            });
+          }
+          return;
+        }
+        // Any other (network/5xx) error: keep polling — transient.
       }
     };
     void tick();
@@ -239,9 +406,9 @@ export default function SwapPage() {
         }
       } catch (e) {
         retry(
-          isUserReject(e)
+          isUserRejection(e)
             ? "Approval cancelled. Approve WBTC to continue."
-            : `Approve failed: ${errMsg(e)}`
+            : getSwapErrorMessage(e)
         );
         return;
       }
@@ -270,9 +437,9 @@ export default function SwapPage() {
         });
       } catch (e) {
         retry(
-          isUserReject(e)
+          isUserRejection(e)
             ? "Signature cancelled. Sign to lock your WBTC and start the swap."
-            : `Signature failed: ${errMsg(e)}`
+            : getSwapErrorMessage(e)
         );
         return;
       }
@@ -289,7 +456,7 @@ export default function SwapPage() {
       } catch (e) {
         // Submit failure is rarely user-recoverable (already-signed), so surface it
         // but keep the quote so they can retry the submit.
-        retry(`Couldn't submit the swap: ${errMsg(e)}. Try again.`);
+        retry(`${getSwapErrorMessage(e)} Please try again.`);
       }
     },
     [evm, startTracking]
@@ -321,11 +488,16 @@ export default function SwapPage() {
         if (order) setStage({ kind: "tracking", orderId, order });
         return res.refundTx ?? null;
       } catch (e) {
-        return `__error__:${errMsg(e)}`;
+        return `__error__:${getSwapErrorMessage(e)}`;
       }
     },
     []
   );
+
+  // NOTE: the cBTC accept is detected AUTOMATICALLY by the solver (accept-watch
+  // advances delivering→delivered on its own once the auto-accept lands), so the
+  // UI no longer needs a manual "confirm delivery" step. The mandatory auto-accept
+  // gate guarantees the accept fires without user action.
 
   const reset = () => {
     if (pollRef.current) clearInterval(pollRef.current);
@@ -377,7 +549,17 @@ export default function SwapPage() {
         onClick: wallet.connectLoop,
         disabled: wallet.loopConnecting || !wallet.loopReady
       };
+    } else if (sessionReady !== true) {
+      // PREREQUISITE not met: need the one-time signature. The button opens the
+      // sign popup (or shows "Checking…" while the initial probe runs).
+      primary = {
+        label: sessionReady === null ? "Checking…" : "Sign to continue",
+        onClick: () => setSessionReady(false),
+        disabled: sessionReady === null
+      };
     } else {
+      // Session ready. Review checks auto-accept (no signature) then quotes; if
+      // auto-accept is OFF it opens the enable popup.
       primary = {
         label: stage.kind === "quoting" ? "Getting quote…" : "Review swap",
         onClick: handleQuote,
@@ -504,6 +686,28 @@ export default function SwapPage() {
             stage.kind === "quoted" && handleConfirm(stage.quote)
           }
           onClose={reset}
+        />
+      )}
+
+      {/* SIGN PREREQUISITE popup — shown when connected but no JWT session yet.
+          Blocks the swap until the user signs once in their Loop wallet. */}
+      {loopConnected && sessionReady === false && stage.kind !== "tracking" && (
+        <SignGateModal
+          signing={signing}
+          error={signError}
+          onSign={handleSign}
+        />
+      )}
+
+      {/* ENABLE-AUTO-ACCEPT popup — shown when Review found preapproval OFF. */}
+      {showEnablePopup && (
+        <EnableAutoAcceptModal
+          visited={enableVisited}
+          checking={enableChecking}
+          stillOff={enableVisited && autoAccept === false}
+          onOpenSettings={handleOpenLoopSettings}
+          onConfirm={handleConfirmAutoAccept}
+          onClose={() => setShowEnablePopup(false)}
         />
       )}
     </div>
@@ -759,17 +963,21 @@ function TrackingView({
     return () => clearInterval(t);
   }, []);
 
-  const status = order?.status;
-  const done = status === "finalised";
-  const refunded = status === "refunded";
-  const failed = status === "failed";
+  // Derive the user-facing progress state from the order + live clock — the
+  // analogue of CoW's getProgressBarStepName. This applies the grace buffer (no
+  // premature "expired") and the delayed threshold (no frozen spinner).
+  const progress = order ? deriveProgress(order, now) : "initial";
+  const done = progress === "finished";
+  const refunded = progress === "refunded";
+  const failed = progress === "failed";
   const failedOrRefunded = failed || refunded;
-  const currentIdx = status ? FLOW.indexOf(status) : 0;
+  // Active step in the 3-step user-facing flow.
+  const stepIdx = STEP_FOR_PROGRESS[progress];
 
-  // The order is past its refund window and the WBTC hasn't been released.
-  const expired = !!order && now > order.expires && !done && !refunded;
-  // The user must accept the incoming CBTC in their Loop wallet while delivering.
-  const awaitingAccept = status === "delivering";
+  // Refund is offered once the order is expired/failed and the WBTC isn't back.
+  // Mirror CoW: only after the grace buffer past `expires` (avoid the solver race).
+  const expired =
+    !!order && now > order.expires + PENDING_BUFFER_SECONDS && !done && !refunded;
 
   // Amounts for the receipt header (fall back to dashes if not yet loaded).
   const wbtcAmt = order?.wbtcAmount ? formatWbtc(BigInt(order.wbtcAmount)) : null;
@@ -789,14 +997,21 @@ function TrackingView({
     setTimeout(() => setCopied(false), 1500);
   };
 
-  // Hero state: icon, ring color, and headline that summarizes the whole swap.
-  const hero = done
-    ? { icon: "check", tone: "text-green-600", ring: "bg-green-500/10", title: "Swap complete" }
-    : refunded
-      ? { icon: "undo", tone: "text-on-surface-variant", ring: "bg-muted", title: "Refunded" }
-      : failed
-        ? { icon: "priority_high", tone: "text-destructive", ring: "bg-destructive/10", title: "Swap didn’t complete" }
-        : { icon: null, tone: "text-primary", ring: "bg-primary/10", title: "Swapping…" };
+  // Hero icon/tone per progress state; the title + caption come from PROGRESS_COPY
+  // (the single source of CoW-style wording).
+  const heroVisual: Record<
+    typeof progress,
+    { icon: string | null; tone: string; ring: string }
+  > = {
+    initial: { icon: null, tone: "text-primary", ring: "bg-primary/10" },
+    delivering: { icon: null, tone: "text-primary", ring: "bg-primary/10" },
+    delayed: { icon: null, tone: "text-primary", ring: "bg-primary/10" },
+    finished: { icon: "check", tone: "text-green-600", ring: "bg-green-500/10" },
+    refunded: { icon: "undo", tone: "text-on-surface-variant", ring: "bg-muted" },
+    expired: { icon: "priority_high", tone: "text-destructive", ring: "bg-destructive/10" },
+    failed: { icon: "priority_high", tone: "text-destructive", ring: "bg-destructive/10" },
+  };
+  const hero = { ...heroVisual[progress], ...PROGRESS_COPY[progress] };
 
   return (
     <div className="flex flex-col gap-4">
@@ -814,9 +1029,8 @@ function TrackingView({
           </span>
           <div>
             <div className="text-base font-semibold text-foreground">{hero.title}</div>
-            {status && (
-              <div className="text-xs text-muted-foreground">{STATUS_LABEL[status]}</div>
-            )}
+            {/* CoW-style sub-caption — generic + reassuring, never internal jargon. */}
+            <div className="text-xs text-muted-foreground">{hero.caption}</div>
           </div>
         </div>
         <div className="flex items-center justify-between gap-3 border-t border-foreground/10 pt-3">
@@ -833,15 +1047,16 @@ function TrackingView({
         </div>
       </div>
 
-      {/* Vertical stepper with a connecting rail. */}
+      {/* Vertical stepper — THREE user-facing steps (not the internal legs). The
+          active step is derived from the backend status via STEP_FOR_STATUS. */}
       <div className="px-1">
-        {FLOW.map((s, i) => {
-          const reached = currentIdx >= i && !failedOrRefunded;
-          const completed = reached && (currentIdx > i || done);
-          const active = currentIdx === i && !done && !failedOrRefunded;
-          const last = i === FLOW.length - 1;
+        {SWAP_STEPS.map((label, i) => {
+          const reached = stepIdx >= i && !failedOrRefunded;
+          const completed = reached && (stepIdx > i || done);
+          const active = stepIdx === i && !done && !failedOrRefunded;
+          const last = i === SWAP_STEPS.length - 1;
           return (
-            <div key={s} className="flex gap-3">
+            <div key={label} className="flex gap-3">
               {/* node + rail */}
               <div className="flex flex-col items-center">
                 <span
@@ -860,7 +1075,7 @@ function TrackingView({
                   <span
                     className={cn(
                       "my-0.5 w-0.5 flex-1 rounded-full",
-                      currentIdx > i && !failedOrRefunded ? "bg-primary" : "bg-muted"
+                      stepIdx > i && !failedOrRefunded ? "bg-primary" : "bg-muted"
                     )}
                   />
                 )}
@@ -876,7 +1091,7 @@ function TrackingView({
                         : "text-muted-foreground"
                   }
                 >
-                  {STATUS_LABEL[s]}
+                  {label}
                 </span>
                 {active && <span className="ml-1 animate-pulse text-primary">●</span>}
               </div>
@@ -885,26 +1100,10 @@ function TrackingView({
         })}
       </div>
 
-      {/* Action prompt: the user must accept the CBTC in their Loop wallet. */}
-      {awaitingAccept && (
-        <div className="rounded-xl border border-primary/30 bg-primary/10 p-3 text-sm text-foreground">
-          <span className="font-medium">
-            Accept the incoming CBTC in your Loop wallet
-          </span>
-          {" — "}the swap completes once you do. Open your Loop wallet to
-          confirm the transfer.
-        </div>
-      )}
-
       {/* Success detail. */}
       {done && (
         <div className="rounded-xl border border-green-500/30 bg-green-500/10 p-3 text-sm text-foreground">
-          Your WBTC is settled and the CBTC has been sent to your Loop wallet.
-          <div className="mt-1 text-xs text-muted-foreground">
-            Open your Loop wallet and{" "}
-            <span className="font-medium">accept the incoming CBTC</span> if it
-            isn’t auto-accepted.
-          </div>
+          Your CBTC has landed in your Loop wallet and the swap is settled.
         </div>
       )}
 
@@ -979,22 +1178,152 @@ function TrackingView({
   );
 }
 
+/**
+ * SIGN PREREQUISITE modal. Before swapping, the user signs ONE message in their
+ * Loop wallet so we can read their auto-accept setting + delivery status. This is
+ * a prerequisite — shown on entering the swap screen, NOT on the Review click. It
+ * can't be dismissed (the swap can't proceed without it); the only action is to
+ * sign (or it stays until they do).
+ */
+function SignGateModal({
+  signing,
+  error,
+  onSign
+}: {
+  signing: boolean;
+  error: string | null;
+  onSign: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      role="dialog"
+      aria-modal="true"
+    >
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
+      <div className="relative w-full max-w-[440px] rounded-3xl border border-foreground/10 bg-card p-6 shadow-xl">
+        <div className="mb-3 flex size-11 items-center justify-center rounded-2xl bg-primary/10">
+          <span className="material-symbols-outlined text-[24px] text-primary">
+            encrypted
+          </span>
+        </div>
+        <h2 className="text-lg font-semibold text-foreground">
+          One quick signature to continue
+        </h2>
+        <p className="mt-2 text-sm text-on-surface-variant">
+          Sign a message in your Loop wallet so Oranj can confirm your swap
+          settings and track delivery. It&rsquo;s a one-time signature and{" "}
+          <span className="font-medium text-foreground">moves no funds</span>.
+        </p>
+
+        {error && (
+          <div className="mt-4 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+            {error}
+          </div>
+        )}
+
+        <button
+          onClick={onSign}
+          disabled={signing}
+          className="mt-5 w-full rounded-2xl bg-primary py-4 text-base font-semibold text-on-primary transition-all hover:opacity-90 active:scale-[0.99] disabled:opacity-50"
+        >
+          {signing ? "Check your Loop wallet…" : "Sign in Loop wallet"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * ENABLE-AUTO-ACCEPT modal. Shown when Review finds cBTC auto-accept is OFF —
+ * which would let the swap take the user's WBTC before they hold the cBTC. The
+ * CTA first opens Loop settings; once the user has visited, it flips to a
+ * "confirm" CTA that re-checks the status.
+ */
+function EnableAutoAcceptModal({
+  visited,
+  checking,
+  stillOff,
+  onOpenSettings,
+  onConfirm,
+  onClose
+}: {
+  visited: boolean;
+  checking: boolean;
+  stillOff: boolean;
+  onOpenSettings: () => void;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      role="dialog"
+      aria-modal="true"
+    >
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative w-full max-w-[440px] rounded-3xl border border-foreground/10 bg-card p-6 shadow-xl">
+        <div className="mb-3 flex items-center justify-between">
+          <div className="flex size-11 items-center justify-center rounded-2xl bg-amber-500/10">
+            <span className="material-symbols-outlined text-[24px] text-amber-500">
+              bolt
+            </span>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="rounded-full p-1 text-on-surface-variant transition-all hover:bg-muted hover:text-foreground"
+          >
+            <span className="material-symbols-outlined text-[22px]">close</span>
+          </button>
+        </div>
+        <h2 className="text-lg font-semibold text-foreground">
+          Turn on auto-accept to swap
+        </h2>
+        <p className="mt-2 text-sm text-on-surface-variant">
+          Auto-accept lets the swapped CBTC land in your wallet automatically, so
+          your WBTC is only taken once you have the CBTC. Enable{" "}
+          <span className="font-medium text-foreground">
+            &ldquo;Automatically accept incoming utility transfers&rdquo;
+          </span>{" "}
+          in your Loop settings.
+        </p>
+
+        {stillOff && (
+          <div className="mt-4 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-foreground">
+            Still off — toggle it on in Loop settings, then confirm again.
+          </div>
+        )}
+
+        {!visited ? (
+          <button
+            onClick={onOpenSettings}
+            className="mt-5 w-full rounded-2xl bg-primary py-4 text-base font-semibold text-on-primary transition-all hover:opacity-90 active:scale-[0.99]"
+          >
+            Open Loop settings
+          </button>
+        ) : (
+          <div className="mt-5 flex flex-col gap-2">
+            <button
+              onClick={onConfirm}
+              disabled={checking}
+              className="w-full rounded-2xl bg-primary py-4 text-base font-semibold text-on-primary transition-all hover:opacity-90 active:scale-[0.99] disabled:opacity-50"
+            >
+              {checking ? "Checking…" : "I've enabled it — confirm"}
+            </button>
+            <button
+              onClick={onOpenSettings}
+              className="w-full rounded-2xl py-2 text-sm text-on-surface-variant transition-all hover:text-foreground"
+            >
+              Open Loop settings again
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
-}
-
-function errMsg(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
-
-/** EIP-1193 user-rejection (code 4001) or common reject phrasings. */
-function isUserReject(e: unknown): boolean {
-  const code = (e as { code?: number })?.code;
-  if (code === 4001) return true;
-  const m = errMsg(e).toLowerCase();
-  return (
-    m.includes("user rejected") ||
-    m.includes("user denied") ||
-    m.includes("rejected the request")
-  );
 }

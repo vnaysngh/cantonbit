@@ -210,3 +210,87 @@ smart-contract wallets. No SC-wallet users today. Documented; revisit if needed.
 **The architecture is now CoW-aligned at every step that is not a hard Canton constraint,
 with every safety guarantee pushed onto the chain/ledger wherever possible — no
 app-code-only guard for anything that can be chain-enforced.**
+
+---
+
+## CROSS-CHAIN END-TO-END AUDIT (2026-06-06) — vs CoW's ACTUAL bridging SDK
+
+> The steps above benchmark against CoW *same-chain* `settle()`. But our swap is
+> CROSS-chain (Arbitrum WBTC → Canton cBTC), so the correct benchmark is CoW's
+> **cross-chain** path. Audited directly against CoW's source — `cow-sdk/packages/
+> bridging` (`BridgingSdk/getQuoteWithBridge.ts`, `getCrossChainOrder.ts`, bridge
+> `types.ts`) — and the `swap-and-bridge.mdx` docs. This is the end-to-end
+> cross-chain comparison the same-chain table can't capture.
+
+### How CoW actually does cross-chain (from their code, not memory)
+
+CoW cross-chain is **two legs, NOT one atomic tx**:
+1. **Source leg** — atomic CoW `settle()` swaps the sell token into an *intermediate*
+   token on the source chain (this part is the atomic EVM settle benchmarked above).
+2. **Bridge leg** — a **post-hook** deposits the intermediate token into a bridge
+   (Across / Bungee). The bridge delivers on the destination chain **asynchronously**.
+
+Key facts confirmed from CoW's code:
+- **CoW POLLS cross-chain status.** `getCrossChainOrder` → `orderBookApi.getTrades` +
+  `provider.getBridgingStatus`, returning a `BridgeStatus` enum:
+  `{ IN_PROGRESS='in_progress', EXECUTED='executed', REFUND='refund', UNKNOWN='unknown' }`.
+  There is **no atomic cross-chain confirmation** — even CoW waits and polls.
+- **Two provider models:** `HookBridgeProvider` (post-hook deposits into the bridge
+  contract) and `ReceiverAccountBridgeProvider` (bridge returns a deposit address;
+  an **attestation signature** validates that destination address).
+- **Account Proxy / CoW Shed safety net:** *"If anything goes wrong during execution,
+  your assets will be sent to your personal proxy account. You can withdraw them to
+  your wallet at any time."* Funds never strand in a solver-only contract — on failure
+  they land somewhere the **user** controls and can recover.
+
+### Step-by-step: us vs CoW CROSS-CHAIN
+
+| Cross-chain element (CoW source) | CoW | Us | Verdict |
+|---|---|---|---|
+| Quote (swap + bridge legs) | `getQuoteWithBridge` returns swap + bridge quote | `/quote` returns the order + cBTC out | ✅ |
+| Sign order (+ bridge hook) | one EIP-712 order, bridge as post-hook | one Permit2 EIP-712 order, recipient=keccak(cantonParty) | ✅ |
+| Source leg commits FIRST | atomic settle into intermediate token | WBTC locked in escrow (`openFor`) first | ✅ |
+| Second leg is ASYNC | bridge delivers on destination later | solver delivers cBTC on Canton later | ✅ |
+| Deliver only after source succeeds | bridge hook runs after settle | cBTC delivered only after WBTC pre-flight (`verifyClaimable`) passes | ✅ (we go further) |
+| **Poll a status enum** | `BridgeStatus` IN_PROGRESS→EXECUTED/REFUND | `/orders/:id` seen→delivering→delivered→finalised, + `/history` completed/rejected | ✅ |
+| Destination validation | `ReceiverAccountBridgeProvider` attestation signature over the deposit address | `verifyCantonParty` — preimage MUST keccak to the on-chain committed recipient before delivering | ✅ |
+| Confirm before completing | wait for EXECUTED | finalise only after Canton accept confirmed via authoritative `/history` | ✅ |
+| **Failure → user-recoverable funds** | Account Proxy / CoW Shed (funds → user-owned proxy) | escrow `refund()` is permissionless and ALWAYS pays `order.user` | ✅ |
+| Refund on timeout | bridge REFUND status → user | `refundExpiredOrders` auto-sweep → user | ✅ |
+| Double-spend | source-leg `filledAmount` | escrow `orderStatus` + deterministic Canton `commandId` (ledger dedup) | ✅ |
+
+### The two CoW-specific patterns, mapped to ours
+
+1. **Account Proxy / CoW Shed = our permissionless escrow refund.** CoW's safety
+   principle is *funds always end up under the user's control on failure*. Ours
+   satisfies it differently but equivalently: the WBTC sits in the OIF escrow whose
+   `refund()` is permissionless and hard-codes `order.user` as the recipient. A failed
+   or stalled cross-chain leg returns the WBTC to the **user's own wallet** — same
+   guarantee (user-recoverable on failure), enforced by an audited contract rather than
+   a proxy account. ✅
+
+2. **We map to the `HookBridgeProvider` model, with the `ReceiverAccount`
+   destination-validation property.** We *are* the bridge (our solver delivers cBTC),
+   so the closest CoW shape is `HookBridgeProvider` (source action triggers an async
+   delivery, tracked by polling). And `ReceiverAccountBridgeProvider`'s attestation
+   signature that validates the destination address maps exactly to our
+   `verifyCantonParty` (we refuse to deliver unless the recipient party hashes to the
+   on-chain commitment — preventing a redirect). ✅
+
+### The ONE place we exceed CoW cross-chain
+
+**Pre-flight (`verifyClaimable`).** Before releasing the cBTC, the solver verifies the
+WBTC is securely claimable — escrow status === Deposited AND comfortable margin before
+`expires`. CoW relies on the bridge provider's own guarantees there; we add an explicit
+pass-or-fail-together gate so the user can never get cBTC while we lose the WBTC. This is
+a strict superset of CoW's cross-chain safety.
+
+### Cross-chain bottom line
+
+Audited point-by-point against CoW's real bridging code: **we match CoW's cross-chain
+architecture at every step — quote, sign, source-first commit, async second leg, status
+polling, destination validation, confirm-then-complete, user-recoverable refund on
+failure, and double-spend prevention.** Every divergence from CoW *same-chain* atomicity
+is one that **CoW cross-chain shares** (their bridge leg is async and polled too — not
+atomic). The only delta is in our favour (the pre-flight). This is a faithful,
+end-to-end CoW-cross-chain-benchmarked WBTC↔Canton swap.

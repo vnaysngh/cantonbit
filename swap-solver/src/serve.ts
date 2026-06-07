@@ -23,6 +23,10 @@ import { createApi } from "./api.js";
 
 const STORE_PATH = process.env.STORE_PATH ?? ".oranj-swap/orders.json";
 const PORT = Number(process.env.API_PORT ?? 8787);
+// SECURITY (HIGH-4): bind to loopback by default so the solver API is NOT exposed
+// on all interfaces. Expose it only deliberately, behind an authenticated reverse
+// proxy, by setting API_BIND_HOST=0.0.0.0 (or a specific interface).
+const BIND_HOST = process.env.API_BIND_HOST ?? "127.0.0.1";
 
 /** bytes32 cBTC instrument token used as MandateOutput.token (opaque on EVM). */
 const CBTC_TOKEN: Hex = (process.env.CBTC_TOKEN_BYTES32 as Hex) ?? pad("0xc87c", { size: 32 });
@@ -73,8 +77,11 @@ async function main() {
     feeBps: SOLVER_FEE_BPS,
   });
 
-  server.listen(PORT, () => {
-    console.log(`[oranj-swap-api] listening on http://localhost:${PORT}`);
+  server.listen(PORT, BIND_HOST, () => {
+    console.log(`[oranj-swap-api] listening on http://${BIND_HOST}:${PORT}`);
+    if (BIND_HOST !== "127.0.0.1" && BIND_HOST !== "localhost") {
+      console.warn(`  [security] bound to ${BIND_HOST} (not loopback) — ensure an authenticated gateway fronts this.`);
+    }
     console.log(`  GET  /health`);
     console.log(`  POST /quote     { user, wbtcAmount, cantonParty }`);
     console.log(`  POST /orders    { order, signature, cantonParty }`);

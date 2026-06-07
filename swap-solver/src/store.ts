@@ -51,6 +51,24 @@ export interface OrderRecord {
   fillTimestamp?: number;
   /** Canton delivery reference (e.g. update id), once known. */
   cantonDeliveryRef?: string;
+  /**
+   * True once the user has ACCEPTED the cBTC on Canton — even if the accept was
+   * too late to finalise on-chain. SECURITY (HIGH-1): a refund must NEVER be
+   * issued for an order with this set, or the user would keep both the cBTC and
+   * the refunded WBTC. Distinguishes a `failed` order whose cBTC was delivered
+   * (NOT refundable — needs manual review) from a clean unfilled failure
+   * (refundable). Set wherever an accept is detected.
+   */
+  cbtcAccepted?: boolean;
+  /**
+   * The solver-float holding cids spent on the cBTC delivery offer. Stored so a
+   * `delivering` order can be tracked for ACCEPTANCE from the SOLVER's own ACS
+   * (sender-readable, no 403): while pending, a TransferInstruction / locked
+   * holding for these cids is in our active contracts; once the user accepts, it
+   * disappears. This is how we WAIT for the accept before finalising, even
+   * cross-participant where we can't read the receiver's offer.
+   */
+  inputHoldingCids?: string[];
   /** Base tx hashes for the attest + finalise legs, once sent. */
   attestTxHash?: Hex;
   finaliseTxHash?: Hex;
@@ -86,6 +104,17 @@ interface StoreFile {
   /** Last block fully processed by the watcher; resume from cursor+1. */
   cursorBlock: number;
   orders: Record<string, OrderRecord>;
+  /**
+   * Recovery map: orderId → full Canton party (the preimage of the order's
+   * recipient hash). Written at QUOTE time — the earliest point the party is
+   * known — so the party is durable BEFORE any on-chain action. If the order's
+   * own record ever lacks cantonParty (e.g. a watcher discovered it on-chain, or
+   * a store write was lost mid-submit), the delivery path recovers it from here.
+   * The on-chain order only commits keccak256(party); without this the preimage
+   * would be unrecoverable and the order undeliverable. Verified-on-use: the
+   * recovered party is re-hashed against the committed recipient before delivery.
+   */
+  partyByOrderId?: Record<string, string>;
 }
 
 export class OrderStore {
@@ -204,6 +233,25 @@ export class OrderStore {
     Object.assign(rec, patch, { status: next, updatedAt: new Date().toISOString() });
     this.flush();
     return true;
+  }
+
+  /**
+   * Record the cantonParty for an orderId in the recovery map (called at QUOTE
+   * time). Durable BEFORE any on-chain action, so the preimage survives a crash
+   * during submit and is available to a watcher-discovered order. Idempotent.
+   */
+  rememberParty(orderId: Hex, cantonParty: string): void {
+    this.reloadInto();
+    if (!this.data.partyByOrderId) this.data.partyByOrderId = {};
+    if (this.data.partyByOrderId[orderId] === cantonParty) return; // no-op, avoid churn
+    this.data.partyByOrderId[orderId] = cantonParty;
+    this.flush();
+  }
+
+  /** Look up a remembered cantonParty for an orderId (recovery map), or undefined. */
+  recallParty(orderId: Hex): string | undefined {
+    this.reloadInto();
+    return this.data.partyByOrderId?.[orderId];
   }
 
   /** Atomic persist: write to a tmp file then rename over the real path. */

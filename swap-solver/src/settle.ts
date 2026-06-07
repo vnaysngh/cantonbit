@@ -71,6 +71,43 @@ export class Settler {
   }
 
   /**
+   * PRE-FLIGHT (called BEFORE delivering cBTC): is the WBTC collection guaranteed
+   * to succeed? If yes, delivering the cBTC is safe — both legs will complete
+   * together (never user-gets-cBTC-but-we-lose-WBTC). Checks the two conditions
+   * that make a later finalise() unfailable:
+   *   1. the order's WBTC is DEPOSITED in escrow on-chain (locked & claimable), and
+   *   2. there's comfortable margin before `expires` (so finalise can't lose a
+   *      race to the user's refund window).
+   * Attest is the solver's OWN oracle (always succeeds for our fills), so with
+   * (1)+(2) true, the whole settle path is guaranteed. Returns
+   * { ok: true } or { ok: false, reason }.
+   */
+  async verifyClaimable(
+    orderId: Hex,
+    expires: number,
+    nowSeconds: number,
+    minMarginSeconds: number,
+  ): Promise<{ ok: true } | { ok: false; reason: string }> {
+    // 2. time margin — finalise must run well before the refund window opens.
+    if (nowSeconds + minMarginSeconds >= expires) {
+      return { ok: false, reason: `too close to expiry: ${expires - nowSeconds}s left (need > ${minMarginSeconds}s)` };
+    }
+    // 1. WBTC must be DEPOSITED (locked & claimable) in the escrow.
+    try {
+      const escrow = getContract({ address: this.cfg.escrow, abi: ESCROW_ABI, client: { public: this.pub, wallet: this.wallet } });
+      const status = Number(await escrow.read.orderStatus([orderId]));
+      // enum OrderStatus { None, Deposited, Claimed, Refunded }
+      if (status !== 1 /* Deposited */) {
+        const names = ["None", "Deposited", "Claimed", "Refunded"];
+        return { ok: false, reason: `WBTC not claimable: escrow status is ${names[status] ?? status} (need Deposited)` };
+      }
+    } catch (e) {
+      return { ok: false, reason: `couldn't read escrow status: ${errMsg(e)}` };
+    }
+    return { ok: true };
+  }
+
+  /**
    * Where the released WBTC lands (escrow `destination`), as bytes32. This is
    * the payout/treasury address — separate from the signing key — and is NOT
    * part of the attestation proof. Defaults to the agent address.
