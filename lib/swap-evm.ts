@@ -151,3 +151,41 @@ export function parseWbtc(input: string): bigint {
 }
 
 export const PERMIT2_MAX_APPROVAL = MAX_UINT256;
+
+// ---------------------------------------------------------------------------
+// Amount-input sanitizing — benchmarked against CoW's NumericalInput
+// (apps/cowswap-frontend/src/legacy/components/NumericalInput/index.tsx).
+// CoW's keystroke gate is a single regex; bad keystrokes are silently rejected.
+// ---------------------------------------------------------------------------
+
+/** CoW's exact keystroke regex: digits with at most one dot, empty allowed. */
+const AMOUNT_INPUT_REGEX = /^(\d*\.?\d*)?$/;
+
+/**
+ * Sanitize a keystroke-level amount input the way CoW does: comma→dot, then only
+ * accept it if it matches the decimal regex (else keep the previous value — a
+ * no-op, exactly like CoW). Returns the value to set. Empty is always allowed.
+ * Rejects: letters, `-`, scientific `1e5`, a second dot, any non-digit symbol.
+ */
+export function sanitizeAmountInput(next: string, previous: string): string {
+  if (next === "") return "";
+  const v = next.replace(/,/g, ".");
+  return AMOUNT_INPUT_REGEX.test(v) ? v : previous;
+}
+
+/** CoW's paste cleaner: comma→dot, strip non-digit/dot, keep first dot, drop trailing dot. */
+export function cleanPastedAmount(pasted: string): string {
+  return pasted
+    .replace(/,/g, ".")
+    .replace(/[^\d.]/g, "")
+    .replace(/(\..*)\./g, "$1")
+    .replace(/\.$/, "");
+}
+
+/** Truncate an amount string to `decimals` fractional digits (no rounding) —
+ *  CoW truncates to token precision before parseUnits. */
+export function truncateToDecimals(input: string, decimals = 8): string {
+  const [whole, frac] = input.split(".");
+  if (frac === undefined) return input;
+  return `${whole}.${frac.slice(0, decimals)}`;
+}

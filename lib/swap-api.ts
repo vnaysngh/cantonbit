@@ -47,6 +47,9 @@ export interface QuoteResponse {
   cantonParty: string;
   cbtcAmount: string;
   feeBps: number;
+  /** Live WBTC/BTC price used for this quote: price = wbtcPriceRaw / 10^wbtcPriceDecimals. */
+  wbtcPriceRaw?: string;
+  wbtcPriceDecimals?: number;
   permit2: Permit2TypedData;
   escrow: string;
   wbtc: string;

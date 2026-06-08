@@ -40,6 +40,7 @@ import { serializeOrder, deserializeOrder } from "./convert.js";
 import { refundOrder, type RefundDeps } from "./refund.js";
 import { CantonClient } from "./canton.js";
 import { resolveDelivery } from "./accept-watch.js";
+import type { DepegStatus } from "./depeg.js";
 
 export interface ApiDeps {
   cfg: SwapNetworkConfig;
@@ -54,12 +55,20 @@ export interface ApiDeps {
   /** Hard ceiling on WBTC per order (base units, 8dp). 0n = no cap. */
   maxWbtcPerOrder: bigint;
   /**
-   * Solver fee in basis points (1 bps = 0.01%). The user receives
-   * cbtcOut = wbtcIn * (10000 - feeBps) / 10000. 0 = clean 1:1 (no fee).
-   * WBTC and cBTC are both 1:1-backed claims on BTC, so par is the baseline;
-   * the fee is the solver's cut for fronting liquidity + bearing settlement risk.
+   * Solver fee in basis points (1 bps = 0.01%). The quote is:
+   *   cbtcOut = wbtcAmount × (WBTC/BTC price) × (10000 − feeBps) / 10000.
+   * cBTC is redeemable 1:1 for BTC, so the rate is the live WBTC/BTC price (NOT a
+   * flat 1:1 — WBTC trades slightly off par). When no de-peg feed is configured,
+   * price falls back to par (1.0). The fee is the solver's cut for fronting
+   * liquidity + bearing settlement risk; floor division → never overpays the user.
    */
   feeBps: number;
+  /**
+   * Optional de-peg circuit breaker. When set, `/quote` is rejected (and `/health`
+   * reports paused) if WBTC de-pegs from BTC beyond the configured threshold —
+   * because the 1:1 quote is only valid while the peg holds. Undefined = disabled.
+   */
+  depegGuard?: { check(nowSeconds: number): Promise<DepegStatus> };
 }
 
 /** JSON helpers that don't choke on bigint. */
@@ -143,7 +152,7 @@ class ApiError extends Error {
 }
 
 export function createApi(deps: ApiDeps) {
-  const { cfg, store, canton, rpcUrl, agentAccount, chain, cbtcToken, maxWbtcPerOrder, feeBps } = deps;
+  const { cfg, store, canton, rpcUrl, agentAccount, chain, cbtcToken, maxWbtcPerOrder, feeBps, depegGuard } = deps;
   if (!Number.isInteger(feeBps) || feeBps < 0 || feeBps >= 10000) {
     throw new Error(`feeBps must be an integer in [0, 10000), got ${feeBps}`);
   }
@@ -159,6 +168,23 @@ export function createApi(deps: ApiDeps) {
   const maxOrderValiditySeconds = cfg.expiresSeconds + 5 * 60; // a little slack over the quote window
 
   async function handleQuote(body: Record<string, unknown>) {
+    // DE-PEG CIRCUIT BREAKER + LIVE PRICE: read the WBTC/BTC feed once. It (a)
+    // pauses swaps on a de-peg (fail-closed), and (b) gives the live WBTC price in
+    // BTC, which we use to PRICE the quote — WBTC trades slightly off 1 BTC
+    // (e.g. 0.9978), so we must NOT quote a flat 1:1. cBTC is redeemable 1:1 BTC,
+    // so the WBTC→cBTC rate = WBTC/BTC price.
+    //   priceRaw / 10^priceDecimals = WBTC in BTC (e.g. 99775000 / 1e8 = 0.99775).
+    // Default to par (1.0) only when the de-peg guard is disabled (no feed).
+    let priceRaw = 100_000_000n; // 1.0 scaled to 8dp (par fallback when no feed)
+    let priceDecimals = 8;
+    if (depegGuard) {
+      const peg = await depegGuard.check(nowSeconds());
+      if (!peg.ok) {
+        throw new ApiError(503, `swaps paused: ${peg.reason}`);
+      }
+      priceRaw = peg.priceRaw;
+      priceDecimals = peg.priceDecimals;
+    }
     const user = body.user as Address;
     if (typeof user !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(user)) {
       throw new ApiError(400, "user must be a 0x EVM address");
@@ -172,12 +198,15 @@ export function createApi(deps: ApiDeps) {
     if (maxWbtcPerOrder > 0n && wbtcAmount > maxWbtcPerOrder) {
       throw new ApiError(400, `wbtcAmount ${wbtcAmount} exceeds per-order cap ${maxWbtcPerOrder}`);
     }
-    // WBTC and cBTC are both 1:1-backed claims on BTC (both 8dp), so par is the
-    // baseline rate. The solver fee (feeBps) is subtracted from the cBTC the user
-    // receives. floor division → never overpays the user. feeBps=0 → clean 1:1.
-    const cbtcAmount = (wbtcAmount * BigInt(10000 - feeBps)) / 10000n;
+    // QUOTE = wbtcAmount × (WBTC/BTC price) × (1 − feeBps). All BigInt, floor
+    // division at each step → the user NEVER gets more than the true value
+    // (no overpay) and the fee is exact. cBTC = 1 BTC (redeemable), so the only
+    // price adjustment is WBTC's deviation from 1 BTC.
+    const priceScale = 10n ** BigInt(priceDecimals);
+    const cbtcAtPrice = (wbtcAmount * priceRaw) / priceScale; // WBTC value in BTC = cBTC before fee
+    const cbtcAmount = (cbtcAtPrice * BigInt(10000 - feeBps)) / 10000n;
     if (cbtcAmount === 0n) {
-      throw new ApiError(400, `amount too small after ${feeBps}bps fee (cBTC out rounds to 0)`);
+      throw new ApiError(400, `amount too small after price + ${feeBps}bps fee (cBTC out rounds to 0)`);
     }
 
     const req: SwapRequest = {
@@ -200,6 +229,10 @@ export function createApi(deps: ApiDeps) {
       cantonParty,
       cbtcAmount: cbtcAmount.toString(),
       feeBps,
+      // The live WBTC/BTC price used for this quote (scaled to wbtcPriceDecimals),
+      // so the UI can show the REAL rate (1 WBTC = <price> CBTC), not a fake 1:1.
+      wbtcPriceRaw: priceRaw.toString(),
+      wbtcPriceDecimals: priceDecimals,
       // Everything the browser wallet needs to sign the Permit2 witness.
       permit2: {
         domain: typed.domain,
@@ -400,6 +433,14 @@ export function createApi(deps: ApiDeps) {
     } catch (e) {
       floatError = e instanceof Error ? e.message : String(e);
     }
+    // De-peg status — so ops/UI can see if swaps are paused and why.
+    let depeg: { paused: boolean; priceBtc?: number; deviationBps?: number; reason?: string } | null = null;
+    if (depegGuard) {
+      const peg = await depegGuard.check(nowSeconds());
+      depeg = peg.ok
+        ? { paused: false, priceBtc: peg.priceBtc, deviationBps: peg.deviationBps }
+        : { paused: true, priceBtc: peg.priceBtc, deviationBps: peg.deviationBps, reason: peg.reason };
+    }
     return {
       ok: true,
       network: cfg.network,
@@ -409,8 +450,10 @@ export function createApi(deps: ApiDeps) {
       wbtc: cfg.wbtc,
       agent: account.address,
       maxWbtcPerOrder: maxWbtcPerOrder.toString(),
+      feeBps,
       floatSats,
       floatError,
+      depeg,
     };
   }
 

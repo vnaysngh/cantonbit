@@ -34,8 +34,24 @@ const CBTC_TOKEN: Hex = (process.env.CBTC_TOKEN_BYTES32 as Hex) ?? pad("0xc87c",
 /** Per-order WBTC ceiling (base units, 8dp). Default 0.001 WBTC for testnet. */
 const MAX_WBTC_PER_ORDER = BigInt(process.env.MAX_WBTC_PER_ORDER ?? 100_000); // 0.001 * 1e8
 
-/** Solver fee in basis points (1 bps = 0.01%). Default 0 → clean 1:1. */
-const SOLVER_FEE_BPS = Number(process.env.SOLVER_FEE_BPS ?? 0);
+/**
+ * Solver/bridge fee in basis points (1 bps = 0.01%). Default 20 bps = 0.2% — the
+ * cost of running the cross-chain bridge (gas to openFor/attest/finalise, the
+ * cBTC float capital, operational risk). Subtracted from the cBTC the user
+ * receives: cbtcOut = wbtcIn * (10000 - feeBps) / 10000. Override via
+ * SOLVER_FEE_BPS; set 0 for a clean 1:1.
+ */
+const SOLVER_FEE_BPS = Number(process.env.SOLVER_FEE_BPS ?? 20);
+
+/**
+ * De-peg circuit breaker config. We quote WBTC↔cBTC at 1:1 (both = 1 BTC); this
+ * pauses swaps if WBTC de-pegs from BTC. Reads the Chainlink WBTC/BTC feed on the
+ * origin chain. Disabled if DEPEG_FEED is unset (no feed → no guard; logged).
+ * Arbitrum mainnet WBTC/BTC feed: 0x0017abAc5b6f291F9164e35B1234CA1D697f9CF4.
+ */
+const DEPEG_FEED = process.env.DEPEG_FEED ?? "";
+const DEPEG_MAX_DEVIATION_BPS = Number(process.env.DEPEG_MAX_DEVIATION_BPS ?? 100); // ±1%
+const DEPEG_MAX_STALENESS_SECONDS = Number(process.env.DEPEG_MAX_STALENESS_SECONDS ?? 24 * 3600);
 
 async function main() {
   const env = loadEnv();
@@ -65,6 +81,22 @@ async function main() {
     env.canton.auth,
   );
 
+  // De-peg circuit breaker (optional; only if a feed is configured).
+  const { DepegGuard } = await import("./depeg.js");
+  const depegGuard = DEPEG_FEED
+    ? new DepegGuard({
+        rpcUrl: env.originRpcUrl,
+        feed: DEPEG_FEED as `0x${string}`,
+        maxDeviationBps: DEPEG_MAX_DEVIATION_BPS,
+        maxStalenessSeconds: DEPEG_MAX_STALENESS_SECONDS,
+      })
+    : undefined;
+  console.log(
+    depegGuard
+      ? `  de-peg guard: WBTC/BTC feed ${DEPEG_FEED.slice(0, 10)}… max ${DEPEG_MAX_DEVIATION_BPS}bps`
+      : `  de-peg guard: DISABLED (set DEPEG_FEED to enable the circuit breaker)`,
+  );
+
   const server = createApi({
     cfg,
     store,
@@ -75,6 +107,7 @@ async function main() {
     cbtcToken: CBTC_TOKEN,
     maxWbtcPerOrder: MAX_WBTC_PER_ORDER,
     feeBps: SOLVER_FEE_BPS,
+    depegGuard,
   });
 
   server.listen(PORT, BIND_HOST, () => {

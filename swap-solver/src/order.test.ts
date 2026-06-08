@@ -55,6 +55,24 @@ function req(): SwapRequest {
 
 const NOW = 1_780_000_000;
 
+test("FEE: the fee-reduced cbtcAmount is bound into output.amount (the signed order)", () => {
+  // The fee is charged by committing the REDUCED amount as the signed output, so
+  // the solver delivers exactly that and keeps the difference. This proves the
+  // fee can't be bypassed: what the user signs == what is delivered == cbtcAmount.
+  const feeBps = 20;
+  const wbtcAmount = 1_00_000_000n; // 1 WBTC
+  const cbtcAmount = (wbtcAmount * BigInt(10000 - feeBps)) / 10000n; // 0.998 cBTC
+  const built = buildOrder(cfg(), { ...req(), wbtcAmount, cbtcAmount }, NOW);
+  // output.amount IS the fee-reduced cBTC the user signs and the solver delivers.
+  assert.equal(BigInt(built.output.amount), cbtcAmount, "output.amount must equal the fee-reduced cbtcAmount");
+  // The input WBTC is the gross amount (the solver collects this).
+  assert.equal(BigInt(built.order.inputs[0]![1]), wbtcAmount, "input WBTC is the gross amount");
+  // Fee = collected − delivered, and the solver NEVER overpays (delivered <= collected).
+  const fee = wbtcAmount - cbtcAmount;
+  assert.equal(fee, 200_000n, "0.2% of 1 WBTC = 0.002 BTC fee");
+  assert.ok(cbtcAmount <= wbtcAmount, "solver must never deliver more than it collects");
+});
+
 test("inputOracle equals output.oracle id (the core invariant)", () => {
   const c = cfg();
   const built = buildOrder(c, req(), NOW);

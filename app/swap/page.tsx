@@ -38,7 +38,10 @@ import {
   encodeBalanceOf,
   decodeUint,
   formatWbtc,
-  parseWbtc
+  parseWbtc,
+  sanitizeAmountInput,
+  cleanPastedAmount,
+  truncateToDecimals
 } from "@/lib/swap-evm";
 
 type Stage =
@@ -54,6 +57,11 @@ type Stage =
 
 /** localStorage key for resuming an in-flight order across a page refresh. */
 const ACTIVE_ORDER_KEY = "oranj.swap.activeOrder";
+
+/** Bridge fee in basis points for the pre-quote "You receive" estimate. Must
+ *  match the solver's SOLVER_FEE_BPS (default 20 = 0.2%). The review modal shows
+ *  the exact fee from the server quote. */
+const FEE_BPS = Number(process.env.NEXT_PUBLIC_FEE_BPS ?? 20);
 
 export default function SwapPage() {
   const evm = useEvmWallet();
@@ -523,7 +531,38 @@ export default function SwapPage() {
     stage.kind === "quoting" ||
     stage.kind === "error" ||
     reviewing;
-  const receiveEstimate = amount && /^\d*\.?\d+$/.test(amount) ? amount : "0";
+  // "You receive" estimate BEFORE quoting — an APPROXIMATION (shown with "≈").
+  // It applies the fee but NOT the live WBTC/BTC price (the browser doesn't have
+  // it pre-quote). The EXACT, price-adjusted amount comes from the server quote
+  // and is shown in the review modal. So this is a close upper-bound estimate;
+  // the real number is slightly lower by WBTC's deviation from 1 BTC.
+  const receiveEstimate = (() => {
+    if (!amount || !/^\d*\.?\d+$/.test(amount)) return "0";
+    try {
+      const out = (parseWbtc(amount) * BigInt(10000 - FEE_BPS)) / 10000n;
+      return formatWbtc(out);
+    } catch {
+      return "0";
+    }
+  })();
+
+  // CoW-style amount validation (TradeFormValidation analogue): compute the
+  // amount state once, ordered — the button reflects the FIRST problem.
+  //   notSet   → empty or zero  → "Enter an amount" (disabled)
+  //   tooMany  → parse fails    → "Invalid amount"  (disabled)
+  //   overBal  → > balance      → "Insufficient WBTC balance" (disabled)
+  const amountState = ((): "ok" | "notSet" | "invalid" | "overBalance" => {
+    if (!amount || amount === "." ) return "notSet";
+    let parsed: bigint;
+    try {
+      parsed = parseWbtc(amount);
+    } catch {
+      return "invalid";
+    }
+    if (parsed <= 0n) return "notSet";
+    if (wbtcBalance != null && parsed > wbtcBalance) return "overBalance";
+    return "ok";
+  })();
 
   // Single context-aware primary action.
   let primary: {
@@ -557,13 +596,19 @@ export default function SwapPage() {
         onClick: () => setSessionReady(false),
         disabled: sessionReady === null
       };
+    } else if (amountState === "notSet") {
+      primary = { label: "Enter an amount", onClick: () => {}, disabled: true };
+    } else if (amountState === "invalid") {
+      primary = { label: "Invalid amount", onClick: () => {}, disabled: true };
+    } else if (amountState === "overBalance") {
+      primary = { label: "Insufficient WBTC balance", onClick: () => {}, disabled: true };
     } else {
-      // Session ready. Review checks auto-accept (no signature) then quotes; if
-      // auto-accept is OFF it opens the enable popup.
+      // Session ready + amount valid. Review checks auto-accept (no signature)
+      // then quotes; if auto-accept is OFF it opens the enable popup.
       primary = {
         label: stage.kind === "quoting" ? "Getting quote…" : "Review swap",
         onClick: handleQuote,
-        disabled: stage.kind === "quoting" || reviewing || !amount
+        disabled: stage.kind === "quoting" || reviewing
       };
     }
   }
@@ -743,9 +788,24 @@ function TokenPanel({
       <div className="flex items-center justify-between gap-3">
         {editable ? (
           <input
+            // CoW-style numeric input: text + inputMode=decimal (keeps trailing
+            // dots), keystrokes filtered by the decimal regex, paste cleaned, and
+            // truncated to 8dp (WBTC/cBTC precision). Bad keystrokes are no-ops.
+            type="text"
             inputMode="decimal"
+            autoComplete="off"
+            autoCorrect="off"
+            spellCheck={false}
+            maxLength={79}
             value={amount}
-            onChange={(e) => onAmountChange?.(e.target.value)}
+            onChange={(e) =>
+              onAmountChange?.(truncateToDecimals(sanitizeAmountInput(e.target.value, amount), 8))
+            }
+            onPaste={(e) => {
+              e.preventDefault();
+              const cleaned = truncateToDecimals(cleanPastedAmount(e.clipboardData.getData("text")), 8);
+              onAmountChange?.(cleaned);
+            }}
             placeholder="0.0"
             className="w-full min-w-0 bg-transparent text-3xl font-medium text-foreground outline-none placeholder:text-on-surface-variant/40"
           />
@@ -855,9 +915,29 @@ function ReviewModal({
 
   if (!quote) return null;
 
-  const wbtc = formatWbtc(BigInt(quote.order.inputs[0][1]));
-  const cbtc = formatWbtc(BigInt(quote.cbtcAmount));
-  const feePct = quote.feeBps > 0 ? `${quote.feeBps / 100}%` : "Free";
+  const wbtcIn = BigInt(quote.order.inputs[0][1]);
+  const cbtcOut = BigInt(quote.cbtcAmount);
+  const wbtc = formatWbtc(wbtcIn);
+  const cbtc = formatWbtc(cbtcOut);
+
+  // The REAL rate = live WBTC/BTC price (cBTC is redeemable 1:1 BTC, so the
+  // WBTC→cBTC rate IS the WBTC price in BTC). Never hardcode 1:1 — WBTC trades
+  // slightly off par (e.g. 0.9978). Falls back to deriving from the amounts.
+  const priceScale = 10n ** BigInt(quote.wbtcPriceDecimals ?? 8);
+  const priceRaw = quote.wbtcPriceRaw ? BigInt(quote.wbtcPriceRaw) : priceScale;
+  // Rate string: 1 WBTC = <price> CBTC (formatted to 8dp).
+  const rateLabel = `1 WBTC = ${formatWbtc((priceRaw * 100_000_000n) / priceScale)} CBTC`;
+
+  // Split the total deduction into PRICE adjustment vs FEE, so the user sees both
+  // honestly (CoW lists each cost line separately).
+  //   cbtcBeforeFee = wbtcIn × price  (the WBTC's real BTC value)
+  //   fee           = cbtcBeforeFee − cbtcOut  (the solver's cut)
+  const cbtcBeforeFee = (wbtcIn * priceRaw) / priceScale;
+  const feeAmount = cbtcBeforeFee - cbtcOut;
+  const feeLabel =
+    quote.feeBps > 0
+      ? `${quote.feeBps / 100}% (−${formatWbtc(feeAmount)} CBTC)`
+      : "Free";
   const refundAt = new Date(quote.expires * 1000).toLocaleString(undefined, {
     month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
   });
@@ -907,8 +987,9 @@ function ReviewModal({
 
         {/* Trade details */}
         <div className="mt-5 flex flex-col gap-1.5 border-t border-foreground/10 pt-4 text-sm">
-          <DetailRow label="Rate" value="1 WBTC = 1 CBTC" />
-          <DetailRow label="Fee" value={feePct} />
+          <DetailRow label="Rate" value={rateLabel} />
+          <DetailRow label="Bridge fee" value={feeLabel} />
+          <DetailRow label="You receive" value={`${cbtc} CBTC`} />
           <DetailRow label="Recipient" value={truncatePartyId(quote.cantonParty)} />
           <DetailRow label="Refundable after" value={refundAt} />
         </div>
