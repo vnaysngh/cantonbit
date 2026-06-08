@@ -34,7 +34,6 @@ async function main() {
     cfg, store, canton, rpcUrl: env.originRpcUrl, agentAccount: env.agentAccount,
     chain: { id: chainId, name: `${env.network}:${chainId}` },
     cbtcToken: ("0x" + "c87c".padStart(64, "0")) as `0x${string}`,
-    maxWbtcPerOrder: 100_000n,
     feeBps: 0,
   });
   await new Promise<void>((r) => server.listen(0, r));

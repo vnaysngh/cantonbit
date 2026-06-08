@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import Link from "next/link";
 
 import { ChainIcon } from "@/components/ChainIcon";
 import { useEvmWallet } from "@/hooks/useEvmWallet";
@@ -16,7 +15,6 @@ import { truncatePartyId } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import {
   getQuote,
-  getHealth,
   submitOrder,
   getOrder,
   refundOrder,
@@ -81,11 +79,6 @@ export default function SwapPage() {
   const [amount, setAmount] = useState("0.0001");
   const [stage, setStage] = useState<Stage>({ kind: "idle" });
   const [wbtcBalance, setWbtcBalance] = useState<bigint | null>(null);
-  // Per-swap WBTC cap, fetched from the solver's /health. Lets the form reject an
-  // over-cap amount BEFORE the user clicks Review (rather than failing the quote
-  // with a raw server error). null = unknown (not yet fetched / solver down) →
-  // we don't block on it; the server still enforces the cap as the backstop.
-  const [maxWbtcPerOrder, setMaxWbtcPerOrder] = useState<bigint | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // CBTC balance from the connected Loop wallet (for the "You receive" panel).
@@ -126,24 +119,6 @@ export default function SwapPage() {
     })();
     return () => { cancelled = true; };
   }, [evm.account, wrongChain, refreshBalance]);
-
-  // Fetch the per-swap WBTC cap once, so the form can pre-validate the amount.
-  // Best-effort: if the solver is down we leave it null (the server still
-  // enforces the cap), so this never blocks the UI from loading.
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const h = await getHealth();
-        if (cancelled) return;
-        const cap = BigInt(h.maxWbtcPerOrder);
-        setMaxWbtcPerOrder(cap > 0n ? cap : null); // 0 = no cap
-      } catch {
-        /* solver down — server enforces the cap as the backstop */
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
 
   // --- CBTC auto-accept (preapproval) gate. With it ON, the delivered CBTC
   //     auto-accepts → solver finalises safely (accept-first, pay-second).
@@ -584,8 +559,7 @@ export default function SwapPage() {
   //   notSet   → empty or zero  → "Enter an amount" (disabled)
   //   invalid  → parse fails    → "Invalid amount"  (disabled)
   //   overBal  → > balance      → "Insufficient WBTC balance" (disabled)
-  //   tooLarge → > per-swap cap → "Amount exceeds limit (…)"  (disabled)
-  const amountState = ((): "ok" | "notSet" | "invalid" | "overBalance" | "tooLarge" => {
+  const amountState = ((): "ok" | "notSet" | "invalid" | "overBalance" => {
     if (!amount || amount === "." ) return "notSet";
     let parsed: bigint;
     try {
@@ -595,7 +569,6 @@ export default function SwapPage() {
     }
     if (parsed <= 0n) return "notSet";
     if (wbtcBalance != null && parsed > wbtcBalance) return "overBalance";
-    if (maxWbtcPerOrder != null && parsed > maxWbtcPerOrder) return "tooLarge";
     return "ok";
   })();
 
@@ -637,14 +610,6 @@ export default function SwapPage() {
       primary = { label: "Invalid amount", onClick: () => {}, disabled: true };
     } else if (amountState === "overBalance") {
       primary = { label: "Insufficient WBTC balance", onClick: () => {}, disabled: true };
-    } else if (amountState === "tooLarge") {
-      primary = {
-        label: maxWbtcPerOrder != null
-          ? `Max ${formatWbtc(maxWbtcPerOrder)} WBTC per swap`
-          : "Amount exceeds limit",
-        onClick: () => {},
-        disabled: true,
-      };
     } else {
       // Session ready + amount valid. Review checks auto-accept (no signature)
       // then quotes; if auto-accept is OFF it opens the enable popup.
@@ -658,15 +623,7 @@ export default function SwapPage() {
 
   return (
     <div className="mx-auto w-full max-w-[460px] px-4 py-6 sm:py-10">
-      <div className="mb-4 flex items-center justify-between px-1">
-        <h1 className="text-2xl font-semibold text-foreground">Swap</h1>
-        <Link
-          href="/activity"
-          className="text-sm text-muted-foreground transition-colors hover:text-foreground"
-        >
-          Activity
-        </Link>
-      </div>
+      <h1 className="mb-4 px-1 text-2xl font-semibold text-foreground">Swap</h1>
 
       <div className="rounded-3xl border border-foreground/10 bg-card p-4 shadow-sm sm:p-5">
         {showForm && (

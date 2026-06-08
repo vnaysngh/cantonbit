@@ -94,10 +94,9 @@ async function main(): Promise<void> {
     env.canton.auth,
   );
 
-  // --- Float pre-flight (B6): fail/warn loudly before accepting any orders if
-  // the cBTC float can't be read or is below the per-order cap. On mainnet an
-  // empty/low float means we'd lock users' WBTC we can't fill — refuse to start.
-  const maxWbtcPerOrder = BigInt(process.env.MAX_WBTC_PER_ORDER ?? "0");
+  // --- Float pre-flight (B6): fail loudly before accepting any orders if the
+  // cBTC float can't be read or is empty. On mainnet an empty float means we'd
+  // lock users' WBTC we can't fill — refuse to start.
   try {
     const floatSats = await canton.getFloatSats();
     const floatBtc = Number(floatSats) / 1e8;
@@ -106,8 +105,6 @@ async function main(): Promise<void> {
       const msg = "[preflight] FLOAT IS EMPTY — the solver cannot deliver cBTC. Refusing to start.";
       if (env.network === "mainnet") { console.error(msg); process.exit(1); }
       console.warn(msg + " (continuing on non-mainnet)");
-    } else if (maxWbtcPerOrder > 0n && floatSats < maxWbtcPerOrder) {
-      console.warn(`[preflight] WARNING: float ${floatSats} sats < per-order cap ${maxWbtcPerOrder} sats — some orders may fail the float check.`);
     }
   } catch (e) {
     const msg = `[preflight] could not read the cBTC float: ${e instanceof Error ? e.message : e}`;
@@ -168,7 +165,7 @@ async function main(): Promise<void> {
         minSecondsBeforeDeadline: DELIVERY_MARGIN_SECONDS, // see invariant above
         cbtcDecimals: 8,
         // C3: optional total in-flight exposure cap (sats). Defense in depth on
-        // top of the per-order cap + float bound. Set MAX_INFLIGHT_SATS to enable.
+        // top of the float bound. Set MAX_INFLIGHT_SATS to enable.
         maxInflightSats: process.env.MAX_INFLIGHT_SATS
           ? BigInt(process.env.MAX_INFLIGHT_SATS)
           : undefined,

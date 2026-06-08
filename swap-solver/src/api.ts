@@ -52,8 +52,6 @@ export interface ApiDeps {
   chain: { id: number; name: string };
   /** bytes32 instrument id used as MandateOutput.token (opaque on EVM side). */
   cbtcToken: Hex;
-  /** Hard ceiling on WBTC per order (base units, 8dp). 0n = no cap. */
-  maxWbtcPerOrder: bigint;
   /**
    * Solver fee in basis points (1 bps = 0.01%). The quote is:
    *   cbtcOut = wbtcAmount × (WBTC/BTC price) × (10000 − feeBps) / 10000.
@@ -152,7 +150,7 @@ class ApiError extends Error {
 }
 
 export function createApi(deps: ApiDeps) {
-  const { cfg, store, canton, rpcUrl, agentAccount, chain, cbtcToken, maxWbtcPerOrder, feeBps, depegGuard } = deps;
+  const { cfg, store, canton, rpcUrl, agentAccount, chain, cbtcToken, feeBps, depegGuard } = deps;
   if (!Number.isInteger(feeBps) || feeBps < 0 || feeBps >= 10000) {
     throw new Error(`feeBps must be an integer in [0, 10000), got ${feeBps}`);
   }
@@ -195,13 +193,6 @@ export function createApi(deps: ApiDeps) {
     }
     const wbtcAmount = parseAmount(body.wbtcAmount, "wbtcAmount");
     if (wbtcAmount === 0n) throw new ApiError(400, "wbtcAmount must be > 0");
-    if (maxWbtcPerOrder > 0n && wbtcAmount > maxWbtcPerOrder) {
-      // Human-readable (WBTC units) — this can surface in the UI, so no raw base
-      // units. The frontend also pre-validates against /health's cap, so this is
-      // a defense-in-depth backstop.
-      const capBtc = (Number(maxWbtcPerOrder) / 1e8).toFixed(8).replace(/\.?0+$/, "");
-      throw new ApiError(400, `Amount exceeds the per-swap limit of ${capBtc} WBTC`);
-    }
     // QUOTE = wbtcAmount × (WBTC/BTC price) × (1 − feeBps). All BigInt, floor
     // division at each step → the user NEVER gets more than the true value
     // (no overpay) and the fee is exact. cBTC = 1 BTC (redeemable), so the only
@@ -453,7 +444,6 @@ export function createApi(deps: ApiDeps) {
       oracle: cfg.oracle,
       wbtc: cfg.wbtc,
       agent: account.address,
-      maxWbtcPerOrder: maxWbtcPerOrder.toString(),
       feeBps,
       floatSats,
       floatError,

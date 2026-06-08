@@ -32,8 +32,8 @@ export interface DeliveryParams {
    * C3 — optional hard ceiling on TOTAL cBTC value in-flight (sats), summed over
    * orders that are delivering/delivered but not yet finalised/refunded. 0 or
    * undefined = no extra cap. This is DEFENSE IN DEPTH: the float bound +
-   * per-order cap + locked-float exclusion already prevent over-delivery; this
-   * caps the blast radius of any unforeseen accounting error to a known limit.
+   * locked-float exclusion already prevent over-delivery; this caps the blast
+   * radius of any unforeseen accounting error to a known limit.
    */
   maxInflightSats?: bigint;
   /**

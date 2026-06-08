@@ -31,9 +31,6 @@ const BIND_HOST = process.env.API_BIND_HOST ?? "127.0.0.1";
 /** bytes32 cBTC instrument token used as MandateOutput.token (opaque on EVM). */
 const CBTC_TOKEN: Hex = (process.env.CBTC_TOKEN_BYTES32 as Hex) ?? pad("0xc87c", { size: 32 });
 
-/** Per-order WBTC ceiling (base units, 8dp). Default 0.001 WBTC for testnet. */
-const MAX_WBTC_PER_ORDER = BigInt(process.env.MAX_WBTC_PER_ORDER ?? 100_000); // 0.001 * 1e8
-
 /**
  * Solver/bridge fee in basis points (1 bps = 0.01%). Default 20 bps = 0.2% — the
  * cost of running the cross-chain bridge (gas to openFor/attest/finalise, the
@@ -105,7 +102,6 @@ async function main() {
     agentAccount: env.agentAccount,
     chain: { id: chainId, name: `${env.network}:${chainId}` },
     cbtcToken: CBTC_TOKEN,
-    maxWbtcPerOrder: MAX_WBTC_PER_ORDER,
     feeBps: SOLVER_FEE_BPS,
     depegGuard,
   });
@@ -119,7 +115,6 @@ async function main() {
     console.log(`  POST /quote     { user, wbtcAmount, cantonParty }`);
     console.log(`  POST /orders    { order, signature, cantonParty }`);
     console.log(`  GET  /orders/:orderId`);
-    console.log(`  per-order WBTC cap: ${Number(MAX_WBTC_PER_ORDER) / 1e8} WBTC`);
     console.log(`  solver fee: ${SOLVER_FEE_BPS} bps (${SOLVER_FEE_BPS / 100}%)${SOLVER_FEE_BPS === 0 ? " — clean 1:1" : ""}`);
   });
 

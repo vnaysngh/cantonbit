@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 
 import { useEffect, useRef, useState } from "react";
 
@@ -10,11 +11,22 @@ import { useEvmWallet } from "@/hooks/useEvmWallet";
 import { SWAP_CHAIN } from "@/lib/swap-evm";
 import { cn } from "@/lib/utils";
 
-// Swap is the only surfaced page right now, so the header has no nav items —
-// just the brand and the wallets dropdown. (Dashboard/Mint/Redeem/Activity
-// routes still exist but are intentionally not linked.)
+// Surfaced top-level pages. Mint/Redeem/Send/Receive/Dashboard routes still
+// exist but are intentionally NOT linked here — the header stays focused on the
+// swap/bridge product.
+//
+// NOT surfaced yet (pages exist, just unlinked):
+//   /stats    — needs meaningful aggregate data before it's worth showing.
+//   /activity — it's a mint/redeem history view (wrong domain for swaps) and
+//               there's no real swap-history source yet (the solver has no
+//               per-user orders feed). Re-add once swap history is persisted.
+const NAV_LINKS = [
+  { href: "/swap", label: "Swap" },
+  { href: "/how-it-works", label: "How it works" },
+] as const;
 
 export function TopNav() {
+  const pathname = usePathname();
   const { partyId, connectLoop, logoutLoop, loopConnecting, loopReady } = useWallet();
   const evm = useEvmWallet();
   const evmWrongChain = evm.chainId != null && evm.chainId !== SWAP_CHAIN.id;
@@ -37,12 +49,36 @@ export function TopNav() {
         <Link
           href="/swap"
           aria-label="OranjSwap — home"
-          className="flex items-center text-[22px] font-bold tracking-tight transition-opacity hover:opacity-80"
-          style={{ fontFamily: "var(--font-logo)" }}
+          className="flex items-center text-[22px] font-semibold tracking-[-0.02em] transition-opacity hover:opacity-80"
         >
           <span className="text-primary">Oranj</span>
           <span className="text-foreground">Swap</span>
         </Link>
+
+        {/* Primary nav — hidden on small screens (the brand + wallets stay). */}
+        <nav className="hidden items-center gap-1 sm:flex">
+          {NAV_LINKS.map((link) => {
+            const active =
+              link.href === "/swap"
+                ? pathname === "/swap" || pathname === "/"
+                : pathname.startsWith(link.href);
+            return (
+              <Link
+                key={link.href}
+                href={link.href}
+                aria-current={active ? "page" : undefined}
+                className={cn(
+                  "rounded-lg px-3 py-1.5 text-sm font-medium transition-colors",
+                  active
+                    ? "bg-muted text-foreground"
+                    : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+                )}
+              >
+                {link.label}
+              </Link>
+            );
+          })}
+        </nav>
 
         {/* Actions — a single Wallets dropdown */}
         <div className="flex items-center gap-3">

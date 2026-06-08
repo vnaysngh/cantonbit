@@ -91,9 +91,17 @@ export interface HealthResponse {
   oracle: string;
   wbtc: string;
   agent: string;
-  maxWbtcPerOrder: string;
+  /** Bridge fee in basis points (e.g. 20 = 0.2%). */
+  feeBps: number;
   floatSats: string | null;
   floatError: string | null;
+  /** De-peg circuit-breaker status. null = no guard configured. */
+  depeg: {
+    paused: boolean;
+    priceBtc?: number;
+    deviationBps?: number;
+    reason?: string;
+  } | null;
 }
 
 /** An API error that carries the HTTP status, so callers can tell a 404 (the
