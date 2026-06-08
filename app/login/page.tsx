@@ -107,7 +107,7 @@ export default function LoginPage() {
         <div className="mb-sm flex items-center justify-center">
           <Image
             src="/logo.png"
-            alt="Oranj"
+            alt="OranjSwap"
             width={174}
             height={42}
             className="block dark:hidden"
@@ -115,7 +115,7 @@ export default function LoginPage() {
           />
           <Image
             src="/logo-white.png"
-            alt="Oranj"
+            alt="OranjSwap"
             width={174}
             height={42}
             className="hidden dark:block"

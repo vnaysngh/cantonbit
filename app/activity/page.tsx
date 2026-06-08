@@ -127,8 +127,7 @@ export default function ActivityPage() {
       <header className="space-y-2">
         <h1 className="text-headline-lg text-on-background">Transaction History</h1>
         <p className="text-body-md text-on-surface-variant">
-          Review your recent minting and redemption activity across the Oranj
-          network.
+          Review your recent minting and redemption activity on OranjSwap.
         </p>
       </header>
 

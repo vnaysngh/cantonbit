@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 
 import { ChainIcon } from "@/components/ChainIcon";
 import { useEvmWallet } from "@/hooks/useEvmWallet";
@@ -15,6 +16,7 @@ import { truncatePartyId } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import {
   getQuote,
+  getHealth,
   submitOrder,
   getOrder,
   refundOrder,
@@ -79,6 +81,11 @@ export default function SwapPage() {
   const [amount, setAmount] = useState("0.0001");
   const [stage, setStage] = useState<Stage>({ kind: "idle" });
   const [wbtcBalance, setWbtcBalance] = useState<bigint | null>(null);
+  // Per-swap WBTC cap, fetched from the solver's /health. Lets the form reject an
+  // over-cap amount BEFORE the user clicks Review (rather than failing the quote
+  // with a raw server error). null = unknown (not yet fetched / solver down) →
+  // we don't block on it; the server still enforces the cap as the backstop.
+  const [maxWbtcPerOrder, setMaxWbtcPerOrder] = useState<bigint | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // CBTC balance from the connected Loop wallet (for the "You receive" panel).
@@ -119,6 +126,24 @@ export default function SwapPage() {
     })();
     return () => { cancelled = true; };
   }, [evm.account, wrongChain, refreshBalance]);
+
+  // Fetch the per-swap WBTC cap once, so the form can pre-validate the amount.
+  // Best-effort: if the solver is down we leave it null (the server still
+  // enforces the cap), so this never blocks the UI from loading.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const h = await getHealth();
+        if (cancelled) return;
+        const cap = BigInt(h.maxWbtcPerOrder);
+        setMaxWbtcPerOrder(cap > 0n ? cap : null); // 0 = no cap
+      } catch {
+        /* solver down — server enforces the cap as the backstop */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   // --- CBTC auto-accept (preapproval) gate. With it ON, the delivered CBTC
   //     auto-accepts → solver finalises safely (accept-first, pay-second).
@@ -271,7 +296,15 @@ export default function SwapPage() {
       void refreshBalance(quote.wbtc);
       setStage({ kind: "quoted", quote });
     } catch (e) {
-      fail(e instanceof Error ? e.message : "Quote failed.");
+      // De-peg circuit breaker → 503. Show a clean "swaps paused" message rather
+      // than a raw error, so the user understands it's temporary + protective.
+      if (e instanceof ApiError && e.status === 503) {
+        fail(
+          "Swaps are paused — the WBTC/BTC price is temporarily unstable. This protects your funds; please try again shortly.",
+        );
+        return;
+      }
+      fail(getSwapErrorMessage(e));
     }
   }, [evm.account, destinationParty, amount, refreshBalance, wallet.provider, sessionReady]);
 
@@ -549,9 +582,10 @@ export default function SwapPage() {
   // CoW-style amount validation (TradeFormValidation analogue): compute the
   // amount state once, ordered — the button reflects the FIRST problem.
   //   notSet   → empty or zero  → "Enter an amount" (disabled)
-  //   tooMany  → parse fails    → "Invalid amount"  (disabled)
+  //   invalid  → parse fails    → "Invalid amount"  (disabled)
   //   overBal  → > balance      → "Insufficient WBTC balance" (disabled)
-  const amountState = ((): "ok" | "notSet" | "invalid" | "overBalance" => {
+  //   tooLarge → > per-swap cap → "Amount exceeds limit (…)"  (disabled)
+  const amountState = ((): "ok" | "notSet" | "invalid" | "overBalance" | "tooLarge" => {
     if (!amount || amount === "." ) return "notSet";
     let parsed: bigint;
     try {
@@ -561,6 +595,7 @@ export default function SwapPage() {
     }
     if (parsed <= 0n) return "notSet";
     if (wbtcBalance != null && parsed > wbtcBalance) return "overBalance";
+    if (maxWbtcPerOrder != null && parsed > maxWbtcPerOrder) return "tooLarge";
     return "ok";
   })();
 
@@ -602,6 +637,14 @@ export default function SwapPage() {
       primary = { label: "Invalid amount", onClick: () => {}, disabled: true };
     } else if (amountState === "overBalance") {
       primary = { label: "Insufficient WBTC balance", onClick: () => {}, disabled: true };
+    } else if (amountState === "tooLarge") {
+      primary = {
+        label: maxWbtcPerOrder != null
+          ? `Max ${formatWbtc(maxWbtcPerOrder)} WBTC per swap`
+          : "Amount exceeds limit",
+        onClick: () => {},
+        disabled: true,
+      };
     } else {
       // Session ready + amount valid. Review checks auto-accept (no signature)
       // then quotes; if auto-accept is OFF it opens the enable popup.
@@ -614,10 +657,18 @@ export default function SwapPage() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-[460px] px-4 py-10">
-      <h1 className="mb-4 px-1 text-2xl font-semibold text-foreground">Swap</h1>
+    <div className="mx-auto w-full max-w-[460px] px-4 py-6 sm:py-10">
+      <div className="mb-4 flex items-center justify-between px-1">
+        <h1 className="text-2xl font-semibold text-foreground">Swap</h1>
+        <Link
+          href="/activity"
+          className="text-sm text-muted-foreground transition-colors hover:text-foreground"
+        >
+          Activity
+        </Link>
+      </div>
 
-      <div className="rounded-3xl border border-foreground/10 bg-card p-3 shadow-sm">
+      <div className="rounded-3xl border border-foreground/10 bg-card p-4 shadow-sm sm:p-5">
         {showForm && (
           <>
             {/* You pay — WBTC on the source chain */}
@@ -671,9 +722,17 @@ export default function SwapPage() {
             </div>
 
             {stage.kind === "error" && (
-              <div className="mb-2 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-                {stage.message}
-              </div>
+              stage.message.startsWith("Swaps are paused") ? (
+                // De-peg circuit breaker — informational (amber), not an error (red).
+                <div className="mb-2 flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-foreground">
+                  <span className="material-symbols-outlined mt-0.5 text-[18px] text-amber-500">pause_circle</span>
+                  <span>{stage.message}</span>
+                </div>
+              ) : (
+                <div className="mb-2 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+                  {stage.message}
+                </div>
+              )
             )}
             {wallet.loopError && (
               <div className="mb-2 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
@@ -783,8 +842,8 @@ function TokenPanel({
   onMax?: () => void;
 }) {
   return (
-    <div className="rounded-2xl bg-muted/40 p-4">
-      <div className="mb-1 text-sm text-muted-foreground">{title}</div>
+    <div className="rounded-2xl bg-muted/40 p-4 ring-1 ring-transparent transition-colors focus-within:bg-muted/60 focus-within:ring-foreground/10">
+      <div className="mb-1.5 text-sm font-medium text-muted-foreground">{title}</div>
       <div className="flex items-center justify-between gap-3">
         {editable ? (
           <input
@@ -807,10 +866,10 @@ function TokenPanel({
               onAmountChange?.(cleaned);
             }}
             placeholder="0.0"
-            className="w-full min-w-0 bg-transparent text-3xl font-medium text-foreground outline-none placeholder:text-on-surface-variant/40"
+            className="w-full min-w-0 bg-transparent text-[2rem] font-semibold leading-none tracking-tight text-foreground outline-none placeholder:text-on-surface-variant/40"
           />
         ) : (
-          <div className="w-full min-w-0 truncate text-3xl font-medium text-foreground">
+          <div className="w-full min-w-0 truncate text-[2rem] font-semibold leading-none tracking-tight text-foreground">
             {amount === "0" ? (
               <span className="text-on-surface-variant/40">0.0</span>
             ) : (
@@ -820,13 +879,19 @@ function TokenPanel({
         )}
         <TokenBadge token={token} network={network} />
       </div>
+      {/* Balance + MAX row — only on the editable (pay) panel, or when a balance
+          is known. Reserves height so the card doesn't jump when it appears. */}
       {(balance !== undefined || onMax) && (
-        <div className="mt-2 flex items-center justify-end gap-2 text-xs text-muted-foreground">
-          {balance !== undefined && <span>Balance: {balance}</span>}
+        <div className="mt-3 flex items-center justify-end gap-2 text-xs text-muted-foreground">
+          {balance !== undefined && (
+            <span>
+              Balance: <span className="text-foreground/70">{balance}</span>
+            </span>
+          )}
           {onMax && (
             <button
               onClick={onMax}
-              className="font-semibold text-primary hover:opacity-80"
+              className="rounded-md px-1.5 py-0.5 text-xs font-semibold text-primary transition-colors hover:bg-primary/10"
             >
               MAX
             </button>
@@ -1035,7 +1100,6 @@ function TrackingView({
 }) {
   const [refunding, setRefunding] = useState(false);
   const [refundMsg, setRefundMsg] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
 
   // Tick a clock so "expires in …" and the refund eligibility update live.
@@ -1072,11 +1136,6 @@ function TrackingView({
     if (r?.startsWith("__error__:")) setRefundMsg(r.slice("__error__:".length));
   };
 
-  const copyOrder = () => {
-    void navigator.clipboard.writeText(orderId);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
 
   // Hero icon/tone per progress state; the title + caption come from PROGRESS_COPY
   // (the single source of CoW-style wording).
@@ -1244,17 +1303,14 @@ function TrackingView({
         </button>
       )}
 
-      {/* Order id — truncated + copyable, plus a quiet escape hatch while live. */}
-      <div className="flex items-center justify-between px-1 text-xs text-muted-foreground">
-        <button onClick={copyOrder} className="font-mono hover:text-foreground" title="Copy order id">
-          {copied ? "Copied!" : `Order ${orderId.slice(0, 6)}…${orderId.slice(-4)}`}
-        </button>
-        {!done && !refunded && !failed && (
+      {/* A quiet escape hatch while a swap is live (no order id shown to the user). */}
+      {!done && !refunded && !failed && (
+        <div className="flex justify-end px-1 text-xs text-muted-foreground">
           <button onClick={onReset} className="hover:text-foreground">
             Start over
           </button>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1292,7 +1348,7 @@ function SignGateModal({
           One quick signature to continue
         </h2>
         <p className="mt-2 text-sm text-on-surface-variant">
-          Sign a message in your Loop wallet so Oranj can confirm your swap
+          Sign a message in your Loop wallet so OranjSwap can confirm your swap
           settings and track delivery. It&rsquo;s a one-time signature and{" "}
           <span className="font-medium text-foreground">moves no funds</span>.
         </p>

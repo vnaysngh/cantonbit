@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Plus_Jakarta_Sans } from "next/font/google";
+import { Plus_Jakarta_Sans, Space_Grotesk } from "next/font/google";
 import "./globals.css";
 
 import { WalletProvider } from "@/hooks/useWallet";
@@ -19,9 +19,18 @@ const jakarta = Plus_Jakarta_Sans({
   display: "swap"
 });
 
+// Display typeface for the OranjSwap wordmark — Space Grotesk: geometric, modern,
+// with enough character to read as a logo. Exposed as --font-logo.
+const spaceGrotesk = Space_Grotesk({
+  variable: "--font-logo",
+  subsets: ["latin"],
+  weight: ["500", "600", "700"],
+  display: "swap"
+});
+
 export const metadata: Metadata = {
-  title: "Oranj",
-  description: "Mint, hold, and transfer CBTC on Canton Network."
+  title: "OranjSwap",
+  description: "Swap WBTC to CBTC across Arbitrum and Canton Network."
 };
 
 export default function RootLayout({
@@ -35,7 +44,7 @@ export default function RootLayout({
       // suppressHydrationWarning needed because next-themes injects the
       // resolved theme class on <html> before React hydrates.
       suppressHydrationWarning
-      className={`${jakarta.variable} h-full antialiased`}
+      className={`${jakarta.variable} ${spaceGrotesk.variable} h-full antialiased`}
     >
       <head>
         {/* Material Symbols (Outlined) — nav + status iconography. This is a

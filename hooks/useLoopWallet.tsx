@@ -72,7 +72,7 @@ const LoopContext = createContext<LoopState>({
   connect: async () => {}, logout: () => {},
 });
 
-const APP_NAME = "Oranj";
+const APP_NAME = "OranjSwap";
 
 export function LoopWalletProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);

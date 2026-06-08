@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
 
 import { useEffect, useRef, useState } from "react";
@@ -35,15 +34,14 @@ export function TopNav() {
     <header className="sticky top-0 z-50 border-b border-outline-variant bg-surface/80 backdrop-blur-md">
       <div className="mx-auto flex h-16 w-full max-w-[1200px] items-center justify-between gap-4 px-container-padding">
         {/* Brand */}
-        <Link href="/swap" aria-label="Oranj — home" className="flex items-center gap-2">
-          <Image
-            src="/logo.png"
-            alt="Oranj"
-            width={64}
-            height={0}
-            style={{ height: "auto" }}
-            priority
-          />
+        <Link
+          href="/swap"
+          aria-label="OranjSwap — home"
+          className="flex items-center text-[22px] font-bold tracking-tight transition-opacity hover:opacity-80"
+          style={{ fontFamily: "var(--font-logo)" }}
+        >
+          <span className="text-primary">Oranj</span>
+          <span className="text-foreground">Swap</span>
         </Link>
 
         {/* Actions — a single Wallets dropdown */}

@@ -196,7 +196,11 @@ export function createApi(deps: ApiDeps) {
     const wbtcAmount = parseAmount(body.wbtcAmount, "wbtcAmount");
     if (wbtcAmount === 0n) throw new ApiError(400, "wbtcAmount must be > 0");
     if (maxWbtcPerOrder > 0n && wbtcAmount > maxWbtcPerOrder) {
-      throw new ApiError(400, `wbtcAmount ${wbtcAmount} exceeds per-order cap ${maxWbtcPerOrder}`);
+      // Human-readable (WBTC units) — this can surface in the UI, so no raw base
+      // units. The frontend also pre-validates against /health's cap, so this is
+      // a defense-in-depth backstop.
+      const capBtc = (Number(maxWbtcPerOrder) / 1e8).toFixed(8).replace(/\.?0+$/, "");
+      throw new ApiError(400, `Amount exceeds the per-swap limit of ${capBtc} WBTC`);
     }
     // QUOTE = wbtcAmount × (WBTC/BTC price) × (1 − feeBps). All BigInt, floor
     // division at each step → the user NEVER gets more than the true value

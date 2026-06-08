@@ -915,7 +915,7 @@ function HowRedeemWorks() {
         </h1>
         <p className="text-body-lg text-on-surface-variant">
           Bridge your assets back to the Bitcoin network securely with
-          Oranj&apos;s decentralized protocol.
+          OranjSwap.
         </p>
       </div>
 
