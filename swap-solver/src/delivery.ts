@@ -166,7 +166,20 @@ export async function startDelivery(
     return { kind: "skipped", reason: "another worker already claimed this order (concurrency guard)" };
   }
 
-  // --- Create the offer (Phase 1). ---
+  // NOTE (Allocation investigation, 2026-06): we evaluated delivering cBTC via the
+  // Splice Allocation primitive (lock → execute). E2E on mainnet proved Allocation
+  // is the WRONG primitive for a one-directional delivery: it is a two-party DvP
+  // settlement template (`DvpLegAllocation`) whose `Allocation_ExecuteTransfer`
+  // requires BOTH executor AND receiver to co-authorize the SAME transaction —
+  // impossible cross-participant (solver can't act for a user's Loop party; we got
+  // DAML_AUTHORIZATION_ERROR / 403). The standard's own guidance: TransferInstruction
+  // is the correct primitive for sender→receiver delivery; Allocation is for atomic
+  // multi-leg DvP. So we keep the TransferInstruction (createOffer) path below.
+  // (`canton.allocate/executeAllocation/withdrawAllocation` remain — lock+withdraw
+  // work and are useful if a true DvP flow is ever built — but are NOT used for
+  // delivery.) See docs/ALLOCATION-FINDING.md.
+
+  // --- Create the offer (Phase 1) — TransferInstruction delivery. ---
   try {
     const holdings = await canton.getHoldings(canton.solverParty);
     const { updateId, offerContractId, autoAccepted, inputHoldingCids } = await canton.createOffer({

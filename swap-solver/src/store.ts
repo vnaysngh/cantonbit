@@ -52,6 +52,12 @@ export interface OrderRecord {
   /** Canton delivery reference (e.g. update id), once known. */
   cantonDeliveryRef?: string;
   /**
+   * The Allocation contract id, when delivering via the Splice Allocation
+   * primitive (USE_ALLOCATION mode). Recorded the moment the cBTC is locked, so a
+   * crash/timeout before execute can `withdrawAllocation` to reclaim the float.
+   */
+  allocationCid?: string;
+  /**
    * True once the user has ACCEPTED the cBTC on Canton — even if the accept was
    * too late to finalise on-chain. SECURITY (HIGH-1): a refund must NEVER be
    * issued for an order with this set, or the user would keep both the cBTC and

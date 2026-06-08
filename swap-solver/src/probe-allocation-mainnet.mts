@@ -99,7 +99,7 @@ async function main() {
     if (MODE === "happy") {
       // 3a. EXECUTE (B4/B5) — release to receiver
       console.log(`[3] executeTransfer (releasing to receiver)…`);
-      const { updateId } = await canton.executeAllocation(allocationCid);
+      const { updateId } = await canton.executeAllocation(allocationCid, RECIPIENT);
       executed = true;
       console.log(`    ✓ B4/B5: released. updateId=${updateId.slice(0, 24)}…`);
       console.log(`    (0.00001 cBTC now at recipient — recover from that wallet)`);

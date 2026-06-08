@@ -497,17 +497,64 @@ export class CantonClient {
     return { updateId, allocationCid, lockedHoldingCids: inputHoldingCids };
   }
 
-  /** Release locked cBTC to the receiver (executor authority). Before settleBefore. */
-  async executeAllocation(allocationCid: string): Promise<{ updateId: string }> {
+  /**
+   * Fetch the registry choice-context for an Allocation lifecycle choice. Like
+   * the transfer-accept and allocate paths, the cBTC registry must supply the
+   * disclosed contracts + choiceContextData for `Allocation_ExecuteTransfer` /
+   * `_Withdraw` / `_Cancel` — exercising with an empty context fails on the live
+   * registry. `kind` selects the endpoint per the Allocation OpenAPI.
+   */
+  private async allocationChoiceContext(
+    allocationCid: string,
+    kind: "execute-transfer" | "withdraw" | "cancel",
+  ): Promise<{ choiceContextData: unknown; disclosed: DisclosedContract[] }> {
+    const url =
+      `${this.cfg.registryUrl}/api/token-standard/v0/registrars/${this.cfg.decentralizedPartyId}` +
+      `/registry/allocations/v1/${allocationCid}/choice-contexts/${kind}`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ meta: {} }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "<no body>");
+      throw new Error(`allocation choice-context (${kind}) failed (${res.status}): ${text}`);
+    }
+    const ctx = (await res.json()) as {
+      choiceContextData: unknown;
+      disclosedContracts: DisclosedContract[];
+    };
+    const disclosed = (ctx.disclosedContracts ?? []).map((dc) => ({
+      ...dc,
+      synchronizerId: dc.synchronizerId ?? "",
+    }));
+    return { choiceContextData: ctx.choiceContextData, disclosed };
+  }
+
+  /**
+   * Release locked cBTC to the receiver. The cBTC registry's DvpLegAllocation
+   * requires `Allocation_ExecuteTransfer` to be authorized by BOTH the executor
+   * (solver) AND the receiver (verified live: DAML_AUTHORIZATION_ERROR otherwise).
+   * Pass `receiverParty` so we can co-act as them — works only when our JWT has
+   * authority over that party (same participant). For a cross-participant user
+   * party, the solver cannot co-authorize and this path is not usable (the
+   * legacy transfer-accept flow is required there). Before settleBefore.
+   */
+  async executeAllocation(
+    allocationCid: string,
+    receiverParty?: string,
+  ): Promise<{ updateId: string }> {
     const jwt = await this.getJwt();
+    const ctx = await this.allocationChoiceContext(allocationCid, "execute-transfer");
     const { updateId } = await this.submitExercise({
       jwt,
       workflow: "swap-allocation-execute",
       templateId: ALLOCATION_INTERFACE,
       contractId: allocationCid,
       choice: "Allocation_ExecuteTransfer",
-      choiceArgument: { extraArgs: { context: { values: {} }, meta: { values: {} } } },
-      disclosed: [],
+      choiceArgument: { extraArgs: { context: ctx.choiceContextData, meta: { values: {} } } },
+      disclosed: ctx.disclosed,
+      actAsExtra: receiverParty ? [receiverParty] : undefined,
     });
     return { updateId };
   }
@@ -515,14 +562,15 @@ export class CantonClient {
   /** Refund locked cBTC back to the sender (solver). The escape hatch / timeout path. */
   async withdrawAllocation(allocationCid: string): Promise<{ updateId: string }> {
     const jwt = await this.getJwt();
+    const ctx = await this.allocationChoiceContext(allocationCid, "withdraw");
     const { updateId } = await this.submitExercise({
       jwt,
       workflow: "swap-allocation-withdraw",
       templateId: ALLOCATION_INTERFACE,
       contractId: allocationCid,
       choice: "Allocation_Withdraw",
-      choiceArgument: { extraArgs: { context: { values: {} }, meta: { values: {} } } },
-      disclosed: [],
+      choiceArgument: { extraArgs: { context: ctx.choiceContextData, meta: { values: {} } } },
+      disclosed: ctx.disclosed,
     });
     return { updateId };
   }
@@ -541,8 +589,14 @@ export class CantonClient {
     choice: string;
     choiceArgument: unknown;
     disclosed: DisclosedContract[];
+    /** Extra parties to act as (beyond the solver). For choices the cBTC registry
+     *  requires the receiver to co-authorize (e.g. Allocation_ExecuteTransfer on a
+     *  DvpLegAllocation). Only works when our JWT has authority over them (same
+     *  participant); a cross-participant user party cannot be added here. */
+    actAsExtra?: string[];
   }): Promise<{ updateId: string; createdCids: string[] }> {
     const commandId = randomUUID();
+    const actAs = [this.cfg.solverParty, ...(p.actAsExtra ?? [])];
     const res = await fetch(
       `${this.cfg.ledgerHost}/v2/commands/submit-and-wait-for-transaction-tree`,
       {
@@ -552,8 +606,8 @@ export class CantonClient {
           applicationId: "cbtc-app",
           workflowId: `${p.workflow}-${commandId}`,
           commandId,
-          actAs: [this.cfg.solverParty],
-          readAs: [this.cfg.solverParty],
+          actAs,
+          readAs: actAs,
           commands: [
             {
               ExerciseCommand: {

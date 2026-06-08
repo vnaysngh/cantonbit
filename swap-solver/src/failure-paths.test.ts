@@ -34,11 +34,14 @@ function order(amountSats: string, fillDeadline = NOW + 3600): SerializedOrder {
 }
 
 // Mock that records how many times createOffer is called and with which holdings,
-// so we can detect double-spends / races.
+// so we can detect double-spends / races. Also records allocation lifecycle calls.
 function mockCanton(opts: {
   floatSats: bigint;
   holdings: HoldingLite[];
   onCreate?: (n: number) => void;
+  onAllocate?: () => void;
+  onExecute?: () => void;
+  onWithdraw?: () => void;
 }): CantonClient {
   let calls = 0;
   return {
@@ -46,6 +49,9 @@ function mockCanton(opts: {
     getFloatSats: async () => opts.floatSats,
     getHoldings: async () => opts.holdings,
     createOffer: async () => { calls++; opts.onCreate?.(calls); return { updateId: `u${calls}`, offerContractId: `offer${calls}`, autoAccepted: false, inputHoldingCids: ["h1"] }; },
+    allocate: async () => { opts.onAllocate?.(); return { updateId: "alloc-u", allocationCid: "alloc-cid", lockedHoldingCids: ["h1"] }; },
+    executeAllocation: async () => { opts.onExecute?.(); return { updateId: "exec-u" }; },
+    withdrawAllocation: async () => { opts.onWithdraw?.(); return { updateId: "wd-u" }; },
   } as unknown as CantonClient;
 }
 
