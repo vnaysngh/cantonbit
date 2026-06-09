@@ -1234,23 +1234,16 @@ function TrackingView({
         <div className="text-xs text-destructive">Refund failed: {refundMsg}</div>
       )}
 
-      {(done || refunded || failed) && (
-        <button
-          onClick={onReset}
-          className="w-full rounded-2xl bg-primary py-4 text-base font-semibold text-on-primary transition-all hover:opacity-90 active:scale-[0.99]"
-        >
-          New swap
-        </button>
-      )}
-
-      {/* A quiet escape hatch while a swap is live (no order id shown to the user). */}
-      {!done && !refunded && !failed && (
-        <div className="flex justify-end px-1 text-xs text-muted-foreground">
-          <button onClick={onReset} className="hover:text-foreground">
-            Start over
-          </button>
-        </div>
-      )}
+      {/* "New swap" — same button in every state. While a swap is still live this
+          returns to the form to start ANOTHER swap; the current one keeps tracking
+          in the "Your swaps" panel (it isn't abandoned). On a finished swap it
+          clears the receipt. Consistent label so the action reads the same. */}
+      <button
+        onClick={onReset}
+        className="w-full rounded-2xl bg-primary py-4 text-base font-semibold text-on-primary transition-all hover:opacity-90 active:scale-[0.99]"
+      >
+        New swap
+      </button>
     </div>
   );
 }
