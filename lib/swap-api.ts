@@ -5,12 +5,16 @@
  * a thin typed fetch wrapper the /swap page uses to: get a quote (which returns
  * the Permit2 typed data to sign), submit the signed order, and poll status.
  *
- * The base URL is configured via NEXT_PUBLIC_SWAP_API_URL (defaults to
- * http://localhost:8787 for local dev).
+ * Base URL resolution:
+ *   - NEXT_PUBLIC_SWAP_API_URL, if set, wins (e.g. a direct solver URL for local
+ *     dev: http://localhost:8787).
+ *   - Otherwise we hit the SAME-ORIGIN proxy at /api/solver (app/api/solver/[...path]),
+ *     which forwards server-side to the PRIVATE solver. This keeps the solver off
+ *     the public internet in split-service deploys (e.g. Railway).
  */
 
 export const SWAP_API_URL =
-  process.env.NEXT_PUBLIC_SWAP_API_URL ?? "http://localhost:8787";
+  process.env.NEXT_PUBLIC_SWAP_API_URL ?? "/api/solver";
 
 /** Permit2 typed data the wallet signs (EIP-712). */
 export interface Permit2TypedData {
