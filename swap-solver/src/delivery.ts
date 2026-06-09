@@ -37,6 +37,14 @@ export interface DeliveryParams {
    */
   maxInflightSats?: bigint;
   /**
+   * FAIRNESS — optional per-user ceiling on in-flight cBTC (sats), summed over a
+   * single user's delivering/delivered-but-not-finalised orders. Prevents ONE
+   * user from monopolizing the shared cBTC float and starving others. CoW has no
+   * shared float (solvers front their own capital), so it omits this; our
+   * custodial single-float design needs it. 0/undefined = no per-user cap.
+   */
+  perUserInflightCapSats?: bigint;
+  /**
    * PRE-FLIGHT: verify the WBTC collection is GUARANTEED before we deliver the
    * cBTC, so the two legs pass-or-fail together (never user-gets-cBTC-but-we-
    * lose-WBTC). Returns ok=false to ABORT the delivery (we never hand over cBTC
@@ -136,6 +144,25 @@ export async function startDelivery(
     }
     if (inflight + needSats > params.maxInflightSats) {
       return { kind: "skipped", reason: `in-flight cap: ${inflight}+${needSats} > ${params.maxInflightSats} sats — waiting for settlement` };
+    }
+  }
+
+  // --- GUARD 3b (FAIRNESS): per-user in-flight cap. Sum THIS user's cBTC value
+  // already delivering/delivered (not yet finalised); if adding this order would
+  // exceed the per-user ceiling, skip until the user's earlier orders settle. Stops
+  // one user from draining the shared float and starving everyone else. (CoW omits
+  // this only because it has no shared float — each solver fronts its own capital.) ---
+  if (params.perUserInflightCapSats && params.perUserInflightCapSats > 0n) {
+    let userInflight = 0n;
+    for (const r of store.byUser(rec.order.user, ["delivering", "delivered"])) {
+      const o = r.order.outputs[0];
+      if (o) userInflight += BigInt(o.amount);
+    }
+    if (userInflight + needSats > params.perUserInflightCapSats) {
+      return {
+        kind: "skipped",
+        reason: `per-user in-flight cap: ${rec.order.user} has ${userInflight}+${needSats} > ${params.perUserInflightCapSats} sats — waiting for their earlier orders to settle`,
+      };
     }
   }
 

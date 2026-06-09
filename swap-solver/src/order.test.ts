@@ -25,6 +25,7 @@ import {
   verifyCantonParty,
   type SwapRequest,
 } from "./order.js";
+import { randomNonce } from "./api.js";
 
 const ORACLE: Address = "0x00000000000000000000000000000000000000aa";
 const ESCROW: Address = "0x00000000000000000000000000000000000000bb";
@@ -71,6 +72,40 @@ test("FEE: the fee-reduced cbtcAmount is bound into output.amount (the signed or
   const fee = wbtcAmount - cbtcAmount;
   assert.equal(fee, 200_000n, "0.2% of 1 WBTC = 0.002 BTC fee");
   assert.ok(cbtcAmount <= wbtcAmount, "solver must never deliver more than it collects");
+});
+
+test("NONCE: randomNonce is unique and full-width (no same-second collision)", () => {
+  // The nonce must be unique per quote so two orders with IDENTICAL params (even
+  // submitted in the same second) get DIFFERENT orderIds. The old nonce was
+  // BigInt(nowSeconds()) which collided within a second. randomNonce() is 256-bit
+  // random → cryptographically impossible to collide.
+  const N = 1000;
+  const seen = new Set<string>();
+  let maxBits = 0;
+  for (let i = 0; i < N; i++) {
+    const n = randomNonce();
+    seen.add(n.toString());
+    maxBits = Math.max(maxBits, n.toString(2).length);
+  }
+  assert.equal(seen.size, N, "all nonces must be distinct");
+  // uint256 capacity: nonce must be able to use the high bits (proves we didn't
+  // accidentally cap it at a small width like a timestamp).
+  assert.ok(maxBits > 200, `nonce should span the uint256 range, got max ${maxBits} bits`);
+});
+
+test("NONCE: two orders with identical params get DIFFERENT orderIds (CoW parity)", () => {
+  // CoW differentiates otherwise-identical orders via a unique appData/quoteId so
+  // their UIDs differ. Our equivalent is the random nonce. Build two orders with
+  // byte-identical params at the SAME timestamp; only the nonce differs → the
+  // orderIds MUST differ.
+  const base = req();
+  const a = buildOrder(cfg(), { ...base, nonce: randomNonce() }, NOW);
+  const b = buildOrder(cfg(), { ...base, nonce: randomNonce() }, NOW);
+  assert.notEqual(a.orderId, b.orderId, "identical-param orders must get distinct orderIds");
+  // Sanity: the ONLY difference is the nonce.
+  assert.notEqual(a.order.nonce, b.order.nonce);
+  assert.equal(a.order.user, b.order.user);
+  assert.equal(BigInt(a.order.inputs[0]![1]), BigInt(b.order.inputs[0]![1]));
 });
 
 test("inputOracle equals output.oracle id (the core invariant)", () => {

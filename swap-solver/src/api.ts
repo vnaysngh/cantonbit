@@ -26,14 +26,16 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { randomBytes } from "node:crypto";
 import {
   createWalletClient, createPublicClient, http as viemHttp, getContract,
+  recoverTypedDataAddress, getAddress, parseAbi,
   type Account, type Address, type Hex,
 } from "viem";
 
 import { makeNetworkConfig, type SwapNetworkConfig } from "./config.js";
 import { buildOrder, verifyCantonParty, type SwapRequest } from "./order.js";
-import { buildOpenForTypedData } from "./open-for.js";
+import { buildOpenForTypedData, PERMIT2_ADDRESS } from "./open-for.js";
 import { ESCROW_ABI } from "./abi.js";
 import { OrderStore, type OrderRecord, type SerializedOrder } from "./store.js";
 import { serializeOrder, deserializeOrder } from "./convert.js";
@@ -67,6 +69,12 @@ export interface ApiDeps {
    * because the 1:1 quote is only valid while the peg holds. Undefined = disabled.
    */
   depegGuard?: { check(nowSeconds: number): Promise<DepegStatus> };
+  /**
+   * Deny-list of banned user addresses (lowercased). Ports CoW's banned_users
+   * check (order_validation.rs:622-628): a banned user is rejected at intake,
+   * before any irreversible lock. Empty/undefined = no bans.
+   */
+  bannedUsers?: Set<string>;
 }
 
 /** JSON helpers that don't choke on bigint. */
@@ -145,12 +153,60 @@ function parseAmount(v: unknown, field: string): bigint {
   throw new ApiError(400, `${field} must be a non-negative integer (base units), got ${JSON.stringify(v)}`);
 }
 
-class ApiError extends Error {
+export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
 
+/** Minimal ERC-20 reads for the pre-flight balance/allowance gates. */
+const ERC20_ABI = parseAbi([
+  "function balanceOf(address) view returns (uint256)",
+  "function allowance(address,address) view returns (uint256)",
+]);
+
+/** uint256 ceiling — amounts that meet/exceed this would truncate on-chain. */
+const MAX_UINT256 = 2n ** 256n - 1n;
+
+/**
+ * Pure intake validation — GATES A (token identity), B (banned user), C (overflow).
+ * Extracted from handleCreateOrder so it's unit-testable WITHOUT a live chain.
+ * Ports CoW's deny_listed_tokens (order_validation.rs:660-667), banned_users
+ * (:622-628), and overflow check (:259). Throws ApiError on violation; returns the
+ * validated WBTC input amount on success.
+ *
+ * NOTE: the signature-recovery (D) and balance/allowance (E) gates stay inline in
+ * handleCreateOrder — they require chain reads (recover + eth_call) and are covered
+ * by live verification, not this pure function.
+ */
+export function validateOrderIntake(
+  order: { user: string; inputs: readonly (readonly [bigint, bigint])[] },
+  out0: { token: string; amount: string },
+  cfg: { wbtc: string; cbtcToken: string; bannedUsers?: Set<string> },
+): bigint {
+  // GATE A — token identity. Must trade EXACTLY the configured WBTC→cBTC pair.
+  const inputToken = order.inputs[0]?.[0];
+  if (inputToken === undefined || getAddress(`0x${inputToken.toString(16).padStart(40, "0")}`) !== getAddress(cfg.wbtc)) {
+    throw new ApiError(400, "order input token is not the configured WBTC");
+  }
+  if (out0.token.toLowerCase() !== cfg.cbtcToken.toLowerCase()) {
+    throw new ApiError(400, "order output token is not the configured cBTC instrument");
+  }
+
+  // GATE B — banned user.
+  if (cfg.bannedUsers && cfg.bannedUsers.has(order.user.toLowerCase())) {
+    throw new ApiError(403, "user is not permitted to place orders");
+  }
+
+  // GATE C — uint256 range. Amounts must be positive and fit in uint256; anything
+  // ABOVE uint256-max would truncate on-chain. (uint256-max itself is legal.)
+  const wbtcAmount = order.inputs[0]?.[1] ?? 0n;
+  if (wbtcAmount <= 0n || wbtcAmount > MAX_UINT256 || BigInt(out0.amount) > MAX_UINT256) {
+    throw new ApiError(400, "order amount out of range");
+  }
+  return wbtcAmount;
+}
+
 export function createApi(deps: ApiDeps) {
-  const { cfg, store, canton, rpcUrl, agentAccount, chain, cbtcToken, feeBps, depegGuard } = deps;
+  const { cfg, store, canton, rpcUrl, agentAccount, chain, cbtcToken, feeBps, depegGuard, bannedUsers } = deps;
   if (!Number.isInteger(feeBps) || feeBps < 0 || feeBps >= 10000) {
     throw new Error(`feeBps must be an integer in [0, 10000), got ${feeBps}`);
   }
@@ -206,7 +262,11 @@ export function createApi(deps: ApiDeps) {
 
     const req: SwapRequest = {
       user, wbtcAmount, cbtcAmount, cantonParty, cbtcToken,
-      nonce: BigInt(nowSeconds()),
+      // Unique random nonce (256-bit). CoW differentiates otherwise-identical
+      // orders with a unique appData/quoteId; we use a cryptographically random
+      // nonce so the orderId hash is unique per quote. (The old `nowSeconds()`
+      // nonce collided for two quotes in the SAME second → same orderId.)
+      nonce: randomNonce(),
     };
     const built = buildOrder(cfg, req, nowSeconds());
 
@@ -306,6 +366,68 @@ export function createApi(deps: ApiDeps) {
       if (!(fillDeadline < expires)) {
         throw new ApiError(400, "order invariant violated: fillDeadline must be < expires");
       }
+    }
+
+    // ---- PRE-FLIGHT GATES (ported from CoW order_validation.rs) ----
+    // CoW validates EVERYTHING before the equivalent commit; our irreversible step
+    // is openFor (it pulls + locks the user's WBTC). So we run the same gates here,
+    // BEFORE openFor, to refuse an order that can never settle — rather than
+    // locking WBTC and forcing a refund round-trip.
+
+    // GATES A–C — pure intake validation (token identity, banned user, overflow).
+    // Extracted to validateOrderIntake() so it's unit-testable without a live chain.
+    // Throws ApiError on any violation. Returns the (validated) WBTC input amount.
+    const wbtcAmount = validateOrderIntake(order, out0, {
+      wbtc: cfg.wbtc,
+      cbtcToken,
+      bannedUsers,
+    });
+
+    // GATE D — ECDSA signature recovery (CoW verify_owner(), order_validation.rs:751).
+    // Recover the signer from the Permit2 typed-data the user signed and assert it
+    // IS order.user. Catches a forged/mismatched signature BEFORE openFor (which
+    // would otherwise revert on-chain after we already paid gas to submit it).
+    {
+      const typed = buildOpenForTypedData({ order, escrow: cfg.escrow, chainId: cfg.originChainId });
+      // openFor prepends a 0x00 Permit2 type byte; recovery uses the RAW 65-byte ECDSA sig.
+      const rawEcdsa: Hex = sig.length - 2 === 132 ? (`0x${sig.slice(4)}` as Hex) : sig;
+      let recovered: Address;
+      try {
+        recovered = await recoverTypedDataAddress({
+          domain: typed.domain,
+          types: typed.types,
+          primaryType: typed.primaryType,
+          message: typed.message,
+          signature: rawEcdsa,
+        });
+      } catch (e) {
+        throw new ApiError(400, `signature could not be recovered: ${e instanceof Error ? e.message : e}`);
+      }
+      if (getAddress(recovered) !== getAddress(order.user)) {
+        throw new ApiError(400, "signature does not match order.user");
+      }
+    }
+
+    // GATE E — balance + allowance pre-flight (CoW ensure_token_is_transferable,
+    // order_validation.rs:541-615). The user must actually hold wbtcAmount WBTC and
+    // have approved Permit2 for it; otherwise openFor reverts on-chain (wasted gas,
+    // poor UX). eth_call both before committing.
+    try {
+      const [balance, allowance] = await Promise.all([
+        pub.readContract({ address: cfg.wbtc as Address, abi: ERC20_ABI, functionName: "balanceOf", args: [order.user] }) as Promise<bigint>,
+        pub.readContract({ address: cfg.wbtc as Address, abi: ERC20_ABI, functionName: "allowance", args: [order.user, PERMIT2_ADDRESS] }) as Promise<bigint>,
+      ]);
+      if (balance < wbtcAmount) {
+        throw new ApiError(400, `insufficient WBTC balance: have ${balance}, need ${wbtcAmount}`);
+      }
+      if (allowance < wbtcAmount) {
+        throw new ApiError(400, "insufficient Permit2 allowance for WBTC — approve Permit2 first");
+      }
+    } catch (e) {
+      if (e instanceof ApiError) throw e;
+      // A failed RPC read shouldn't hard-fail the order (openFor still revert-guards
+      // it); log and continue, matching CoW's "simulation unavailable" tolerance.
+      console.warn(`[api] balance/allowance pre-flight read failed (continuing): ${e instanceof Error ? e.message : e}`);
     }
 
     const escrowC = getContract({ address: cfg.escrow, abi: ESCROW_ABI, client: wallet });
@@ -548,6 +670,17 @@ function publicOrder(rec: OrderRecord) {
 
 function nowSeconds(): number {
   return Math.floor(Date.now() / 1000);
+}
+
+/**
+ * A cryptographically-random 256-bit order nonce. Makes the orderId hash unique
+ * per quote so two orders (even with identical params, even in the same second)
+ * can never collide to the same orderId. 256 bits of entropy → collision is
+ * cryptographically impossible. `nonce` is uint256 on-chain (see abi.ts), so the
+ * full width fits without truncation. Exported for the nonce-uniqueness test.
+ */
+export function randomNonce(): bigint {
+  return BigInt("0x" + randomBytes(32).toString("hex"));
 }
 
 /** Network config helper re-export so callers don't import config separately. */

@@ -6,6 +6,7 @@ import { ChainIcon } from "@/components/ChainIcon";
 import { useEvmWallet } from "@/hooks/useEvmWallet";
 import { useWallet } from "@/hooks/useWallet";
 import { useBalance } from "@/hooks/useBalance";
+import { usePendingOrders, type TrackedOrder } from "@/hooks/usePendingOrders";
 import {
   hasCbtcAutoAccept,
   swapSessionActive,
@@ -16,9 +17,7 @@ import { cn } from "@/lib/utils";
 import {
   getQuote,
   submitOrder,
-  getOrder,
   refundOrder,
-  isTerminal,
   SWAP_STEPS,
   STEP_FOR_PROGRESS,
   deriveProgress,
@@ -55,8 +54,8 @@ type Stage =
   | { kind: "tracking"; orderId: string; order: OrderView | null }
   | { kind: "error"; message: string };
 
-/** localStorage key for resuming an in-flight order across a page refresh. */
-const ACTIVE_ORDER_KEY = "oranj.swap.activeOrder";
+// NOTE: pending-order persistence + multi-order tracking now lives in
+// usePendingOrders (the CoW-style order list). The single-active-order key is gone.
 
 /** Bridge fee in basis points for the pre-quote "You receive" estimate. Must
  *  match the solver's SOLVER_FEE_BPS (default 20 = 0.2%). The review modal shows
@@ -76,10 +75,18 @@ export default function SwapPage() {
     process.env.NEXT_PUBLIC_SWAP_DEST_PARTY ?? wallet.partyId;
   const loopConnected = wallet.isConnected && !!wallet.partyId;
 
-  const [amount, setAmount] = useState("0.0001");
+  // Amount starts EMPTY (CoW-style) — no default value. The input shows its "0.0"
+  // placeholder and the button reads "Enter an amount" until the user types. All
+  // downstream logic (receiveEstimate, amountState) already treats "" as not-set.
+  const [amount, setAmount] = useState("");
   const [stage, setStage] = useState<Stage>({ kind: "idle" });
   const [wbtcBalance, setWbtcBalance] = useState<bigint | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // CoW-style list of in-flight swaps — every submitted order is tracked here and
+  // polled independently, so starting a new swap (or another tab) never orphans a
+  // prior one. The big `stage="tracking"` view follows the most-recently-submitted
+  // order; older ones show in the "Your swaps" panel below the form.
+  const { orders: pendingOrders, addOrder, dismissOrder } = usePendingOrders();
 
   // CBTC balance from the connected Loop wallet (for the "You receive" panel).
   const { total: cbtcBalance } = useBalance();
@@ -142,13 +149,7 @@ export default function SwapPage() {
   const [enableVisited, setEnableVisited] = useState(false); // user went to settings
   const [enableChecking, setEnableChecking] = useState(false);
 
-  // --- cleanup polling on unmount ---
-  useEffect(
-    () => () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    },
-    []
-  );
+  // (Polling + its cleanup now live in usePendingOrders — nothing to tear down here.)
 
   // --- SIGN PREREQUISITE: when the swap screen is open and the Loop wallet is
   //     connected, check whether we already have a valid JWT session. If yes →
@@ -313,71 +314,14 @@ export default function SwapPage() {
     }
   }, [wallet.provider, handleQuote]);
 
-  // --- 5. poll status until terminal (defined before handleConfirm, which calls it) ---
+  // Begin tracking a freshly-submitted order: register it in the persistent
+  // pending-orders list (which polls it independently and survives refresh/tabs)
+  // and focus the detailed stage view on it. The list — not this function — owns
+  // polling + persistence + pruning now, so nothing is orphaned by a later swap.
   const startTracking = useCallback((orderId: string) => {
-    // Persist so a page refresh resumes tracking instead of losing the order.
-    try {
-      localStorage.setItem(ACTIVE_ORDER_KEY, orderId);
-    } catch {
-      /* ignore */
-    }
+    addOrder(orderId);
     setStage({ kind: "tracking", orderId, order: null });
-    if (pollRef.current) clearInterval(pollRef.current);
-
-    const stopPolling = () => {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
-    };
-    // Forget a dead order so it never haunts a future page load (the ghost
-    // "Swapping…" bug). Mirrors how CoW prunes orders the backend no longer
-    // knows / that have expired — a tracked order must always resolve to a
-    // definite end state, never spin forever.
-    const forget = () => {
-      try { localStorage.removeItem(ACTIVE_ORDER_KEY); } catch { /* ignore */ }
-    };
-
-    // Tolerate a brief window right after submit where the solver may 404 the
-    // order before it's registered; only give up after several consecutive 404s.
-    let notFoundStreak = 0;
-    const NOT_FOUND_GIVEUP = 4; // ~16s at the 4s cadence
-
-    const tick = async () => {
-      try {
-        const order = await getOrder(orderId);
-        notFoundStreak = 0;
-        setStage({ kind: "tracking", orderId, order });
-        if (isTerminal(order.status)) {
-          stopPolling();
-          if (order.status === "refunded" || order.status === "failed") forget();
-          // (finalised stays in localStorage only until the user hits "New swap";
-          //  the resume effect treats a terminal order as done, not in-flight.)
-        }
-      } catch (e) {
-        // A 404 means the solver doesn't know this order. Right after submit that
-        // can be transient; sustained, it means the order is gone (e.g. it
-        // expired + the solver pruned it, or a store reset). Resolve to a clean
-        // end state instead of spinning "Swapping…" forever.
-        if (e instanceof ApiError && e.status === 404) {
-          notFoundStreak += 1;
-          if (notFoundStreak >= NOT_FOUND_GIVEUP) {
-            stopPolling();
-            forget();
-            setStage({
-              kind: "error",
-              message:
-                "This order is no longer being tracked (it may have expired and refunded). Your WBTC is safe — start a new swap.",
-            });
-          }
-          return;
-        }
-        // Any other (network/5xx) error: keep polling — transient.
-      }
-    };
-    void tick();
-    pollRef.current = setInterval(tick, 4000);
-  }, []);
+  }, [addOrder]);
 
   // --- 2. approve (if needed) + 3. sign + 4. submit ---
   // Recoverable failures (rejected approve/sign, transient submit) return to the
@@ -478,30 +422,41 @@ export default function SwapPage() {
     [evm, startTracking]
   );
 
-  // Resume tracking an in-flight order across a page refresh. Deferred to a
-  // microtask so startTracking's setState doesn't run synchronously in the effect.
+  // On first load, if the pending-orders list restored any in-flight swap, focus
+  // the most recent one in the detailed view (resume-after-refresh). Runs once,
+  // after the list hydrates. Terminal-only lists don't hijack the form.
+  const resumedRef = useRef(false);
   useEffect(() => {
-    let saved: string | null = null;
-    try {
-      saved = localStorage.getItem(ACTIVE_ORDER_KEY);
-    } catch {
-      /* ignore */
-    }
-    if (saved && /^0x[0-9a-fA-F]{64}$/.test(saved)) {
-      const id = setTimeout(() => startTracking(saved!), 0);
+    if (resumedRef.current) return;
+    if (pendingOrders.length === 0) return;
+    resumedRef.current = true;
+    const live = pendingOrders.filter((o) => !o.terminal);
+    const focus = (live.length ? live : pendingOrders).at(-1);
+    if (focus) {
+      const id = setTimeout(
+        () => setStage({ kind: "tracking", orderId: focus.orderId, order: focus.order }),
+        0,
+      );
       return () => clearTimeout(id);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [pendingOrders]);
+
+  // The live OrderView for the focused tracking order is DERIVED from the list's
+  // polling at render time (no setState-in-effect mirroring). Falls back to the
+  // stage's own order (e.g. the brief moment right after submit, before the first
+  // poll resolves).
+  const focusedOrder =
+    stage.kind === "tracking"
+      ? (pendingOrders.find((o) => o.orderId === stage.orderId)?.order ?? stage.order)
+      : null;
 
   // --- refund an expired, stuck order (solver submits it; funds → user) ---
   const handleRefundOrder = useCallback(
     async (orderId: string): Promise<string | null> => {
       try {
         const res = await refundOrder(orderId);
-        // Re-poll once to reflect the refunded status.
-        const order = await getOrder(orderId).catch(() => null);
-        if (order) setStage({ kind: "tracking", orderId, order });
+        // The pending-orders list polls on its own, so the refunded status will
+        // reflect on the next tick — no manual re-poll needed here.
         return res.refundTx ?? null;
       } catch (e) {
         return `__error__:${getSwapErrorMessage(e)}`;
@@ -515,13 +470,13 @@ export default function SwapPage() {
   // UI no longer needs a manual "confirm delivery" step. The mandatory auto-accept
   // gate guarantees the accept fires without user action.
 
+  // Return to the swap form. If the focused order is FINISHED, drop it from the
+  // list (the receipt is done with). If it's still IN FLIGHT, leave it in the
+  // list so it keeps tracking in the "Your swaps" panel — never orphaned.
   const reset = () => {
-    if (pollRef.current) clearInterval(pollRef.current);
-    pollRef.current = null;
-    try {
-      localStorage.removeItem(ACTIVE_ORDER_KEY);
-    } catch {
-      /* ignore */
+    if (stage.kind === "tracking") {
+      const tracked = pendingOrders.find((o) => o.orderId === stage.orderId);
+      if (tracked?.terminal) dismissOrder(stage.orderId);
     }
     setStage({ kind: "idle" });
   };
@@ -713,13 +668,41 @@ export default function SwapPage() {
           <div className="px-1 pb-1 pt-2">
             <TrackingView
               orderId={stage.orderId}
-              order={stage.order}
+              order={focusedOrder}
               onReset={reset}
               onRefund={handleRefundOrder}
             />
           </div>
         )}
       </div>
+
+      {/* "Your swaps" — every OTHER tracked order (not the one in the big view).
+          CoW keeps all pending orders visible; this is how a swap started while
+          another is in flight (or in a second tab) stays trackable, never lost. */}
+      {(() => {
+        const focusedId = stage.kind === "tracking" ? stage.orderId : null;
+        const others = pendingOrders.filter((o) => o.orderId !== focusedId);
+        if (others.length === 0) return null;
+        return (
+          <div className="mt-4 rounded-3xl border border-foreground/10 bg-card p-4 shadow-sm">
+            <div className="mb-2 px-1 text-sm font-semibold text-foreground">
+              Your swaps
+            </div>
+            <div className="space-y-1">
+              {others.map((o) => (
+                <PendingOrderRow
+                  key={o.orderId}
+                  tracked={o}
+                  onView={() =>
+                    setStage({ kind: "tracking", orderId: o.orderId, order: o.order })
+                  }
+                  onDismiss={() => dismissOrder(o.orderId)}
+                />
+              ))}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Review modal — layers over the card (Uniswap "You're swapping"). Covers
           the quote review and the in-wallet approve/sign/submit steps. */}
@@ -1267,6 +1250,72 @@ function TrackingView({
             Start over
           </button>
         </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A compact row in the "Your swaps" panel — one in-flight (or recently-finished)
+ * order that isn't the one in the big detailed view. Shows amount + status, a
+ * "View" action to focus it, and a dismiss (×) for finished orders.
+ */
+function PendingOrderRow({
+  tracked,
+  onView,
+  onDismiss,
+}: {
+  tracked: TrackedOrder;
+  onView: () => void;
+  onDismiss: () => void;
+}) {
+  const { order, terminal } = tracked;
+  // Lazy-init + tick a clock (Date.now() can't be called during render — it's
+  // impure and would break SSR/concurrent rendering).
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    const t = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const progress = order ? deriveProgress(order, now) : "initial";
+  const copy = PROGRESS_COPY[progress];
+  const wbtc =
+    order?.wbtcAmount != null ? formatWbtc(BigInt(order.wbtcAmount)) : null;
+
+  // Status dot: green = done, red = failed/expired, muted = refunded, spinner-ish
+  // amber = in flight.
+  const dotClass =
+    progress === "finished"
+      ? "bg-emerald-500"
+      : progress === "failed" || progress === "expired"
+        ? "bg-destructive"
+        : progress === "refunded"
+          ? "bg-muted-foreground"
+          : "bg-amber-500";
+
+  return (
+    <div className="flex items-center gap-3 rounded-xl bg-muted/40 px-3 py-2.5">
+      <span className={cn("size-2 shrink-0 rounded-full", dotClass)} />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-medium text-foreground">
+          {wbtc ? `${wbtc} WBTC → CBTC` : "Swap"}
+        </div>
+        <div className="truncate text-xs text-muted-foreground">{copy.caption}</div>
+      </div>
+      <button
+        onClick={onView}
+        className="shrink-0 rounded-lg px-2.5 py-1 text-xs font-semibold text-primary transition-colors hover:bg-primary/10"
+      >
+        View
+      </button>
+      {terminal && (
+        <button
+          onClick={onDismiss}
+          aria-label="Dismiss"
+          className="flex size-6 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        >
+          <span className="material-symbols-outlined text-[18px]">close</span>
+        </button>
       )}
     </div>
   );

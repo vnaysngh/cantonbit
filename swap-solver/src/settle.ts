@@ -47,6 +47,13 @@ export interface SettleConfig {
    * identity) is hashed into the attestation; `destination` just routes funds.
    */
   payoutAddress?: Address;
+  /**
+   * Minimum agent ETH balance (wei) required to attempt settlement. Ports CoW's
+   * solver native-token guard (settlement.rs:84-136): if the hot key can't pay for
+   * attest+finalise gas, SKIP (don't strand a delivered order mid-settlement) and
+   * warn loudly. 0/undefined = no floor (best-effort). Set MIN_GAS_ETH_WEI to enable.
+   */
+  minEthForGasWei?: bigint;
 }
 
 export type SettleOutcome =
@@ -130,6 +137,24 @@ export class Settler {
     const order = deserializeOrder(rec.order);
     const output = order.outputs[0];
     if (!output) return fail(store, orderId, "order has no output");
+
+    // GAS PRE-FLIGHT (CoW solver native-token guard, settlement.rs:84-136): if the
+    // agent hot key lacks the ETH to pay for attest+finalise, SKIP rather than
+    // start and strand the order half-settled. Skipped (not failed) so the next
+    // tick retries once the key is topped up. The cBTC is already delivered; we
+    // just defer pulling the WBTC until we can afford the gas.
+    if (this.cfg.minEthForGasWei && this.cfg.minEthForGasWei > 0n) {
+      let agentEth: bigint;
+      try {
+        agentEth = await this.pub.getBalance({ address: this.cfg.account.address });
+      } catch (e) {
+        return { kind: "skipped", reason: `agent balance read failed (transient): ${e instanceof Error ? e.message : e}` };
+      }
+      if (agentEth < this.cfg.minEthForGasWei) {
+        console.warn(`[settle] agent ETH ${agentEth} < min ${this.cfg.minEthForGasWei} wei — deferring settlement of ${orderId.slice(0, 12)}… (top up the hot key)`);
+        return { kind: "skipped", reason: `agent ETH too low for gas: ${agentEth} < ${this.cfg.minEthForGasWei} wei` };
+      }
+    }
 
     const solverId = this.solverId();
     const fillTs = rec.fillTimestamp;

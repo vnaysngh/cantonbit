@@ -239,3 +239,167 @@ test("C5b: store survives reload — in-flight status persists across a 'restart
   assert.equal(rec?.status, "delivering", "in-flight status must survive a restart (crash-safe store)");
   console.log("[C5b] ✓ in-flight order state persists across restart (no loss of tracking).");
 });
+
+// ---------- C6: PER-USER fairness cap (shared-float protection) ----------
+// Unlike CoW (each solver fronts its OWN capital, so no shared pool to drain),
+// we deliver every user's cBTC from ONE shared float. The per-user in-flight cap
+// (GUARD 3b) stops a single user tying up the whole float and starving others.
+// CoW's analogue is a COUNT cap (max 10 limit orders/user, order_validation.rs:461);
+// ours is a VALUE cap because the risk is float-drain, not orderbook bloat.
+
+/** Build an order for a SPECIFIC user (the default helper hardcodes one user). */
+function orderForUser(amountSats: string, user: Hex, fillDeadline = NOW + 3600): SerializedOrder {
+  return { ...order(amountSats, fillDeadline), user };
+}
+
+const USER_A: Hex = "0x1111111111111111111111111111111111111111";
+const USER_B: Hex = "0x2222222222222222222222222222222222222222";
+
+test("C6: per-user cap SKIPS a user's 2nd order once their in-flight value hits the ceiling", async () => {
+  const store = tmpStore();
+  const canton = mockCanton({ floatSats: 10_000_000n, holdings: [{ contractId: "h1", amount: "1", createdEventBlob: "b", locked: false }] });
+  // User A already has one order (1000 sats) delivering.
+  const a1 = seedSeen(store, orderForUser("1000", USER_A));
+  store.update(a1, { status: "delivering" });
+  // A's 2nd order (1000 sats). Cap = 1500 → A has 1000 in-flight; 1000+1000 > 1500 → SKIP.
+  const a2 = seedSeen(store, orderForUser("1000", USER_A));
+  const out = await startDelivery(store, canton, a2, { ...params, perUserInflightCapSats: 1500n });
+  assert.equal(out.kind, "skipped", "user A's 2nd order must skip once over their per-user cap");
+  assert.match((out as any).reason, /per-user in-flight cap/, "skip reason must cite the per-user cap");
+  console.log("[C6] ✓ per-user cap enforced: a single user can't exceed their in-flight ceiling.");
+});
+
+test("C6b: a DIFFERENT user is NOT starved by user A's in-flight orders (cap is per-user, not global)", async () => {
+  const store = tmpStore();
+  const canton = mockCanton({ floatSats: 10_000_000n, holdings: [{ contractId: "h1", amount: "1", createdEventBlob: "b", locked: false }] });
+  // User A is at their cap (1000 sats in flight, cap 1500 — A's next would be blocked).
+  const a1 = seedSeen(store, orderForUser("1000", USER_A));
+  store.update(a1, { status: "delivering" });
+  // User B's FIRST order (1000 sats) must still proceed — B has 0 in-flight.
+  const b1 = seedSeen(store, orderForUser("1000", USER_B));
+  const out = await startDelivery(store, canton, b1, { ...params, perUserInflightCapSats: 1500n });
+  assert.ok(["delivering", "delivered"].includes((out as any).kind), "user B must NOT be blocked by user A's usage");
+  console.log("[C6b] ✓ cap is per-user: B is not starved by A — no false cross-user blocking.");
+});
+
+test("C6c: under their own cap, a user's 2nd order proceeds", async () => {
+  const store = tmpStore();
+  const canton = mockCanton({ floatSats: 10_000_000n, holdings: [{ contractId: "h1", amount: "1", createdEventBlob: "b", locked: false }] });
+  const a1 = seedSeen(store, orderForUser("1000", USER_A));
+  store.update(a1, { status: "delivering" });
+  // A's 2nd order (1000); cap 5000 → 1000+1000 <= 5000 → proceeds.
+  const a2 = seedSeen(store, orderForUser("1000", USER_A));
+  const out = await startDelivery(store, canton, a2, { ...params, perUserInflightCapSats: 5000n });
+  assert.ok(["delivering", "delivered"].includes((out as any).kind), "A's 2nd order proceeds while under their cap");
+  console.log("[C6c] ✓ under-cap orders proceed (cap doesn't over-block).");
+});
+
+test("C6d: per-user cap counts delivering + delivered, but NOT finalised/failed/refunded", async () => {
+  const store = tmpStore();
+  const canton = mockCanton({ floatSats: 10_000_000n, holdings: [{ contractId: "h1", amount: "1", createdEventBlob: "b", locked: false }] });
+  // A has prior orders in NON-in-flight states — these must NOT count against the cap.
+  const done1 = seedSeen(store, orderForUser("100000", USER_A));   store.update(done1, { status: "finalised" });
+  const done2 = seedSeen(store, orderForUser("100000", USER_A));   store.update(done2, { status: "refunded" });
+  const done3 = seedSeen(store, orderForUser("100000", USER_A));   store.update(done3, { status: "failed" });
+  // Plus one genuinely in-flight order worth 1000.
+  const live = seedSeen(store, orderForUser("1000", USER_A));      store.update(live, { status: "delivered" });
+  // New 1000-sat order; cap 1500. Only the `delivered` 1000 should count → 1000+1000 > 1500 → skip.
+  const a = seedSeen(store, orderForUser("1000", USER_A));
+  const out = await startDelivery(store, canton, a, { ...params, perUserInflightCapSats: 1500n });
+  assert.equal(out.kind, "skipped", "only delivering/delivered count; the finalised/refunded/failed 100k each must NOT inflate the sum");
+  console.log("[C6d] ✓ cap counts ONLY in-flight (delivering/delivered); settled/failed/refunded excluded.");
+});
+
+test("C6e: no per-user cap configured → unlimited (opt-in, off by default)", async () => {
+  const store = tmpStore();
+  const canton = mockCanton({ floatSats: 10_000_000n, holdings: [{ contractId: "h1", amount: "1", createdEventBlob: "b", locked: false }] });
+  // A has a big in-flight order; with NO cap set, a 2nd still proceeds.
+  const a1 = seedSeen(store, orderForUser("5000", USER_A));
+  store.update(a1, { status: "delivering" });
+  const a2 = seedSeen(store, orderForUser("5000", USER_A));
+  const out = await startDelivery(store, canton, a2, params); // no perUserInflightCapSats
+  assert.ok(["delivering", "delivered"].includes((out as any).kind), "with no cap set, orders are unlimited");
+  console.log("[C6e] ✓ cap is opt-in: unset → no per-user limit (back-compat).");
+});
+
+// ---------- C7: MULTI-USER concurrency — the shared float under simultaneous load ----------
+// Drives MANY users' orders through delivery at once and asserts: total cBTC
+// delivered never exceeds the float (no over-delivery), and the sequential loop
+// keeps the float race unreachable. This is the empirical multi-user test that was
+// previously only argued from code-reading.
+
+/**
+ * A float-debiting Canton mock: same shape as mockCanton, but createOffer spends
+ * `amountBtc` from a shared float so a LATER order in the same loop sees the
+ * reduced balance — modelling the real sequential delivery the float guard relies on.
+ */
+function debitingCanton(start: bigint, onSpend: (sats: bigint) => void): { canton: CantonClient; float: () => bigint } {
+  let floatSats = start;
+  const holdings: HoldingLite[] = [{ contractId: "h1", amount: "1", createdEventBlob: "b", locked: false }];
+  const canton = {
+    solverParty: "solver::1220aaa",
+    getFloatSats: async () => floatSats,
+    getHoldings: async () => holdings,
+    createOffer: async (args: { amountBtc: string }) => {
+      const spent = BigInt(Math.round(Number(args.amountBtc) * 1e8));
+      floatSats -= spent;
+      onSpend(spent);
+      return { updateId: "u", offerContractId: "o", autoAccepted: false, inputHoldingCids: ["h1"] };
+    },
+  } as unknown as CantonClient;
+  return { canton, float: () => floatSats };
+}
+
+test("C7: many users delivering concurrently never over-deliver the shared float", async () => {
+  const store = tmpStore();
+  // Float = 5000 sats. Ten users each want 1000 sats = 10000 wanted, but only 5000 exists.
+  // The float guard must let AT MOST 5 succeed; the rest fail 'insufficient float'.
+  // Crucially: total delivered must NEVER exceed 5000 (no over-delivery).
+  let delivered = 0n;
+  const { canton, float } = debitingCanton(5000n, (s) => { delivered += s; });
+
+  // 10 distinct users, one 1000-sat order each.
+  const ids = Array.from({ length: 10 }, (_, i) => {
+    const user = `0x${(i + 1).toString(16).padStart(40, "0")}` as Hex;
+    return seedSeen(store, orderForUser("1000", user));
+  });
+
+  // Deliver them SEQUENTIALLY (this mirrors deliverSeenOrders' for...await loop —
+  // the property that makes the float race unreachable). Each reads the float fresh.
+  let succeeded = 0, failedFloat = 0;
+  for (const id of ids) {
+    const out = await startDelivery(store, canton, id, params);
+    if (["delivering", "delivered"].includes((out as any).kind)) succeeded++;
+    else if (/insufficient cBTC float/.test((out as any).reason ?? "")) failedFloat++;
+  }
+
+  console.log(`[C7] ${succeeded} delivered, ${failedFloat} rejected (insufficient float); total delivered=${delivered} sats, float started=5000`);
+  assert.ok(delivered <= 5000n, `NEVER over-deliver the float: delivered ${delivered} > 5000`);
+  assert.equal(succeeded, 5, "exactly 5 orders fit in a 5000-sat float at 1000 each");
+  assert.equal(failedFloat, 5, "the other 5 must be cleanly rejected, not over-delivered");
+  assert.ok(float() >= 0n, `float must never go negative (got ${float()})`);
+  console.log("[C7] ✓ multi-user: shared float never over-delivered; surplus orders rejected cleanly.");
+});
+
+test("C7b: per-user cap + multi-user — one greedy user can't starve the float; others still served", async () => {
+  const store = tmpStore();
+  const { canton } = debitingCanton(10_000n, () => {});
+
+  // Greedy user A submits 5 orders of 1000 each (would take 5000); per-user cap = 2000.
+  const aIds = Array.from({ length: 5 }, () => seedSeen(store, orderForUser("1000", USER_A)));
+  // Honest user B submits 1 order of 1000.
+  const bId = seedSeen(store, orderForUser("1000", USER_B));
+
+  const capParams = { ...params, perUserInflightCapSats: 2000n };
+  let aSucceeded = 0;
+  for (const id of aIds) {
+    const out = await startDelivery(store, canton, id, capParams);
+    if (["delivering", "delivered"].includes((out as any).kind)) aSucceeded++;
+  }
+  const bOut = await startDelivery(store, canton, bId, capParams);
+
+  console.log(`[C7b] greedy user A got ${aSucceeded}/5 (cap 2000=2 orders); honest user B served: ${(bOut as any).kind}`);
+  assert.equal(aSucceeded, 2, "greedy user A is capped at 2 in-flight (2000 sats), not all 5");
+  assert.ok(["delivering", "delivered"].includes((bOut as any).kind), "honest user B is STILL served — not starved by A");
+  console.log("[C7b] ✓ per-user cap protects the float: greedy user throttled, honest user served.");
+});

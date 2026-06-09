@@ -165,6 +165,20 @@ export class OrderStore {
   }
 
   /**
+   * All records for a given user (order.user, case-insensitive) in any of the
+   * given statuses. Used by the per-user overdraft cap — summing a user's
+   * in-flight cBTC so one user can't drain the shared float (CoW has no shared
+   * float so omits this; we need it).
+   */
+  byUser(user: string, statuses: OrderStatus[]): OrderRecord[] {
+    const u = user.toLowerCase();
+    const set = new Set(statuses);
+    return Object.values(this.data.orders).filter(
+      (o) => set.has(o.status) && o.order.user.toLowerCase() === u,
+    );
+  }
+
+  /**
    * Re-read the store file from disk into memory. The solver runs as MULTIPLE
    * processes sharing one file (the API registers orders + cantonParty; the loop
    * delivers/settles). Each must see the other's writes, so the loop calls this

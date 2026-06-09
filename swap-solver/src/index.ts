@@ -123,6 +123,11 @@ async function main(): Promise<void> {
     oracle: env.oracle,
     account: env.agentAccount,
     payoutAddress: env.payoutAddress,
+    // Skip settlement (don't strand a delivered order) if the agent hot key can't
+    // afford attest+finalise gas. Set MIN_GAS_ETH_WEI to enable.
+    minEthForGasWei: process.env.MIN_GAS_ETH_WEI
+      ? BigInt(process.env.MIN_GAS_ETH_WEI)
+      : undefined,
   });
 
   // Clients for the auto-refund sweep (returns locked WBTC to users on expiry).
@@ -168,6 +173,11 @@ async function main(): Promise<void> {
         // top of the float bound. Set MAX_INFLIGHT_SATS to enable.
         maxInflightSats: process.env.MAX_INFLIGHT_SATS
           ? BigInt(process.env.MAX_INFLIGHT_SATS)
+          : undefined,
+        // FAIRNESS: per-user in-flight cBTC cap (sats). Stops one user draining the
+        // shared float. Set PER_USER_INFLIGHT_SATS to enable.
+        perUserInflightCapSats: process.env.PER_USER_INFLIGHT_SATS
+          ? BigInt(process.env.PER_USER_INFLIGHT_SATS)
           : undefined,
         // PRE-FLIGHT: never deliver cBTC unless the WBTC is securely claimable
         // (Deposited + comfortable margin before expiry) → the two legs pass-or-

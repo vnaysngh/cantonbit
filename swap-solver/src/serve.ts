@@ -32,6 +32,17 @@ const BIND_HOST = process.env.API_BIND_HOST ?? "127.0.0.1";
 const CBTC_TOKEN: Hex = (process.env.CBTC_TOKEN_BYTES32 as Hex) ?? pad("0xc87c", { size: 32 });
 
 /**
+ * Deny-list of banned user addresses (CoW banned_users analogue). Comma-separated
+ * in BANNED_USERS; lowercased for case-insensitive matching. Empty = no bans.
+ */
+const BANNED_USERS = new Set(
+  (process.env.BANNED_USERS ?? "")
+    .split(",")
+    .map((a) => a.trim().toLowerCase())
+    .filter((a) => a.length > 0),
+);
+
+/**
  * Solver/bridge fee in basis points (1 bps = 0.01%). Default 20 bps = 0.2% — the
  * cost of running the cross-chain bridge (gas to openFor/attest/finalise, the
  * cBTC float capital, operational risk). Subtracted from the cBTC the user
@@ -104,6 +115,7 @@ async function main() {
     cbtcToken: CBTC_TOKEN,
     feeBps: SOLVER_FEE_BPS,
     depegGuard,
+    bannedUsers: BANNED_USERS,
   });
 
   server.listen(PORT, BIND_HOST, () => {
