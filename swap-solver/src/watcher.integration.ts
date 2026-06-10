@@ -24,7 +24,7 @@ import { readFileSync, rmSync } from "node:fs";
 import assert from "node:assert/strict";
 
 import { ESCROW_ABI } from "./abi.js";
-import { OrderStore } from "./store.js";
+import { InMemoryOrderStore } from "./store.js";
 import { OpenWatcher } from "./watcher.js";
 
 const RPC = "http://localhost:8545";
@@ -107,7 +107,7 @@ async function main() {
   // --- run the watcher backfill ---
   const storePath = "/tmp/oranj-watcher-test.json";
   rmSync(storePath, { force: true });
-  const store = new OrderStore(storePath);
+  const store = new InMemoryOrderStore();
   const watcher = new OpenWatcher(
     { rpcUrl: RPC, escrow, startBlock: deployBlock },
     store,
@@ -115,7 +115,7 @@ async function main() {
   await watcher.backfill();
 
   // --- assert it was captured + decoded ---
-  const all = store.byStatus("seen");
+  const all = await store.byStatus("seen");
   assert.equal(all.length, 1, `expected 1 seen order, got ${all.length}`);
   const rec = all[0]!;
   assert.equal(rec.order.user.toLowerCase(), account.address.toLowerCase(), "user mismatch");
@@ -126,7 +126,7 @@ async function main() {
   // --- assert idempotency: a second backfill changes nothing ---
   store.setCursor(0); // force re-scan
   await watcher.backfill();
-  assert.equal(store.byStatus("seen").length, 1, "idempotency broken: duplicate order");
+  assert.equal((await store.byStatus("seen")).length, 1, "idempotency broken: duplicate order");
 
   console.log("✓ watcher integration PASSED — order decoded, persisted, idempotent");
   rmSync(storePath, { force: true });

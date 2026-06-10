@@ -22,7 +22,7 @@ import assert from "node:assert/strict";
 import { ESCROW_ABI } from "./abi.js";
 import { buildOpenForTypedData, PERMIT2_ADDRESS } from "./open-for.js";
 import { cantonPartyToRecipient } from "./order.js";
-import { OrderStore } from "./store.js";
+import { InMemoryOrderStore } from "./store.js";
 import { serializeOrder } from "./convert.js";
 import type { StandardOrder } from "./encoding.js";
 
@@ -88,7 +88,7 @@ async function main() {
   const orderId = (await escrowC.read.orderIdentifier([order])) as Hex;
   console.log(`locked ✓ order ${orderId}`);
 
-  const store = new OrderStore(STORE_PATH);
+  const store = new InMemoryOrderStore();
   const block = await pub.getBlockNumber().catch(() => 0n);
   store.insertSeen(orderId, Number(block), serializeOrder(order));
   store.update(orderId, { cantonParty: RECIPIENT, note: "refund-smoke" });

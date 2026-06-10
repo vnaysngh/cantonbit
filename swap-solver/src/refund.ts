@@ -81,18 +81,18 @@ export async function refundOrder(
   // previous sweep may have already refunded it.
   const onchain = Number(await escrowC.read.orderStatus([orderId]));
   if (onchain === ONCHAIN_CLAIMED) {
-    store.update(orderId, { status: "finalised", note: "claimed on-chain (late finalise)" });
+    await store.update(orderId, { status: "finalised", note: "claimed on-chain (late finalise)" });
     return { kind: "alreadyFinalised" };
   }
   if (onchain === ONCHAIN_REFUNDED) {
-    store.update(orderId, { status: "refunded", note: "already refunded on-chain" });
+    await store.update(orderId, { status: "refunded", note: "already refunded on-chain" });
     return { kind: "alreadyRefunded" };
   }
 
   try {
     const refundTx = await escrowC.write.refund([order], { account, chain: null });
     await pub.waitForTransactionReceipt({ hash: refundTx });
-    store.update(orderId, { status: "refunded", note: `refund ${refundTx}` });
+    await store.update(orderId, { status: "refunded", note: `refund ${refundTx}` });
     return { kind: "refunded", refundTx };
   } catch (e) {
     return { kind: "error", message: e instanceof Error ? e.message : String(e) };
@@ -120,10 +120,11 @@ export async function refundExpiredOrders(
   // (finalise keeps working after expiry on-chain), never refunded; the watch
   // loop keeps retrying attest+finalise and a stuck one needs manual review, not
   // an auto-refund.
-  const candidates = [
-    ...store.byStatus("seen"),
-    ...store.byStatus("delivering"),
-  ].filter((o) => now > o.order.expires);
+  const [seenRecs, deliveringRecs] = await Promise.all([
+    store.byStatus("seen"),
+    store.byStatus("delivering"),
+  ]);
+  const candidates = [...seenRecs, ...deliveringRecs].filter((o) => now > o.order.expires);
 
   const results: { orderId: Hex; outcome: RefundOutcome }[] = [];
   for (const rec of candidates) {

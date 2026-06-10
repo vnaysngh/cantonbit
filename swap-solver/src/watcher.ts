@@ -74,8 +74,8 @@ export class OpenWatcher {
   }
 
   /** Resume point: max(persisted cursor, configured startBlock). */
-  private resumeFrom(): bigint {
-    const cursor = BigInt(this.store.cursorBlock);
+  private async resumeFrom(): Promise<bigint> {
+    const cursor = BigInt(await this.store.cursorBlock());
     return cursor > this.cfg.startBlock ? cursor + 1n : this.cfg.startBlock;
   }
 
@@ -86,7 +86,7 @@ export class OpenWatcher {
   async backfill(): Promise<bigint> {
     const head = await this.client.getBlockNumber();
     const chunk = this.cfg.chunkSize ?? 2_000n;
-    let from = this.resumeFrom();
+    let from = await this.resumeFrom();
 
     while (from <= head) {
       const to = from + chunk - 1n > head ? head : from + chunk - 1n;
@@ -95,8 +95,8 @@ export class OpenWatcher {
         fromBlock: from,
         toBlock: to,
       });
-      this.ingest(logs);
-      this.store.setCursor(Number(to));
+      await this.ingest(logs);
+      await this.store.setCursor(Number(to));
       from = to + 1n;
     }
     return head;
@@ -111,12 +111,18 @@ export class OpenWatcher {
       address: this.cfg.escrow,
       abi: ESCROW_ABI,
       eventName: "Open",
-      onLogs: (logs) => this.ingest(logs as unknown as Log[]),
+      // onLogs isn't awaited by viem; ingest is async (DB writes) so we catch
+      // its rejection here rather than leak an unhandled promise.
+      onLogs: (logs) => {
+        void this.ingest(logs as unknown as Log[]).catch((e) =>
+          console.error("[watch] ingest error:", e instanceof Error ? e.message : e),
+        );
+      },
     });
   }
 
   /** Decode + persist a batch of raw logs (only Open events are kept). */
-  private ingest(logs: Log[]): void {
+  private async ingest(logs: Log[]): Promise<void> {
     const parsed = parseEventLogs({
       abi: ESCROW_ABI,
       eventName: "Open",
@@ -125,9 +131,9 @@ export class OpenWatcher {
 
     for (const log of parsed) {
       const orderId = log.args.orderId;
-      if (this.store.has(orderId)) continue; // idempotent
+      if (await this.store.has(orderId)) continue; // idempotent
       const serialized = serializeOrder(log.args.order);
-      this.store.insertSeen(orderId, Number(log.blockNumber ?? 0n), serialized);
+      await this.store.insertSeen(orderId, Number(log.blockNumber ?? 0n), serialized);
       this.onSeen?.(orderId);
     }
   }

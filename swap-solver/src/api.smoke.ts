@@ -13,7 +13,7 @@ import { createPublicClient, http } from "viem";
 
 import { loadEnv } from "./env.js";
 import { makeNetworkConfig } from "./config.js";
-import { OrderStore } from "./store.js";
+import { InMemoryOrderStore } from "./store.js";
 import { CantonClient } from "./canton.js";
 import { createApi } from "./api.js";
 import { verifyCantonParty } from "./order.js";
@@ -24,7 +24,7 @@ async function main() {
   const env = loadEnv();
   const chainId = await createPublicClient({ transport: http(env.originRpcUrl) }).getChainId();
   const cfg = makeNetworkConfig({ network: env.network, originChainId: chainId, escrow: env.escrow, oracle: env.oracle, wbtc: env.wbtc });
-  const store = new OrderStore("/tmp/oranj-api-smoke.json");
+  const store = new InMemoryOrderStore();
   const canton = new CantonClient(
     { ledgerHost: env.canton.ledgerHost, registryUrl: env.canton.registryUrl, decentralizedPartyId: env.canton.decentralizedPartyId, instrumentId: env.canton.instrumentId, solverParty: env.canton.solverParty },
     env.canton.auth,

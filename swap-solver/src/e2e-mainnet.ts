@@ -20,11 +20,10 @@ import {
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { arbitrum } from "viem/chains";
-import { rmSync } from "node:fs";
 import assert from "node:assert/strict";
 
 import { ESCROW_ABI } from "./abi.js";
-import { OrderStore } from "./store.js";
+import { SupabaseOrderStore } from "./store.js";
 import { OpenWatcher } from "./watcher.js";
 import { signOpenFor, PERMIT2_ADDRESS } from "./open-for.js";
 import { Settler } from "./settle.js";
@@ -126,11 +125,13 @@ async function main() {
 
   // === 2. Watch ===
   log("2. WATCH: solver observes the Open event");
-  const storePath = "/tmp/oranj-e2e-mainnet.json"; rmSync(storePath, { force: true });
-  const store = new OrderStore(storePath);
+  // Route this REAL mainnet swap through the PRODUCTION Supabase store, so the
+  // whole flow (seen → delivering → delivered → finalised) is proven end-to-end
+  // against the new Postgres backend — the actual migration verification.
+  const store = SupabaseOrderStore.fromEnv();
   await new OpenWatcher({ rpcUrl: RPC, escrow, startBlock }, store, () => {}).backfill();
-  assert.ok(store.has(orderId), "watcher missed the order");
-  store.update(orderId, { cantonParty: recipient });
+  assert.ok(await store.has(orderId), "watcher missed the order");
+  await store.update(orderId, { cantonParty: recipient });
   console.log("watcher recorded 'seen' ✓");
 
   // === 3. Canton: deliver cBTC ===
@@ -139,7 +140,7 @@ async function main() {
   const { updateId, offerContractId, autoAccepted, inputHoldingCids } = await canton.createOffer({ receiverParty: recipient, amountBtc: CBTC_BTC, inputHoldings: holdings });
   console.log(`offer created ✓  updateId: ${updateId}`);
   console.log(autoAccepted ? "(auto-accepted)" : `offerId: ${offerContractId} — ACCEPT IT NOW in the receiving wallet`);
-  store.update(orderId, { status: "delivering", cantonDeliveryRef: offerContractId || updateId });
+  await store.update(orderId, { status: "delivering", cantonDeliveryRef: offerContractId || updateId });
   summary["3. cBTC delivery (Canton)"] = `updateId ${updateId}`;
 
   // === 4. Accept + capture record-time ===
@@ -167,7 +168,7 @@ async function main() {
     }
     if (!resolved) throw new Error("timed out waiting for accept");
   }
-  store.update(orderId, { status: "delivered", fillTimestamp });
+  await store.update(orderId, { status: "delivered", fillTimestamp });
   console.log(`delivered (fillTimestamp ${fillTimestamp}) ✓`);
 
   // === 5. Settle: attest + finalise → WBTC to PAYOUT ===
@@ -184,7 +185,6 @@ async function main() {
   console.log(`  ${Number(WBTC_LOCK) / 1e8} WBTC (Arbitrum) → ${CBTC_BTC} cBTC (Canton mainnet)`);
   for (const [k, v] of Object.entries(summary)) console.log(`  ${k.padEnd(28)} ${v}`);
   console.log(`===========================================`);
-  rmSync(storePath, { force: true });
 }
 
 main().catch((e) => { console.error("\n✗ MAINNET E2E FAILED:", e instanceof Error ? e.message : e); process.exit(1); });

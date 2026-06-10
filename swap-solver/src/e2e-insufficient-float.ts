@@ -23,7 +23,7 @@ import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 
 import { CantonClient } from "./canton.js";
-import { OrderStore, type SerializedOrder } from "./store.js";
+import { InMemoryOrderStore, type SerializedOrder } from "./store.js";
 import { startDelivery } from "./delivery.js";
 import { cantonPartyToRecipient } from "./order.js";
 
@@ -81,12 +81,12 @@ async function main() {
 
   const storePath = "/tmp/oranj-e2e-insufficient.json";
   rmSync(storePath, { force: true });
-  const store = new OrderStore(storePath);
+  const store = new InMemoryOrderStore();
   store.insertSeen(orderId, 1, serialized);
   // Attach the (valid) party preimage so the guard reaches the FLOAT check,
   // not the party-mismatch check.
   store.update(orderId, { cantonParty: RECIPIENT });
-  assert.equal(store.get(orderId)?.status, "seen", "setup: order should be seen");
+  assert.equal((await store.get(orderId))?.status, "seen", "setup: order should be seen");
 
   log("2. Run the REAL startDelivery guard");
   const outcome = await startDelivery(store, canton, orderId, {
@@ -98,7 +98,7 @@ async function main() {
   log("3. Verify the solver REFUSED and did not deliver");
   assert.equal(outcome.kind, "failed", `expected 'failed', got '${outcome.kind}'`);
   assert.ok(/insufficient cBTC float/i.test((outcome as { reason: string }).reason), `reason should mention insufficient float, got: ${(outcome as { reason: string }).reason}`);
-  const rec = store.get(orderId)!;
+  const rec = (await store.get(orderId))!;
   assert.equal(rec.status, "failed", `store status should be 'failed', got '${rec.status}'`);
   assert.ok(!rec.cantonDeliveryRef, "NO offer should have been created (cantonDeliveryRef must be empty)");
   console.log("solver refused ✓  status=failed ✓  no offer created ✓");

@@ -19,7 +19,7 @@ import { readFileSync, rmSync } from "node:fs";
 import assert from "node:assert/strict";
 
 import { ESCROW_ABI } from "./abi.js";
-import { OrderStore, type SerializedOrder } from "./store.js";
+import { InMemoryOrderStore, type SerializedOrder } from "./store.js";
 import { OpenWatcher } from "./watcher.js";
 import { signOpenFor, PERMIT2_ADDRESS } from "./open-for.js";
 import { Settler } from "./settle.js";
@@ -107,7 +107,7 @@ async function main() {
   // watcher sees it
   const storePath = "/tmp/oranj-e2e-base.json";
   rmSync(storePath, { force: true });
-  const store = new OrderStore(storePath);
+  const store = new InMemoryOrderStore();
   await new OpenWatcher({ rpcUrl: RPC, escrow, startBlock }, store, () => {}).backfill();
   const orderId = (await escrowC.read.orderIdentifier([order])) as Hex;
   assert.ok(store.has(orderId), "watcher should have decoded the order");

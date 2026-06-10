@@ -125,18 +125,18 @@ export class Settler {
   }
 
   async settleOne(store: OrderStore, orderId: Hex): Promise<SettleOutcome> {
-    const rec = store.get(orderId);
+    const rec = await store.get(orderId);
     if (!rec) return { kind: "failed", reason: "order not found" };
     if (rec.status !== "delivered" && rec.status !== "attested") {
       return { kind: "skipped", reason: `status '${rec.status}' is not delivered/attested` };
     }
     if (rec.fillTimestamp == null) {
-      return fail(store, orderId, "delivered order has no fillTimestamp");
+      return await fail(store, orderId, "delivered order has no fillTimestamp");
     }
 
     const order = deserializeOrder(rec.order);
     const output = order.outputs[0];
-    if (!output) return fail(store, orderId, "order has no output");
+    if (!output) return await fail(store, orderId, "order has no output");
 
     // GAS PRE-FLIGHT (CoW solver native-token guard, settlement.rs:84-136): if the
     // agent hot key lacks the ETH to pay for attest+finalise, SKIP rather than
@@ -162,7 +162,7 @@ export class Settler {
     // Defensive: fillTimestamp must still be <= fillDeadline (7b already checked,
     // but re-check before spending gas).
     if (fillTs > order.fillDeadline) {
-      return fail(store, orderId, `fillTimestamp ${fillTs} > fillDeadline ${order.fillDeadline}`);
+      return await fail(store, orderId, `fillTimestamp ${fillTs} > fillDeadline ${order.fillDeadline}`);
     }
 
     const dataHash = fillDescriptionHash(solverId, orderId, fillTs, output);
@@ -186,19 +186,19 @@ export class Settler {
           { account: this.cfg.account, chain: null },
         );
         await this.pub.waitForTransactionReceipt({ hash: attestTxHash });
-        store.update(orderId, { status: "attested", attestTxHash });
+        await store.update(orderId, { status: "attested", attestTxHash });
       } catch (e) {
         return { kind: "skipped", reason: `attest failed (will retry): ${errMsg(e)}` };
       }
     } else if (rec.status === "delivered") {
-      store.update(orderId, { status: "attested", attestTxHash });
+      await store.update(orderId, { status: "attested", attestTxHash });
     }
 
     // --- 2. finalise (releases WBTC) ---
     // Skip if already Claimed on-chain (crash-safe re-run).
     const status = (await escrow.read.orderStatus([orderId])) as number;
     if (status === ORDER_STATUS.Claimed) {
-      store.update(orderId, { status: "finalised", note: "already claimed on-chain" });
+      await store.update(orderId, { status: "finalised", note: "already claimed on-chain" });
       return { kind: "finalised", attestTxHash, finaliseTxHash: rec.finaliseTxHash };
     }
 
@@ -212,7 +212,7 @@ export class Settler {
         { account: this.cfg.account, chain: null },
       );
       await this.pub.waitForTransactionReceipt({ hash: finaliseTxHash });
-      store.update(orderId, { status: "finalised", finaliseTxHash });
+      await store.update(orderId, { status: "finalised", finaliseTxHash });
       return { kind: "finalised", attestTxHash, finaliseTxHash };
     } catch (e) {
       return { kind: "skipped", reason: `finalise failed (will retry): ${errMsg(e)}` };
@@ -222,7 +222,8 @@ export class Settler {
   /** Process all settleable (delivered/attested) orders once. */
   async settleReady(store: OrderStore): Promise<{ orderId: Hex; outcome: SettleOutcome }[]> {
     const out: { orderId: Hex; outcome: SettleOutcome }[] = [];
-    for (const rec of [...store.byStatus("delivered"), ...store.byStatus("attested")]) {
+    const _ready = [...(await store.byStatus("delivered")), ...(await store.byStatus("attested"))];
+    for (const rec of _ready) {
       out.push({ orderId: rec.orderId, outcome: await this.settleOne(store, rec.orderId) });
     }
     return out;
@@ -234,8 +235,8 @@ function orderToTuple(o: ReturnType<typeof deserializeOrder>) {
   return o;
 }
 
-function fail(store: OrderStore, orderId: Hex, reason: string): SettleOutcome {
-  store.update(orderId, { status: "failed", note: reason });
+async function fail(store: OrderStore, orderId: Hex, reason: string): Promise<SettleOutcome> {
+  await store.update(orderId, { status: "failed", note: reason });
   return { kind: "failed", reason };
 }
 

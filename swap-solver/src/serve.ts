@@ -17,11 +17,10 @@ import { pad, type Hex } from "viem";
 
 import { loadEnv, describeEnv } from "./env.js";
 import { makeNetworkConfig } from "./config.js";
-import { OrderStore } from "./store.js";
+import { SupabaseOrderStore, type OrderStore } from "./store.js";
 import { CantonClient } from "./canton.js";
 import { createApi } from "./api.js";
 
-const STORE_PATH = process.env.STORE_PATH ?? ".oranj-swap/orders.json";
 const PORT = Number(process.env.API_PORT ?? 8787);
 // SECURITY (HIGH-4): bind to loopback by default so the solver API is NOT exposed
 // on all interfaces. Expose it only deliberately, behind an authenticated reverse
@@ -77,7 +76,7 @@ async function main() {
     wbtc: env.wbtc,
   });
 
-  const store = new OrderStore(STORE_PATH);
+  const store: OrderStore = SupabaseOrderStore.fromEnv();
   const canton = new CantonClient(
     {
       ledgerHost: env.canton.ledgerHost,

@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { keccak256, pad, stringToHex, type Hex } from "viem";
 
-import { OrderStore, type SerializedOrder } from "./store.js";
+import { InMemoryOrderStore, type OrderStore, type SerializedOrder } from "./store.js";
 import { startDelivery, type DeliveryParams } from "./delivery.js";
 import { InsufficientFloatError, type CantonClient, type HoldingLite } from "./canton.js";
 import { rmSync } from "node:fs";
@@ -18,8 +18,7 @@ const CANTON_PARTY = "cbtc-user-abc::1220def456";
 const RECIPIENT_HASH = keccak256(stringToHex(CANTON_PARTY));
 
 function tmpStore(): OrderStore {
-  const p = `/tmp/oranj-delivery-test-${Math.random().toString(36).slice(2)}.json`;
-  return new OrderStore(p);
+  return new InMemoryOrderStore();
 }
 
 function sampleOrder(fillDeadline: number, recipient: Hex = RECIPIENT_HASH): SerializedOrder {
@@ -73,67 +72,67 @@ const params: DeliveryParams = {
   cbtcDecimals: 8,
 };
 
-function seedSeen(store: OrderStore, order: SerializedOrder, cantonParty?: string): Hex {
+async function seedSeen(store: OrderStore, order: SerializedOrder, cantonParty?: string): Promise<Hex> {
   const orderId = pad(`0x${Math.floor(Math.random() * 1e9).toString(16)}`, { size: 32 }) as Hex;
-  store.insertSeen(orderId, 100, order);
-  if (cantonParty !== undefined) store.update(orderId, { cantonParty });
+  await store.insertSeen(orderId, 100, order);
+  if (cantonParty !== undefined) await store.update(orderId, { cantonParty });
   return orderId;
 }
 
 test("happy path: creates offer and marks delivering", async () => {
   const store = tmpStore();
-  const id = seedSeen(store, sampleOrder(NOW + 3600), CANTON_PARTY);
+  const id = await seedSeen(store, sampleOrder(NOW + 3600), CANTON_PARTY);
   const out = await startDelivery(store, mockCanton({ floatSats: 5_00_000_000n }), id, params);
   assert.equal(out.kind, "delivering");
-  assert.equal(store.get(id)!.status, "delivering");
-  assert.equal(store.get(id)!.cantonDeliveryRef, "offer1");
+  assert.equal((await store.get(id))!.status, "delivering");
+  assert.equal((await store.get(id))!.cantonDeliveryRef, "offer1");
 });
 
 test("skips when not in 'seen' status", async () => {
   const store = tmpStore();
-  const id = seedSeen(store, sampleOrder(NOW + 3600), CANTON_PARTY);
-  store.update(id, { status: "delivered" });
+  const id = await seedSeen(store, sampleOrder(NOW + 3600), CANTON_PARTY);
+  await store.update(id, { status: "delivered" });
   const out = await startDelivery(store, mockCanton({ floatSats: 5_00_000_000n }), id, params);
   assert.equal(out.kind, "skipped");
 });
 
 test("skips when too close to fillDeadline", async () => {
   const store = tmpStore();
-  const id = seedSeen(store, sampleOrder(NOW + 300), CANTON_PARTY); // 300s < 600 min
+  const id = await seedSeen(store, sampleOrder(NOW + 300), CANTON_PARTY); // 300s < 600 min
   const out = await startDelivery(store, mockCanton({ floatSats: 5_00_000_000n }), id, params);
   assert.equal(out.kind, "skipped");
-  assert.equal(store.get(id)!.status, "seen"); // unchanged, will retry never (deadline) but not failed here
+  assert.equal((await store.get(id))!.status, "seen"); // unchanged, will retry never (deadline) but not failed here
 });
 
 test("skips when Canton party preimage is missing", async () => {
   const store = tmpStore();
-  const id = seedSeen(store, sampleOrder(NOW + 3600)); // no cantonParty
+  const id = await seedSeen(store, sampleOrder(NOW + 3600)); // no cantonParty
   const out = await startDelivery(store, mockCanton({ floatSats: 5_00_000_000n }), id, params);
   assert.equal(out.kind, "skipped");
 });
 
 test("FAILS when party does not match the recipient commitment", async () => {
   const store = tmpStore();
-  const id = seedSeen(store, sampleOrder(NOW + 3600), "cbtc-user-WRONG::1220evil");
+  const id = await seedSeen(store, sampleOrder(NOW + 3600), "cbtc-user-WRONG::1220evil");
   const out = await startDelivery(store, mockCanton({ floatSats: 5_00_000_000n }), id, params);
   assert.equal(out.kind, "failed");
   assert.match((out as { reason: string }).reason, /does not match/);
-  assert.equal(store.get(id)!.status, "failed");
+  assert.equal((await store.get(id))!.status, "failed");
 });
 
 test("FAILS on insufficient float", async () => {
   const store = tmpStore();
-  const id = seedSeen(store, sampleOrder(NOW + 3600), CANTON_PARTY);
+  const id = await seedSeen(store, sampleOrder(NOW + 3600), CANTON_PARTY);
   // need 1 cBTC = 1e8 sats; float is only 1000 sats
   const out = await startDelivery(store, mockCanton({ floatSats: 1000n }), id, params);
   assert.equal(out.kind, "failed");
   assert.match((out as { reason: string }).reason, /insufficient/);
-  assert.equal(store.get(id)!.status, "failed");
+  assert.equal((await store.get(id))!.status, "failed");
 });
 
 test("transient createOffer error leaves order as 'seen' for retry", async () => {
   const store = tmpStore();
-  const id = seedSeen(store, sampleOrder(NOW + 3600), CANTON_PARTY);
+  const id = await seedSeen(store, sampleOrder(NOW + 3600), CANTON_PARTY);
   const out = await startDelivery(
     store,
     mockCanton({ floatSats: 5_00_000_000n, createThrows: new Error("rpc timeout") }),
@@ -141,12 +140,12 @@ test("transient createOffer error leaves order as 'seen' for retry", async () =>
     params,
   );
   assert.equal(out.kind, "skipped");
-  assert.equal(store.get(id)!.status, "seen");
+  assert.equal((await store.get(id))!.status, "seen");
 });
 
 test("InsufficientFloatError from createOffer marks failed", async () => {
   const store = tmpStore();
-  const id = seedSeen(store, sampleOrder(NOW + 3600), CANTON_PARTY);
+  const id = await seedSeen(store, sampleOrder(NOW + 3600), CANTON_PARTY);
   const out = await startDelivery(
     store,
     mockCanton({ floatSats: 5_00_000_000n, createThrows: new InsufficientFloatError(1n, 2n) }),
@@ -154,5 +153,5 @@ test("InsufficientFloatError from createOffer marks failed", async () => {
     params,
   );
   assert.equal(out.kind, "failed");
-  assert.equal(store.get(id)!.status, "failed");
+  assert.equal((await store.get(id))!.status, "failed");
 });

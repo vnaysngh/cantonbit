@@ -51,20 +51,20 @@ export async function resolveDelivery(
   orderId: Hex,
   params: AcceptWatchParams,
 ): Promise<AcceptOutcome> {
-  const rec = store.get(orderId);
+  const rec = await store.get(orderId);
   if (!rec) return { kind: "failed", reason: "order not found" };
   if (rec.status !== "delivering") {
     return { kind: "pending" }; // not our concern this tick
   }
   const offerId = rec.cantonDeliveryRef;
   if (!offerId) {
-    store.update(orderId, { status: "failed", note: "no offer id on a delivering order" });
+    await store.update(orderId, { status: "failed", note: "no offer id on a delivering order" });
     return { kind: "failed", reason: "no offer id" };
   }
 
   const receiver = rec.cantonParty;
   if (!receiver) {
-    store.update(orderId, { status: "failed", note: "no canton party on a delivering order" });
+    await store.update(orderId, { status: "failed", note: "no canton party on a delivering order" });
     return { kind: "failed", reason: "no canton party" };
   }
 
@@ -85,7 +85,7 @@ export async function resolveDelivery(
         // SECURITY (HIGH-1): the cBTC WAS accepted — mark cbtcAccepted so this is
         // NEVER auto-refunded (that would give the user both legs). It can't
         // finalise (past fillDeadline → proof invalid); it needs manual review.
-        store.update(orderId, {
+        await store.update(orderId, {
           status: "failed",
           cbtcAccepted: true,
           note: "accept detected but past fillDeadline — cannot finalise; MANUAL REVIEW (not refundable: cBTC delivered)",
@@ -93,7 +93,7 @@ export async function resolveDelivery(
         return { kind: "failed", reason: "accepted/cleared past fillDeadline" };
       }
       const fillTimestamp = rec.fillTimestamp ?? params.now;
-      store.update(orderId, {
+      await store.update(orderId, {
         status: "delivered",
         cbtcAccepted: true,
         fillTimestamp,
@@ -104,7 +104,7 @@ export async function resolveDelivery(
     // Still pending. If past the fillDeadline, the swap can't complete — abandon
     // so the user refunds (we never delivered-and-finalised one-sided).
     if (params.now > rec.order.fillDeadline) {
-      store.update(orderId, {
+      await store.update(orderId, {
         status: "failed",
         note: "cBTC offer unaccepted past fillDeadline (cross-participant) — user refunds",
       });
@@ -126,7 +126,7 @@ export async function resolveDelivery(
     // fillDeadline has passed, the swap can no longer complete — abandon.
     const stillActive = await canton.isOfferActive(receiver, offerId).catch(() => true);
     if (stillActive && params.now > rec.order.fillDeadline) {
-      store.update(orderId, {
+      await store.update(orderId, {
         status: "failed",
         note: "offer still unaccepted past fillDeadline — abandoning; user will refund",
       });
@@ -136,7 +136,7 @@ export async function resolveDelivery(
   }
 
   if (resolution.kind === "expired") {
-    store.update(orderId, {
+    await store.update(orderId, {
       status: "failed",
       note: `offer expired/cancelled unaccepted (updateId=${resolution.updateId}); float released, user will refund`,
     });
@@ -150,7 +150,7 @@ export async function resolveDelivery(
   if (fillTimestamp > rec.order.fillDeadline) {
     // SECURITY (HIGH-1): cBTC WAS accepted (just too late to finalise). Mark
     // cbtcAccepted so it's NEVER auto-refunded; needs manual review.
-    store.update(orderId, {
+    await store.update(orderId, {
       status: "failed",
       cbtcAccepted: true,
       note: `accepted too late: record-time ${fillTimestamp} > fillDeadline ${rec.order.fillDeadline}; cannot finalise — MANUAL REVIEW (not refundable: cBTC delivered)`,
@@ -158,7 +158,7 @@ export async function resolveDelivery(
     return { kind: "failed", reason: "accepted after fillDeadline" };
   }
 
-  store.update(orderId, {
+  await store.update(orderId, {
     status: "delivered",
     cbtcAccepted: true,
     fillTimestamp,
@@ -174,7 +174,7 @@ export async function resolveDeliveringOrders(
   params: AcceptWatchParams,
 ): Promise<{ orderId: Hex; outcome: AcceptOutcome }[]> {
   const results: { orderId: Hex; outcome: AcceptOutcome }[] = [];
-  for (const rec of store.byStatus("delivering")) {
+  for (const rec of await store.byStatus("delivering")) {
     const outcome = await resolveDelivery(store, canton, rec.orderId, params);
     results.push({ orderId: rec.orderId, outcome });
   }

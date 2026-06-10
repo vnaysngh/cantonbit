@@ -24,7 +24,7 @@ import { readFileSync, rmSync } from "node:fs";
 import assert from "node:assert/strict";
 
 import { ESCROW_ABI } from "./abi.js";
-import { OrderStore } from "./store.js";
+import { InMemoryOrderStore } from "./store.js";
 import { OpenWatcher } from "./watcher.js";
 import { signOpenFor, PERMIT2_ADDRESS } from "./open-for.js";
 import type { StandardOrder } from "./encoding.js";
@@ -113,9 +113,9 @@ async function main() {
   // watcher decodes the Open event
   const storePath = "/tmp/oranj-openfor-test.json";
   rmSync(storePath, { force: true });
-  const store = new OrderStore(storePath);
+  const store = new InMemoryOrderStore();
   await new OpenWatcher({ rpcUrl: RPC, escrow, startBlock: deployBlock }, store).backfill();
-  const seen = store.byStatus("seen");
+  const seen = await store.byStatus("seen");
   assert.equal(seen.length, 1, "watcher should see the openFor order");
   assert.equal(seen[0]!.order.user.toLowerCase(), user.address.toLowerCase(), "user mismatch");
 

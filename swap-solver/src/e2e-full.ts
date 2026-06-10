@@ -25,7 +25,7 @@ import { readFileSync, rmSync } from "node:fs";
 import assert from "node:assert/strict";
 
 import { ESCROW_ABI } from "./abi.js";
-import { OrderStore } from "./store.js";
+import { InMemoryOrderStore } from "./store.js";
 import { OpenWatcher } from "./watcher.js";
 import { signOpenFor, PERMIT2_ADDRESS } from "./open-for.js";
 import { Settler } from "./settle.js";
@@ -118,7 +118,7 @@ async function main() {
   // === 2. Watch ===
   log("2. WATCH: solver observes the Open event");
   const storePath = "/tmp/oranj-e2e-full.json"; rmSync(storePath, { force: true });
-  const store = new OrderStore(storePath);
+  const store = new InMemoryOrderStore();
   await new OpenWatcher({ rpcUrl: RPC, escrow, startBlock }, store, () => {}).backfill();
   assert.ok(store.has(orderId), "watcher missed the order");
   // attach the canton party preimage (off-chain side channel)

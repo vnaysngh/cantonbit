@@ -39,8 +39,8 @@ export interface MonitorParams {
   deadlineWarnSeconds: number;
 }
 
-export function buildHealthReport(store: OrderStore, p: MonitorParams): HealthReport {
-  const all = allOrders(store);
+export async function buildHealthReport(store: OrderStore, p: MonitorParams): Promise<HealthReport> {
+  const all = await allOrders(store);
   const counts: Record<string, number> = {};
   for (const o of all) counts[o.status] = (counts[o.status] ?? 0) + 1;
 
@@ -75,9 +75,10 @@ export function buildHealthReport(store: OrderStore, p: MonitorParams): HealthRe
 }
 
 /** All orders across every status (the store exposes byStatus; union them). */
-export function allOrders(store: OrderStore): OrderRecord[] {
+export async function allOrders(store: OrderStore): Promise<OrderRecord[]> {
   const statuses = ["seen", "delivering", "delivered", "attested", "finalised", "refunded", "failed"] as const;
-  return statuses.flatMap((s) => store.byStatus(s));
+  const groups = await Promise.all(statuses.map((s) => store.byStatus(s)));
+  return groups.flat();
 }
 
 /** One-line human summary for logs/alerts. */

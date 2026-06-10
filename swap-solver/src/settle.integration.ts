@@ -23,7 +23,7 @@ import { readFileSync, rmSync } from "node:fs";
 import assert from "node:assert/strict";
 
 import { ESCROW_ABI } from "./abi.js";
-import { OrderStore, type SerializedOrder } from "./store.js";
+import { InMemoryOrderStore, type SerializedOrder } from "./store.js";
 import { Settler } from "./settle.js";
 
 const RPC = "http://localhost:8545";
@@ -97,7 +97,7 @@ async function main() {
   // seed the store as `delivered` with a fill timestamp
   const storePath = "/tmp/oranj-settle-test.json";
   rmSync(storePath, { force: true });
-  const store = new OrderStore(storePath);
+  const store = new InMemoryOrderStore();
   const serialized: SerializedOrder = {
     user: order.user,
     nonce: order.nonce.toString(),
@@ -125,7 +125,7 @@ async function main() {
   const after = await mcBalance(pub, wbtc, account.address);
   assert.equal(after - before, LOCK, "agent should receive the released WBTC");
   assert.equal(await mcBalance(pub, wbtc, escrow), 0n, "escrow drained");
-  assert.equal(store.get(orderId)!.status, "finalised", "store marked finalised");
+  assert.equal((await store.get(orderId))!.status, "finalised", "store marked finalised");
 
   // idempotency: re-running settle is a no-op (already Claimed)
   const again = await settler.settleOne(store, orderId);

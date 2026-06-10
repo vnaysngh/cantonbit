@@ -37,7 +37,7 @@ import { makeNetworkConfig, type SwapNetworkConfig } from "./config.js";
 import { buildOrder, verifyCantonParty, type SwapRequest } from "./order.js";
 import { buildOpenForTypedData, PERMIT2_ADDRESS } from "./open-for.js";
 import { ESCROW_ABI } from "./abi.js";
-import { OrderStore, type OrderRecord, type SerializedOrder } from "./store.js";
+import type { OrderStore, OrderRecord, SerializedOrder } from "./store.js";
 import { serializeOrder, deserializeOrder } from "./convert.js";
 import { refundOrder, type RefundDeps } from "./refund.js";
 import { CantonClient } from "./canton.js";
@@ -433,7 +433,7 @@ export function createApi(deps: ApiDeps) {
     const escrowC = getContract({ address: cfg.escrow, abi: ESCROW_ABI, client: wallet });
     const orderId = (await escrowC.read.orderIdentifier([order])) as Hex;
 
-    const existing = store.get(orderId);
+    const existing = await store.get(orderId);
     if (existing) {
       // Idempotent: already registered (UI retried). Return current state.
       return { orderId, status: existing.status, alreadyRegistered: true };
@@ -449,12 +449,12 @@ export function createApi(deps: ApiDeps) {
     // the order is in the store WITH its cantonParty; the watcher/loop reconciles
     // its true on-chain status (Deposited) on the next tick and proceeds. The
     // openBlock is backfilled below once openFor mines.
-    store.insertSeen(orderId, 0, sorder);
-    store.update(orderId, { cantonParty, note: "registered; submitting openFor" });
+    await store.insertSeen(orderId, 0, sorder);
+    await store.update(orderId, { cantonParty, note: "registered; submitting openFor" });
     // Recovery map (MED-1): one entry per REAL order, written here (not at /quote)
     // so the unauthenticated /quote can't flood it. Lets the delivery path recover
     // the party if the record is ever lost (e.g. watcher-discovered order).
-    store.rememberParty(orderId, cantonParty);
+    await store.rememberParty(orderId, cantonParty);
 
     // Submit openFor on the origin chain. The user's signature authorizes the
     // WBTC pull; the agent only pays gas to submit (permissionless).
@@ -468,13 +468,13 @@ export function createApi(deps: ApiDeps) {
       // deliver against a lock that may not exist. If openFor actually reverted, no
       // WBTC was locked; if the receipt was merely lost, the next reconcile tick
       // reads the real on-chain status. Surface the error to the UI either way.
-      store.update(orderId, { note: `openFor submit error: ${e instanceof Error ? e.message : e}` });
+      await store.update(orderId, { note: `openFor submit error: ${e instanceof Error ? e.message : e}` });
       throw new ApiError(502, `openFor submission failed: ${e instanceof Error ? e.message : e}`);
     }
 
     // openFor mined — record the block (best-effort) and keep status `seen`.
     const blockNumber = await pub.getBlockNumber().catch(() => 0n);
-    store.update(orderId, { openBlock: Number(blockNumber), note: `openFor ${openTx}` });
+    await store.update(orderId, { openBlock: Number(blockNumber), note: `openFor ${openTx}` });
 
     console.log(`[api] order ${orderId.slice(0, 12)}… registered + openFor ${openTx.slice(0, 12)}… (WBTC locked)`);
     return { orderId, status: "seen", openTx };
@@ -503,8 +503,8 @@ export function createApi(deps: ApiDeps) {
    * entirely from the on-ledger re-check, never from the caller.
    */
   async function handleAccepted(orderId: Hex, _body: Record<string, unknown>) {
-    store.reload();
-    const rec = store.get(orderId);
+    await store.reload();
+    const rec = await store.get(orderId);
     if (!rec) throw new ApiError(404, "order not found");
     if (rec.status === "finalised" || rec.status === "refunded" || rec.status === "failed") {
       return { orderId, status: rec.status, alreadyTerminal: true };
@@ -514,7 +514,7 @@ export function createApi(deps: ApiDeps) {
     await resolveDelivery(store, canton, orderId, { now: nowSeconds(), fromOffset: 0 }).catch(
       () => undefined,
     );
-    const updated = store.get(orderId);
+    const updated = await store.get(orderId);
     return { orderId, status: updated?.status ?? rec.status };
   }
 
@@ -523,8 +523,8 @@ export function createApi(deps: ApiDeps) {
   const refundDeps: RefundDeps = { store, escrow: cfg.escrow, wallet, account, pub };
 
   async function handleRefund(orderId: Hex) {
-    store.reload();
-    const rec = store.get(orderId);
+    await store.reload();
+    const rec = await store.get(orderId);
     if (!rec) throw new ApiError(404, "order not found");
 
     const outcome = await refundOrder(rec, refundDeps, nowSeconds());
@@ -620,8 +620,8 @@ export function createApi(deps: ApiDeps) {
     const m = path.match(/^\/orders\/(0x[0-9a-fA-F]{64})$/);
     if (method === "GET" && m) {
       // Reload so the UI sees status advanced by the loop (seen→…→finalised).
-      store.reload();
-      const rec = store.get(m[1] as Hex);
+      await store.reload();
+      const rec = await store.get(m[1] as Hex);
       if (!rec) return send(res, 404, { error: "order not found" });
       return send(res, 200, publicOrder(rec));
     }

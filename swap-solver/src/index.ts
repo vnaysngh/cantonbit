@@ -17,15 +17,13 @@
 import { makeNetworkConfig } from "./config.js";
 import { loadEnv, describeEnv, type SolverEnv } from "./env.js";
 import { CantonClient } from "./canton.js";
-import { OrderStore } from "./store.js";
+import { SupabaseOrderStore, type OrderStore } from "./store.js";
 import { OpenWatcher } from "./watcher.js";
 import { deliverSeenOrders } from "./delivery.js";
 import { resolveDeliveringOrders } from "./accept-watch.js";
 import { Settler } from "./settle.js";
 import { buildHealthReport, summarize } from "./monitor.js";
 import { refundExpiredOrders, type RefundDeps } from "./refund.js";
-
-const STORE_PATH = process.env.STORE_PATH ?? ".oranj-swap/orders.json";
 
 // How much time must remain before an order's fillDeadline for the solver to
 // START delivering it. This covers the whole remaining lifecycle: deliver cBTC
@@ -50,7 +48,7 @@ async function main(): Promise<void> {
       "Both treasury-grade.",
   );
 
-  const store = new OrderStore(STORE_PATH);
+  const store: OrderStore = SupabaseOrderStore.fromEnv();
   const cfg = makeNetworkConfig({
     network: env.network,
     originChainId: await chainIdOf(env),
@@ -162,7 +160,7 @@ async function main(): Promise<void> {
       // 0. re-read the store so we see the API process's writes (the API
       //    registers orders + the cantonParty preimage; without this reload the
       //    loop would never see the party and would refuse to deliver).
-      store.reload();
+      await store.reload();
 
       // 2. deliver seen orders
       const delivered = await deliverSeenOrders(store, canton, {
@@ -209,7 +207,7 @@ async function main(): Promise<void> {
       }
 
       // 5. health check each tick — surface at-risk / stuck / critical states.
-      const health = buildHealthReport(store, {
+      const health = await buildHealthReport(store, {
         now,
         staleSeenSeconds: 30 * 60,
         deadlineWarnSeconds: 30 * 60,

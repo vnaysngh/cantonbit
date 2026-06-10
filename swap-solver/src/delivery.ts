@@ -76,14 +76,14 @@ export async function startDelivery(
   orderId: Hex,
   params: DeliveryParams,
 ): Promise<DeliveryOutcome> {
-  const rec = store.get(orderId);
+  const rec = await store.get(orderId);
   if (!rec) return { kind: "failed", reason: "order not found in store" };
   if (rec.status !== "seen") {
     return { kind: "skipped", reason: `status is '${rec.status}', not 'seen'` };
   }
 
   const out = rec.order.outputs[0];
-  if (!out) return fail(store, orderId, "order has no output");
+  if (!out) return await fail(store, orderId, "order has no output");
 
   // --- GUARD 1: time. Must have margin before fillDeadline. ---
   const secondsLeft = rec.order.fillDeadline - params.now;
@@ -103,11 +103,11 @@ export async function startDelivery(
   // openFor and the store write. Refuse to deliver only if neither has it...
   let cantonParty = rec.cantonParty;
   if (!cantonParty) {
-    const recovered = store.recallParty(orderId);
+    const recovered = await store.recallParty(orderId);
     if (recovered) {
       cantonParty = recovered;
       // Persist back onto the record so subsequent ticks don't re-recover.
-      store.update(orderId, { cantonParty: recovered, note: "cantonParty recovered from quote-time map" });
+      await store.update(orderId, { cantonParty: recovered, note: "cantonParty recovered from quote-time map" });
     }
   }
   if (!cantonParty) {
@@ -117,7 +117,7 @@ export async function startDelivery(
   // Otherwise a wrong/malicious party could redirect the cBTC. This re-checks the
   // RECOVERED party too — a poisoned recovery map can't redirect cBTC.
   if (!verifyCantonParty(cantonParty, out.recipient)) {
-    return fail(store, orderId, "Canton party does not match the on-chain recipient commitment — refusing to deliver");
+    return await fail(store, orderId, "Canton party does not match the on-chain recipient commitment — refusing to deliver");
   }
 
   // --- GUARD 2: float. Refuse rather than half-deliver. ---
@@ -129,7 +129,7 @@ export async function startDelivery(
   }
   const needSats = btcStringToSats(amountBtc);
   if (floatSats < needSats) {
-    return fail(store, orderId, `insufficient cBTC float: have ${floatSats} sats, need ${needSats} sats`);
+    return await fail(store, orderId, `insufficient cBTC float: have ${floatSats} sats, need ${needSats} sats`);
   }
 
   // --- GUARD 3 (C3): total in-flight exposure cap (defense in depth). Sum the
@@ -138,7 +138,11 @@ export async function startDelivery(
   // settles. Bounds the blast radius of any accounting error to a known limit. ---
   if (params.maxInflightSats && params.maxInflightSats > 0n) {
     let inflight = 0n;
-    for (const r of [...store.byStatus("delivering"), ...store.byStatus("delivered")]) {
+    const [delivering, deliveredRecs] = await Promise.all([
+      store.byStatus("delivering"),
+      store.byStatus("delivered"),
+    ]);
+    for (const r of [...delivering, ...deliveredRecs]) {
       const o = r.order.outputs[0];
       if (o) inflight += BigInt(o.amount);
     }
@@ -154,7 +158,7 @@ export async function startDelivery(
   // this only because it has no shared float — each solver fronts its own capital.) ---
   if (params.perUserInflightCapSats && params.perUserInflightCapSats > 0n) {
     let userInflight = 0n;
-    for (const r of store.byUser(rec.order.user, ["delivering", "delivered"])) {
+    for (const r of await store.byUser(rec.order.user, ["delivering", "delivered"])) {
       const o = r.order.outputs[0];
       if (o) userInflight += BigInt(o.amount);
     }
@@ -186,7 +190,7 @@ export async function startDelivery(
   // order from being delivered twice (double-spending the float). The status
   // guard at the top of this function is NOT sufficient alone because of the
   // await gap between it and the first status write; the claim closes that gap. ---
-  const won = store.claimStatus(orderId, "seen", "delivering", {
+  const won = await store.claimStatus(orderId, "seen", "delivering", {
     note: "claimed for delivery",
   });
   if (!won) {
@@ -222,7 +226,7 @@ export async function startDelivery(
     // was CONSUMED on creation (the pending transfer for our inputs is already
     // gone), so the cBTC is accepted and delivery is final.
     if (autoAccepted) {
-      store.update(orderId, {
+      await store.update(orderId, {
         status: "delivered",
         cbtcAccepted: true, // SECURITY (HIGH-1): cBTC handed over → never auto-refund
         cantonDeliveryRef: updateId,
@@ -240,7 +244,7 @@ export async function startDelivery(
     // receiver's offer isn't readable. resolveDeliveringOrders advances it to
     // `delivered` once the pending transfer disappears (accepted), or `failed`
     // past the fillDeadline (then the user refunds).
-    store.update(orderId, {
+    await store.update(orderId, {
       status: "delivering",
       cantonDeliveryRef: offerContractId || updateId,
       inputHoldingCids,
@@ -251,22 +255,22 @@ export async function startDelivery(
     return { kind: "delivering", offerContractId, updateId };
   } catch (e) {
     if (e instanceof InsufficientFloatError) {
-      return fail(store, orderId, e.message);
+      return await fail(store, orderId, e.message);
     }
     // Transient submit/registry error — RELEASE the delivery claim (delivering →
     // seen) so a later tick retries. Without this rollback the order would be
     // stuck in `delivering` forever (we claimed it, then the offer failed). The
     // createOffer either fully succeeded (we'd have returned above) or fully
     // failed here, so it's safe to revert to seen and retry cleanly.
-    store.claimStatus(orderId, "delivering", "seen", {
+    await store.claimStatus(orderId, "delivering", "seen", {
       note: `offer creation failed, released for retry: ${errMsg(e)}`,
     });
     return { kind: "skipped", reason: `offer creation failed (will retry): ${errMsg(e)}` };
   }
 }
 
-function fail(store: OrderStore, orderId: Hex, reason: string): DeliveryOutcome {
-  store.update(orderId, { status: "failed", note: reason });
+async function fail(store: OrderStore, orderId: Hex, reason: string): Promise<DeliveryOutcome> {
+  await store.update(orderId, { status: "failed", note: reason });
   return { kind: "failed", reason };
 }
 
@@ -281,7 +285,7 @@ export async function deliverSeenOrders(
   params: DeliveryParams,
 ): Promise<{ order: OrderRecord; outcome: DeliveryOutcome }[]> {
   const results: { order: OrderRecord; outcome: DeliveryOutcome }[] = [];
-  for (const rec of store.byStatus("seen")) {
+  for (const rec of await store.byStatus("seen")) {
     const outcome = await startDelivery(store, canton, rec.orderId, params);
     results.push({ order: rec, outcome });
   }

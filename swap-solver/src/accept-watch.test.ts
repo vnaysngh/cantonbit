@@ -8,7 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { pad, type Hex } from "viem";
 
-import { OrderStore, type SerializedOrder } from "./store.js";
+import { InMemoryOrderStore, type OrderStore, type SerializedOrder } from "./store.js";
 import { resolveDelivery, recordTimeToUnixSeconds, type AcceptWatchParams } from "./accept-watch.js";
 import type { CantonClient, OfferResolution } from "./canton.js";
 
@@ -17,7 +17,7 @@ const NOW = 1_780_000_000;
 const FILL_DEADLINE = NOW + 3600;
 
 function tmpStore(): OrderStore {
-  return new OrderStore(`/tmp/oranj-aw-test-${Math.random().toString(36).slice(2)}.json`);
+  return new InMemoryOrderStore();
 }
 
 function order(): SerializedOrder {
@@ -51,10 +51,10 @@ function mockCanton(resolution: OfferResolution, stillActive = true): CantonClie
   } as unknown as CantonClient;
 }
 
-function seedDelivering(store: OrderStore): Hex {
+async function seedDelivering(store: OrderStore): Promise<Hex> {
   const id = pad(`0x${Math.floor(Math.random() * 1e9).toString(16)}`, { size: 32 }) as Hex;
-  store.insertSeen(id, 1, order());
-  store.update(id, { status: "delivering", cantonDeliveryRef: "offer1", cantonParty: PARTY });
+  await store.insertSeen(id, 1, order());
+  await store.update(id, { status: "delivering", cantonDeliveryRef: "offer1", cantonParty: PARTY });
   return id;
 }
 
@@ -67,56 +67,56 @@ test("recordTimeToUnixSeconds parses ISO", () => {
 
 test("accepted in time → delivered + fillTimestamp captured", async () => {
   const store = tmpStore();
-  const id = seedDelivering(store);
+  const id = await seedDelivering(store);
   const recordIso = new Date((FILL_DEADLINE - 100) * 1000).toISOString();
   const out = await resolveDelivery(store, mockCanton({ kind: "accepted", recordTime: recordIso, updateId: "u1" }), id, params);
   assert.equal(out.kind, "delivered");
-  const rec = store.get(id)!;
+  const rec = (await store.get(id))!;
   assert.equal(rec.status, "delivered");
   assert.equal(rec.fillTimestamp, FILL_DEADLINE - 100);
 });
 
 test("accepted AFTER fillDeadline → failed (cannot finalise)", async () => {
   const store = tmpStore();
-  const id = seedDelivering(store);
+  const id = await seedDelivering(store);
   const lateIso = new Date((FILL_DEADLINE + 50) * 1000).toISOString();
   const out = await resolveDelivery(store, mockCanton({ kind: "accepted", recordTime: lateIso, updateId: "u1" }), id, params);
   assert.equal(out.kind, "failed");
   assert.match((out as { reason: string }).reason, /after fillDeadline/);
-  assert.equal(store.get(id)!.status, "failed");
+  assert.equal((await store.get(id))!.status, "failed");
 });
 
 test("expired → failed, no attest", async () => {
   const store = tmpStore();
-  const id = seedDelivering(store);
+  const id = await seedDelivering(store);
   const out = await resolveDelivery(store, mockCanton({ kind: "expired", recordTime: "2026-06-08T00:00:00Z", updateId: "u2" }), id, params);
   assert.equal(out.kind, "failed");
   assert.match((out as { reason: string }).reason, /expired/);
-  assert.equal(store.get(id)!.status, "failed");
+  assert.equal((await store.get(id))!.status, "failed");
 });
 
 test("unknown + still active + before deadline → pending", async () => {
   const store = tmpStore();
-  const id = seedDelivering(store);
+  const id = await seedDelivering(store);
   const out = await resolveDelivery(store, mockCanton({ kind: "unknown" }, true), id, params);
   assert.equal(out.kind, "pending");
-  assert.equal(store.get(id)!.status, "delivering"); // unchanged
+  assert.equal((await store.get(id))!.status, "delivering"); // unchanged
 });
 
 test("unknown + still active + PAST deadline → failed (abandon)", async () => {
   const store = tmpStore();
-  const id = seedDelivering(store);
+  const id = await seedDelivering(store);
   const lateParams: AcceptWatchParams = { now: FILL_DEADLINE + 10, fromOffset: 0 };
   const out = await resolveDelivery(store, mockCanton({ kind: "unknown" }, true), id, lateParams);
   assert.equal(out.kind, "failed");
   assert.match((out as { reason: string }).reason, /past fillDeadline/);
-  assert.equal(store.get(id)!.status, "failed");
+  assert.equal((await store.get(id))!.status, "failed");
 });
 
 test("ignores orders not in 'delivering'", async () => {
   const store = tmpStore();
-  const id = seedDelivering(store);
-  store.update(id, { status: "delivered" });
+  const id = await seedDelivering(store);
+  await store.update(id, { status: "delivered" });
   const out = await resolveDelivery(store, mockCanton({ kind: "accepted", recordTime: "2026-06-08T00:00:00Z", updateId: "u" }), id, params);
   assert.equal(out.kind, "pending");
 });

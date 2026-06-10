@@ -8,21 +8,20 @@
  * .oranj-swap/orders.json). Read-only — never mutates state.
  */
 
-import { OrderStore } from "./store.js";
+import { SupabaseOrderStore, type OrderStore } from "./store.js";
 import { buildHealthReport, allOrders, summarize } from "./monitor.js";
 import type { Hex } from "viem";
 
-const STORE_PATH = process.env.STORE_PATH ?? ".oranj-swap/orders.json";
 
 function now(): number { return Math.floor(Date.now() / 1000); }
 
-function main(): void {
+async function main(): Promise<void> {
   const [cmd, arg] = process.argv.slice(2);
-  const store = new OrderStore(STORE_PATH);
+  const store: OrderStore = SupabaseOrderStore.fromEnv();
 
   switch (cmd) {
     case "status": {
-      const r = buildHealthReport(store, { now: now(), staleSeenSeconds: 30 * 60, deadlineWarnSeconds: 30 * 60 });
+      const r = await buildHealthReport(store, { now: now(), staleSeenSeconds: 30 * 60, deadlineWarnSeconds: 30 * 60 });
       console.log(`\nSolver health: ${summarize(r)}\n`);
       if (r.atRisk.length) {
         console.log(`⚠ AT RISK (cBTC delivered, WBTC not yet finalised) — solver capital exposed:`);
@@ -52,7 +51,7 @@ function main(): void {
     }
 
     case "list": {
-      const orders = allOrders(store).filter((o) => !arg || o.status === arg);
+      const orders = (await allOrders(store)).filter((o) => !arg || o.status === arg);
       orders.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
       console.log(`\n${orders.length} order(s)${arg ? ` with status '${arg}'` : ""}:\n`);
       for (const o of orders) {
@@ -64,7 +63,7 @@ function main(): void {
 
     case "show": {
       if (!arg) { console.error("usage: show <orderId>"); process.exit(1); }
-      const rec = store.get(arg as Hex) ?? allOrders(store).find((o) => o.orderId.startsWith(arg!));
+      const rec = (await store.get(arg as Hex)) ?? (await allOrders(store)).find((o) => o.orderId.startsWith(arg!));
       if (!rec) { console.error(`order not found: ${arg}`); process.exit(1); }
       console.log(JSON.stringify(rec, null, 2));
       break;
