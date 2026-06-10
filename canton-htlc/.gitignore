@@ -1,0 +1,7 @@
+# Daml build output
+.daml/
+
+# Vendored Splice token-standard DARs (data-dependencies).
+# These are fetched per-environment from the node's vetted package set /
+# hyperledger-labs/splice releases — not committed. See daml.yaml + SPIKE.md.
+dars/

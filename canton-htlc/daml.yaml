@@ -1,0 +1,17 @@
+sdk-version: 3.4.11
+name: cbtc-htlc
+source: daml
+version: 0.1.0
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-script
+data-dependencies:
+  # Real cBTC dependency DARs (from cbtc-lib/cbtc-dars) — the same token-standard
+  # packages the live cBTC registry uses. The HtlcLock template imports
+  # Splice.Api.Token.AllocationV1 + MetadataV1; their transitive deps
+  # (holding-v1, allocation-instruction-v1) are included so the DALFs resolve.
+  - dars/splice-api-token-metadata-v1-1.0.0.dar
+  - dars/splice-api-token-holding-v1-1.0.0.dar
+  - dars/splice-api-token-allocation-v1-1.0.0.dar
+  - dars/splice-api-token-allocation-instruction-v1-1.0.0.dar

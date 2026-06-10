@@ -1,0 +1,100 @@
+-- CbtcHtlc — Hash-Time-Locked Contract for the Canton leg of an EVM<>Canton
+-- atomic swap (Fusion+ / Cancore model). One SHA-256 secret unlocks both legs.
+--
+-- ========================= HOW THIS WORKS (verified) =========================
+-- Built on the canonical Splice token standard (hyperledger-labs/splice source,
+-- 2026-06). The Splice `Holding` interface has NO public Transfer choice — the
+-- registry's `Allocation` primitive is the lock+move mechanism. The authority
+-- model (verified from AllocationV1.daml):
+--
+--   Allocation_ExecuteTransfer  controller = executor + sender + receiver
+--       BUT consent is PRE-DELEGATED to the `executor` at allocation time
+--       ("Typically this authorization is granted by sender and receiver to the
+--        executor as part of the contract coordinating the settlement"), so the
+--        executor can fire ExecuteTransfer ALONE afterwards.
+--   Allocation_Withdraw         controller = sender ALONE  (unilateral refund)
+--
+-- THE DESIGN (PATH A — exactly what Cancore does):
+--   1. The party giving the Canton asset (the "locker") creates an Allocation via
+--      the registry's AllocationFactory_Allocate, naming THIS htlc's `executor`
+--      party as the settlement executor, with settleBefore = the timelock. This
+--      locks the holding and pre-delegates execute-authority to `executor`.
+--   2. They create this HtlcLock, recording the allocationCid + hashLock + timelock.
+--   3. Claim(preimage): the receiver (or executor on their behalf) reveals the
+--      preimage; we verify sha256(preimage)==hashLock, then exercise
+--      Allocation_ExecuteTransfer → asset moves to receiver. Preimage is now
+--      on-ledger for the EVM-side watcher to read and claim the EVM leg.
+--   4. Refund: after the timelock, the locker exercises Allocation_Withdraw
+--      (sender-only authority) → asset returns to locker. Trustless, unilateral.
+--
+-- The registry CHOICE-CONTEXT (ExtraArgs) for ExecuteTransfer/Withdraw is fetched
+-- off-ledger by the orchestrator (your swap-solver, same as it fetches the
+-- transfer-factory context today) and PASSED IN as a choice argument — it cannot
+-- be hardcoded in Daml. That is the one off-ledger dependency, by design.
+-- ============================================================================
+
+module CbtcHtlc where
+
+import DA.Crypto.Text (sha256)
+
+import Splice.Api.Token.AllocationV1
+import Splice.Api.Token.MetadataV1 (ExtraArgs)
+
+-- | A hash-time-locked wrapper around a Splice `Allocation`. The Allocation
+-- (created via the registry) holds the actual locked cBTC/CC; this contract is
+-- the cryptographic gatekeeper that only lets it execute on a valid preimage,
+-- and lets the locker reclaim it after the timelock.
+template HtlcLock
+  with
+    locker : Party
+      -- ^ Gave the Canton asset; gets the refund. Also the Allocation's transferLeg.sender.
+      --   (Solver for EVM->Canton swaps; user for Canton->EVM swaps.)
+    receiver : Party
+      -- ^ Receives the asset on a valid preimage. = the Allocation's transferLeg.receiver.
+    executor : Party
+      -- ^ Pre-delegated executor of the Allocation (the platform/solver party).
+      --   This is the party that can fire Allocation_ExecuteTransfer alone.
+    allocationCid : ContractId Allocation
+      -- ^ The registry Allocation that locks the actual holding (created in step 1).
+    hashLock : Text
+      -- ^ H = sha256(preimage), lowercase hex. MUST equal the EVM leg's hashlock.
+    unlockTime : Time
+      -- ^ Claim only strictly before; Refund only at/after. The timelock.
+      --   SHOULD be <= the Allocation's settleBefore so the registry agrees.
+  where
+    signatory locker
+    observer receiver, executor
+
+    -- | Reveal the preimage to release the locked asset to `receiver`. The
+    -- `executor` drives it (it holds the pre-delegated Allocation authority); the
+    -- preimage check is THIS contract's gate. Reveals `preimage` on-ledger so the
+    -- EVM-side watcher can read it and claim the EVM leg with the same secret.
+    --
+    -- `allocationContext` is the registry choice-context for Allocation_ExecuteTransfer,
+    -- fetched off-ledger by the orchestrator and passed in.
+    choice Claim : Allocation_ExecuteTransferResult
+      with
+        preimage : Text
+        allocationContext : ExtraArgs
+      controller executor
+      do
+        now <- getTime
+        assertMsg "HTLC: too late (timelock passed)" (now < unlockTime)
+        assertMsg "HTLC: bad preimage" (sha256 preimage == hashLock)
+        -- Fire the real Splice release. Executor authority is pre-delegated, so
+        -- this succeeds without sender/receiver having to co-sign here.
+        exercise allocationCid Allocation_ExecuteTransfer with extraArgs = allocationContext
+
+    -- | Refund to `locker` at/after the timelock. Uses Allocation_Withdraw, which
+    -- is controlled by the sender (= locker) ALONE — a unilateral, trustless
+    -- escape hatch needing no one else's cooperation.
+    --
+    -- `allocationContext` is the registry choice-context for Allocation_Withdraw.
+    choice Refund : Allocation_WithdrawResult
+      with
+        allocationContext : ExtraArgs
+      controller locker
+      do
+        now <- getTime
+        assertMsg "HTLC: too early (timelock not reached)" (now >= unlockTime)
+        exercise allocationCid Allocation_Withdraw with extraArgs = allocationContext
