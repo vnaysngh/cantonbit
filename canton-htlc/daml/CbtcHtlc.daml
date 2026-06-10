@@ -1,5 +1,5 @@
 -- CbtcHtlc — Hash-Time-Locked Contract for the Canton leg of an EVM<>Canton
--- atomic swap (Fusion+ / Cancore model). One SHA-256 secret unlocks both legs.
+-- atomic swap (Fusion+ / Cancore model). One keccak256 secret unlocks both legs.
 --
 -- ========================= HOW THIS WORKS (verified) =========================
 -- Built on the canonical Splice token standard (hyperledger-labs/splice source,
@@ -21,7 +21,7 @@
 --      locks the holding and pre-delegates execute-authority to `executor`.
 --   2. They create this HtlcLock, recording the allocationCid + hashLock + timelock.
 --   3. Claim(preimage): the receiver (or executor on their behalf) reveals the
---      preimage; we verify sha256(preimage)==hashLock, then exercise
+--      preimage; we verify keccak256(preimage)==hashLock, then exercise
 --      Allocation_ExecuteTransfer → asset moves to receiver. Preimage is now
 --      on-ledger for the EVM-side watcher to read and claim the EVM leg.
 --   4. Refund: after the timelock, the locker exercises Allocation_Withdraw
@@ -51,6 +51,21 @@ import Splice.Api.Token.MetadataV1 (ExtraArgs)
 --        keccak256(hex) == EVM keccak256(raw)
 --                       == 0x94277b389401042e35f8709846050797955e2b321bee500555c2fbdc2f4e9903
 -- So `preimage` and `hashLock` below are BOTH lowercase-hex strings.
+
+-- | BINDING CHECK (T5): the wrapped Allocation MUST match the HtlcLock, or the
+-- preimage gate is meaningless (a mismatched Allocation could be executed /
+-- withdrawn through it). Asserts the Allocation's parties == ours, and that our
+-- timelock does not outlive the Allocation's settle window (else our gate could
+-- pass after the registry refuses to execute → stuck funds). Called at the start
+-- of BOTH choices so neither path can act on a wrong Allocation.
+assertBoundTo : Party -> Party -> Party -> Time -> AllocationView -> Update ()
+assertBoundTo locker receiver executor unlockTime av = do
+  let tl = av.allocation.transferLeg
+      st = av.allocation.settlement
+  assertMsg "HTLC: Allocation sender != locker"      (tl.sender == locker)
+  assertMsg "HTLC: Allocation receiver != receiver"  (tl.receiver == receiver)
+  assertMsg "HTLC: Allocation executor != executor"  (st.executor == executor)
+  assertMsg "HTLC: unlockTime outlives settleBefore" (unlockTime <= st.settleBefore)
 
 -- | A hash-time-locked wrapper around a Splice `Allocation`. The Allocation
 -- (created via the registry) holds the actual locked cBTC/CC; this contract is
@@ -95,6 +110,8 @@ template HtlcLock
         now <- getTime
         assertMsg "HTLC: too late (timelock passed)" (now < unlockTime)
         assertMsg "HTLC: bad preimage" (keccak256 preimage == hashLock)
+        av <- view <$> fetch allocationCid
+        assertBoundTo locker receiver executor unlockTime av
         -- Fire the real Splice release. Executor authority is pre-delegated, so
         -- this succeeds without sender/receiver having to co-sign here.
         exercise allocationCid Allocation_ExecuteTransfer with extraArgs = allocationContext
@@ -111,4 +128,6 @@ template HtlcLock
       do
         now <- getTime
         assertMsg "HTLC: too early (timelock not reached)" (now >= unlockTime)
+        av <- view <$> fetch allocationCid
+        assertBoundTo locker receiver executor unlockTime av
         exercise allocationCid Allocation_Withdraw with extraArgs = allocationContext

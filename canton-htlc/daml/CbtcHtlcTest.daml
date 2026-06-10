@@ -152,6 +152,27 @@ test_claim_success = do
     exerciseCmd htlcCid Claim with preimage = secretHex; allocationContext = emptyExtraArgs
   pure ()
 
+-- P6 (T5 binding): a Claim against an Allocation whose parties DON'T match the
+-- HtlcLock must fail the binding check, even with the correct preimage + authority.
+test_binding_rejects_mismatched_allocation : Script ()
+test_binding_rejects_mismatched_allocation = do
+  p      <- allocateParty "p6"
+  other  <- allocateParty "p6-other"   -- wrong receiver baked into the Allocation
+  setTime t0
+  let h = keccak256 secretHex
+  -- Allocation says receiver = `other`, but the HtlcLock says receiver = p.
+  allocCid <- submitMulti [p, other] [] do
+    createCmd MockAllocation with locker = p; receiver = other; executor = p; admin = p
+  let allocICid = toInterfaceContractId @Allocation allocCid
+  htlcCid <- submit p do
+    createCmd HtlcLock with
+      locker = p; receiver = p; executor = p   -- receiver = p, mismatched vs Allocation
+      allocationCid = allocICid; hashLock = h; unlockTime = tUnlock
+  -- correct preimage + correct controller, but the Allocation receiver != HtlcLock receiver
+  submitMustFail p do
+    exerciseCmd htlcCid Claim with preimage = secretHex; allocationContext = emptyExtraArgs
+  pure ()
+
 -- P3 (timelock) + P4: after unlockTime, Claim fails; only locker can Refund; Refund succeeds
 test_timelock_refund : Script ()
 test_timelock_refund = do
