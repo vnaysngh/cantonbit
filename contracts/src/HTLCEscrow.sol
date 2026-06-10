@@ -2,102 +2,106 @@
 pragma solidity ^0.8.28;
 
 import {IERC20} from "openzeppelin/token/ERC20/IERC20.sol";
+import {SafeERC20} from "openzeppelin/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuard} from "openzeppelin/utils/ReentrancyGuard.sol";
 
-/// @title HTLCEscrow — SHA-256 hash-timelock escrow for the EVM leg of a
-/// trustless wBTC <-> cBTC atomic swap (1inch Fusion+ model).
+/// @title HTLCEscrow — EVM leg of a trustless EVM<>Canton atomic swap.
 ///
-/// VERIFICATION ARTIFACT (this session). Proves the EVM-side primitive that the
-/// design depends on: a single 32-byte secret `s` with `H = sha256(s)` unlocks
-/// this escrow, and the SAME `s` must unlock the Canton-side Daml HTLC. SHA-256
-/// is chosen over keccak256 so EVM and Daml hash the preimage identically
-/// (Daml's DA.Crypto.Text.sha256 == Solidity's 0x02 precompile).
+/// Aligned to Cancore's production HTLC (verified on Sepolia; see
+/// contracts/reference/CancoreHTLC.sol), with hardening:
+///   - keccak256(preImage) hashlock  ← SAME hash as the Canton Daml leg
+///     (Daml DA.Crypto.Text.keccak256). One secret unlocks both legs.
+///   - locks keyed by the hashlock (`hashValue`); no swapId.
+///   - claim(preImage): receiver-only, before unlockTime; reveals preImage in the
+///     Claimed event — the cross-chain signal the other leg reads to settle.
+///   - retake(hashValue): sender-only, after unlockTime (the refund).
+///   - checks-effects (delete before transfer) + ReentrancyGuard + SafeERC20.
+///   - emits Locked (Cancore declared but never emitted it — indexers need it).
 ///
-/// Lifecycle: lock(H, timelock, claimer, safetyDeposit) -> claim(preimage) | refund()
-///   - claim(preimage): anyone may submit; pays `claimer` if sha256(preimage)==H,
-///     before timelock. Reveals `preimage` on-chain (the cross-chain unlock).
-///   - refund(): only after timelock, returns principal to `funder`.
-///   - safety deposit: paid to whoever lands the terminal tx (claim or refund),
-///     incentivising completion/cleanup.
-contract HTLCEscrow {
-    enum State { Empty, Locked, Claimed, Refunded }
+/// Timelock-ladder note: this leg's `unlockTime` vs the other leg's is enforced
+/// at the orchestration layer (the EVM leg of a given direction gets the longer
+/// timelock). Here we only sanity-bound it (must be in the future).
+contract HTLCEscrow is ReentrancyGuard {
+    using SafeERC20 for IERC20;
 
     struct Lock {
-        address funder;        // who locked the principal (refund recipient)
-        address claimer;       // who may receive on a valid preimage
-        IERC20 token;          // principal token (wBTC)
-        uint256 amount;        // principal amount
-        bytes32 hashlock;      // H = sha256(s)
-        uint64 timelock;       // unix seconds; claim only before, refund only after
-        uint256 safetyDeposit; // wei, paid to the terminal-tx sender
-        State state;
+        uint64 unlockTime;       // unix seconds; claim only before, retake only after
+        uint256 amount;
+        address tokenAddress;
+        address senderAddress;   // funder; gets the retake (refund)
+        address receiverAddress; // may claim with the preimage
     }
 
-    mapping(bytes32 => Lock) public locks; // swapId => Lock
+    mapping(bytes32 => Lock) public locks; // keccak256(preImage) => Lock
 
-    event Locked(bytes32 indexed swapId, address indexed funder, address indexed claimer, bytes32 hashlock, uint64 timelock, uint256 amount);
-    event Claimed(bytes32 indexed swapId, bytes32 preimage, address claimer);
-    event Refunded(bytes32 indexed swapId, address funder);
+    event Locked(bytes32 indexed hashValue, uint256 when, uint256 amount, address tokenAddress, address senderAddress, address receiverAddress);
+    event Claimed(bytes preImage, bytes32 indexed hashValue, uint256 when, uint256 amount, address tokenAddress, address senderAddress, address receiverAddress);
+    event Retaken(bytes32 indexed hashValue, uint256 when, uint256 amount, address tokenAddress, address senderAddress, address receiverAddress);
 
-    error AlreadyExists();
-    error NotLocked();
-    error BadPreimage();
+    error LockExists();
+    error ZeroAmount();
+    error BadUnlockTime();
+    error NoLock();
     error TooLate();
     error TooEarly();
+    error NotReceiver();
+    error NotSender();
+    error BadPreimage();
 
-    /// Lock principal under hashlock H with a timelock. `swapId` ties this leg
-    /// to the same swap on Canton (e.g. the signed order id).
+    /// Lock `amount` of `tokenAddress` under hashlock `hashValue` until `unlockTime`,
+    /// claimable by `receiverAddress` with the preimage. Funder must approve first.
     function lock(
-        bytes32 swapId,
-        address claimer,
-        IERC20 token,
+        bytes32 hashValue,
+        uint64 unlockTime,
         uint256 amount,
-        bytes32 hashlock,
-        uint64 timelock
-    ) external payable {
-        if (locks[swapId].state != State.Empty) revert AlreadyExists();
-        // pull principal from funder (test approves first)
-        require(token.transferFrom(msg.sender, address(this), amount), "transferFrom");
-        locks[swapId] = Lock({
-            funder: msg.sender,
-            claimer: claimer,
-            token: token,
+        address tokenAddress,
+        address receiverAddress
+    ) external nonReentrant {
+        if (locks[hashValue].amount != 0) revert LockExists();
+        if (amount == 0) revert ZeroAmount();
+        if (unlockTime <= block.timestamp) revert BadUnlockTime();
+
+        locks[hashValue] = Lock({
+            unlockTime: unlockTime,
             amount: amount,
-            hashlock: hashlock,
-            timelock: timelock,
-            safetyDeposit: msg.value,
-            state: State.Locked
+            tokenAddress: tokenAddress,
+            senderAddress: msg.sender,
+            receiverAddress: receiverAddress
         });
-        emit Locked(swapId, msg.sender, claimer, hashlock, timelock, amount);
+
+        // SafeERC20: supports non-bool-returning / fee-on-transfer tokens (USDT…).
+        IERC20(tokenAddress).safeTransferFrom(msg.sender, address(this), amount);
+
+        emit Locked(hashValue, block.timestamp, amount, tokenAddress, msg.sender, receiverAddress);
     }
 
-    /// Reveal the preimage to release principal to `claimer`. Callable by anyone
-    /// (a watchtower can finish a stalled swap) — the preimage is the only gate.
-    function claim(bytes32 swapId, bytes32 preimage) external {
-        Lock storage l = locks[swapId];
-        if (l.state != State.Locked) revert NotLocked();
-        if (block.timestamp >= l.timelock) revert TooLate();
-        // SHA-256 hashlock — identical hash function to the Canton Daml leg.
-        if (sha256(abi.encodePacked(preimage)) != l.hashlock) revert BadPreimage();
-        l.state = State.Claimed;
-        require(l.token.transfer(l.claimer, l.amount), "transfer");
-        if (l.safetyDeposit > 0) {
-            (bool ok,) = msg.sender.call{value: l.safetyDeposit}("");
-            require(ok, "deposit");
-        }
-        emit Claimed(swapId, preimage, l.claimer);
+    /// Reveal `preImage` to release the locked tokens to the receiver. Anyone may
+    /// submit, but funds go to the stored receiver — preImage is the only gate.
+    /// Reveals preImage on-chain (Claimed event) for the cross-chain unlock.
+    function claim(bytes calldata preImage) external nonReentrant {
+        bytes32 hashValue = keccak256(preImage);
+        Lock memory l = locks[hashValue];
+        if (l.amount == 0) revert NoLock();
+        if (block.timestamp >= l.unlockTime) revert TooLate();
+        // Cancore restricts claim to the receiver; we keep that (matches their model).
+        if (msg.sender != l.receiverAddress) revert NotReceiver();
+
+        delete locks[hashValue]; // effects before interaction
+        IERC20(l.tokenAddress).safeTransfer(l.receiverAddress, l.amount);
+
+        emit Claimed(preImage, hashValue, block.timestamp, l.amount, l.tokenAddress, l.senderAddress, l.receiverAddress);
     }
 
-    /// Return principal to the funder after the timelock. No preimage needed.
-    function refund(bytes32 swapId) external {
-        Lock storage l = locks[swapId];
-        if (l.state != State.Locked) revert NotLocked();
-        if (block.timestamp < l.timelock) revert TooEarly();
-        l.state = State.Refunded;
-        require(l.token.transfer(l.funder, l.amount), "transfer");
-        if (l.safetyDeposit > 0) {
-            (bool ok,) = msg.sender.call{value: l.safetyDeposit}("");
-            require(ok, "deposit");
-        }
-        emit Refunded(swapId, l.funder);
+    /// After the timelock, the sender reclaims the locked tokens. No preimage.
+    function retake(bytes32 hashValue) external nonReentrant {
+        Lock memory l = locks[hashValue];
+        if (l.amount == 0) revert NoLock();
+        if (block.timestamp < l.unlockTime) revert TooEarly();
+        if (msg.sender != l.senderAddress) revert NotSender();
+
+        delete locks[hashValue];
+        IERC20(l.tokenAddress).safeTransfer(l.senderAddress, l.amount);
+
+        emit Retaken(hashValue, block.timestamp, l.amount, l.tokenAddress, l.senderAddress, l.receiverAddress);
     }
 }

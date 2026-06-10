@@ -4,118 +4,143 @@ pragma solidity ^0.8.28;
 import {Test} from "forge-std/Test.sol";
 import {HTLCEscrow} from "../src/HTLCEscrow.sol";
 import {MockWBTC} from "../src/MockWBTC.sol";
-import {IERC20} from "openzeppelin/token/ERC20/IERC20.sol";
 
-/// VERIFICATION: proves the EVM-leg HTLC primitive for the trustless atomic swap.
-/// Each test maps to a kill-shot assumption from the design.
+/// Tests the keccak256, hashlock-keyed HTLC (aligned to Cancore's HTLC.sol).
+/// One secret `preImage` with hashValue = keccak256(preImage) gates the lock;
+/// the SAME hashValue must gate the Canton Daml leg (DA.Crypto.Text.keccak256).
 contract HTLCEscrowTest is Test {
     HTLCEscrow escrow;
     MockWBTC wbtc;
 
-    address funder = address(0xF00D);   // resolver/solver locking wBTC (EVM->Canton: resolver claims)
-    address claimer = address(0xBEEF);   // party who claims with the secret
-    address watchtower = address(0xCAFE); // anyone can finish a stalled swap
+    address sender = address(0xF00D);   // funder / retaker
+    address receiver = address(0xBEEF); // claimer
 
-    bytes32 constant SWAP_ID = keccak256("swap-1");
-    // The secret `s` and its SHA-256 hashlock. THIS hash must equal Daml's
-    // DA.Crypto.Text.sha256 over the same preimage for the cross-chain unlock.
-    bytes32 constant SECRET = bytes32(uint256(0x1234567890abcdef));
+    bytes PREIMAGE = bytes("the-cross-chain-secret-32bytes!!");
     uint256 constant AMOUNT = 1e8; // 1 wBTC (8dp)
 
     function setUp() public {
         escrow = new HTLCEscrow();
         wbtc = new MockWBTC();
-        wbtc.mint(funder, AMOUNT);
-        vm.deal(funder, 1 ether); // safety deposit funds
+        wbtc.mint(sender, AMOUNT);
     }
 
-    function _hashlock() internal pure returns (bytes32) {
-        return sha256(abi.encodePacked(SECRET));
+    function _hash() internal view returns (bytes32) {
+        return keccak256(PREIMAGE);
     }
 
-    function _lock(uint64 timelock, uint256 deposit) internal {
-        vm.startPrank(funder);
+    function _lock(uint64 unlockTime) internal {
+        vm.startPrank(sender);
         wbtc.approve(address(escrow), AMOUNT);
-        escrow.lock{value: deposit}(SWAP_ID, claimer, IERC20(address(wbtc)), AMOUNT, _hashlock(), timelock);
+        escrow.lock(_hash(), unlockTime, AMOUNT, address(wbtc), receiver);
         vm.stopPrank();
     }
 
-    /// A1: SHA-256 hashlock parity — the on-chain digest of the secret must be a
-    /// fixed, reproducible value. We print it so it can be compared byte-for-byte
-    /// against Daml's sha256 of the same preimage on the Canton node.
-    function test_sha256_parity_value() public {
-        bytes32 h = sha256(abi.encodePacked(SECRET));
-        // Known-answer: sha256 of the 32-byte secret. Daml script must produce
-        // the SAME hex when given the same 32 bytes.
-        assertEq(h, _hashlock());
-        emit log_named_bytes32("preimage (s)", SECRET);
-        emit log_named_bytes32("hashlock H = sha256(s)", h);
+    /// keccak256 parity: the on-chain hash of the secret is a fixed value the
+    /// Canton leg must reproduce. Printed for cross-impl comparison.
+    function test_keccak_parity_value() public {
+        bytes32 h = keccak256(PREIMAGE);
+        assertEq(h, _hash());
+        emit log_named_bytes("preImage", PREIMAGE);
+        emit log_named_bytes32("hashValue = keccak256(preImage)", h);
     }
 
-    /// Happy path: correct preimage releases principal to claimer before timelock.
+    function test_lock_pulls_funds_and_emits() public {
+        _lock(uint64(block.timestamp + 4 hours));
+        assertEq(wbtc.balanceOf(address(escrow)), AMOUNT, "escrow holds funds");
+        (, uint256 amt,, address s, address r) = escrow.locks(_hash());
+        assertEq(amt, AMOUNT);
+        assertEq(s, sender);
+        assertEq(r, receiver);
+    }
+
     function test_claim_with_correct_preimage() public {
-        _lock(uint64(block.timestamp + 4 hours), 0);
-        assertEq(wbtc.balanceOf(claimer), 0);
-        vm.prank(watchtower); // ANYONE can submit the revealed secret
-        escrow.claim(SWAP_ID, SECRET);
-        assertEq(wbtc.balanceOf(claimer), AMOUNT, "claimer paid");
+        _lock(uint64(block.timestamp + 4 hours));
+        vm.prank(receiver);
+        escrow.claim(PREIMAGE);
+        assertEq(wbtc.balanceOf(receiver), AMOUNT, "receiver paid");
     }
 
-    /// Wrong preimage must revert — no theft via a guessed/incorrect secret.
     function test_claim_wrong_preimage_reverts() public {
-        _lock(uint64(block.timestamp + 4 hours), 0);
-        vm.prank(watchtower);
-        vm.expectRevert(HTLCEscrow.BadPreimage.selector);
-        escrow.claim(SWAP_ID, bytes32(uint256(0xDEAD)));
+        _lock(uint64(block.timestamp + 4 hours));
+        vm.prank(receiver);
+        vm.expectRevert(HTLCEscrow.NoLock.selector); // wrong preimage hashes to an empty lock
+        escrow.claim(bytes("not-the-secret"));
     }
 
-    /// Claim after the timelock must fail — the refund window has opened, so the
-    /// secret-holder can no longer claim (prevents double-spend across the gap).
+    function test_claim_by_non_receiver_reverts() public {
+        _lock(uint64(block.timestamp + 4 hours));
+        vm.prank(sender); // sender is not the receiver
+        vm.expectRevert(HTLCEscrow.NotReceiver.selector);
+        escrow.claim(PREIMAGE);
+    }
+
     function test_claim_after_timelock_reverts() public {
         uint64 t = uint64(block.timestamp + 4 hours);
-        _lock(t, 0);
+        _lock(t);
         vm.warp(t);
-        vm.prank(watchtower);
+        vm.prank(receiver);
         vm.expectRevert(HTLCEscrow.TooLate.selector);
-        escrow.claim(SWAP_ID, SECRET);
+        escrow.claim(PREIMAGE);
     }
 
-    /// Refund before the timelock must fail — funder can't pull principal out
-    /// from under a still-claimable swap.
-    function test_refund_before_timelock_reverts() public {
-        _lock(uint64(block.timestamp + 4 hours), 0);
-        vm.prank(funder);
+    function test_retake_before_timelock_reverts() public {
+        _lock(uint64(block.timestamp + 4 hours));
+        vm.prank(sender);
         vm.expectRevert(HTLCEscrow.TooEarly.selector);
-        escrow.refund(SWAP_ID);
+        escrow.retake(_hash());
     }
 
-    /// Refund after the timelock returns principal to the funder.
-    function test_refund_after_timelock() public {
+    function test_retake_after_timelock() public {
         uint64 t = uint64(block.timestamp + 4 hours);
-        _lock(t, 0);
+        _lock(t);
         vm.warp(t);
-        vm.prank(funder);
-        escrow.refund(SWAP_ID);
-        assertEq(wbtc.balanceOf(funder), AMOUNT, "funder refunded");
+        vm.prank(sender);
+        escrow.retake(_hash());
+        assertEq(wbtc.balanceOf(sender), AMOUNT, "sender refunded");
     }
 
-    /// Safety deposit is paid to whoever lands the terminal tx (incentive to
-    /// complete/clean up a stalled swap) — proven on the claim path.
-    function test_safety_deposit_paid_to_claim_sender() public {
-        _lock(uint64(block.timestamp + 4 hours), 0.1 ether);
-        uint256 before = watchtower.balance;
-        vm.prank(watchtower);
-        escrow.claim(SWAP_ID, SECRET);
-        assertEq(watchtower.balance - before, 0.1 ether, "watchtower earns deposit");
+    function test_retake_by_non_sender_reverts() public {
+        uint64 t = uint64(block.timestamp + 4 hours);
+        _lock(t);
+        vm.warp(t);
+        vm.prank(receiver);
+        vm.expectRevert(HTLCEscrow.NotSender.selector);
+        escrow.retake(_hash());
     }
 
-    /// Cannot claim twice (state machine closes after terminal).
+    function test_no_double_lock_same_hash() public {
+        _lock(uint64(block.timestamp + 4 hours));
+        wbtc.mint(sender, AMOUNT);
+        vm.startPrank(sender);
+        wbtc.approve(address(escrow), AMOUNT);
+        vm.expectRevert(HTLCEscrow.LockExists.selector);
+        escrow.lock(_hash(), uint64(block.timestamp + 4 hours), AMOUNT, address(wbtc), receiver);
+        vm.stopPrank();
+    }
+
     function test_no_double_claim() public {
-        _lock(uint64(block.timestamp + 4 hours), 0);
-        vm.prank(watchtower);
-        escrow.claim(SWAP_ID, SECRET);
-        vm.prank(watchtower);
-        vm.expectRevert(HTLCEscrow.NotLocked.selector);
-        escrow.claim(SWAP_ID, SECRET);
+        _lock(uint64(block.timestamp + 4 hours));
+        vm.prank(receiver);
+        escrow.claim(PREIMAGE);
+        vm.prank(receiver);
+        vm.expectRevert(HTLCEscrow.NoLock.selector); // lock deleted
+        escrow.claim(PREIMAGE);
+    }
+
+    function test_lock_in_past_reverts() public {
+        vm.warp(1000);
+        vm.startPrank(sender);
+        wbtc.approve(address(escrow), AMOUNT);
+        vm.expectRevert(HTLCEscrow.BadUnlockTime.selector);
+        escrow.lock(_hash(), uint64(500), AMOUNT, address(wbtc), receiver);
+        vm.stopPrank();
+    }
+
+    function test_zero_amount_reverts() public {
+        vm.startPrank(sender);
+        wbtc.approve(address(escrow), AMOUNT);
+        vm.expectRevert(HTLCEscrow.ZeroAmount.selector);
+        escrow.lock(_hash(), uint64(block.timestamp + 1 hours), 0, address(wbtc), receiver);
+        vm.stopPrank();
     }
 }

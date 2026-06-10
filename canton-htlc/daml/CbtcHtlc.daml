@@ -35,10 +35,22 @@
 
 module CbtcHtlc where
 
-import DA.Crypto.Text (sha256)
+import DA.Crypto.Text (keccak256, BytesHex)
 
 import Splice.Api.Token.AllocationV1
 import Splice.Api.Token.MetadataV1 (ExtraArgs)
+
+-- ENCODING CONTRACT (verified, T2) — both legs must hash IDENTICAL bytes:
+--   EVM   : keccak256(preImage)              over the RAW secret bytes
+--   Canton: keccak256(preImageHex)           where preImageHex is the lowercase
+--           hex string of those same raw bytes. Daml's DA.Crypto.Text.keccak256
+--           takes a BytesHex (hex string), decodes it, and hashes the bytes — so
+--           it produces the SAME digest as the EVM raw-bytes keccak.
+--   e.g. raw "the-cross-chain-secret-32bytes!!"
+--        hex  "7468652d63726f73732d636861696e2d7365637265742d333262797465732121"
+--        keccak256(hex) == EVM keccak256(raw)
+--                       == 0x94277b389401042e35f8709846050797955e2b321bee500555c2fbdc2f4e9903
+-- So `preimage` and `hashLock` below are BOTH lowercase-hex strings.
 
 -- | A hash-time-locked wrapper around a Splice `Allocation`. The Allocation
 -- (created via the registry) holds the actual locked cBTC/CC; this contract is
@@ -57,7 +69,8 @@ template HtlcLock
     allocationCid : ContractId Allocation
       -- ^ The registry Allocation that locks the actual holding (created in step 1).
     hashLock : Text
-      -- ^ H = sha256(preimage), lowercase hex. MUST equal the EVM leg's hashlock.
+      -- ^ H = keccak256(preimageHex), lowercase hex. MUST equal the EVM leg's
+      --   keccak256(rawPreimage). See the ENCODING CONTRACT note above.
     unlockTime : Time
       -- ^ Claim only strictly before; Refund only at/after. The timelock.
       --   SHOULD be <= the Allocation's settleBefore so the registry agrees.
@@ -74,13 +87,14 @@ template HtlcLock
     -- fetched off-ledger by the orchestrator and passed in.
     choice Claim : Allocation_ExecuteTransferResult
       with
-        preimage : Text
+        preimage : BytesHex
+          -- ^ Lowercase-hex string of the raw secret bytes (the EVM preImage).
         allocationContext : ExtraArgs
       controller executor
       do
         now <- getTime
         assertMsg "HTLC: too late (timelock passed)" (now < unlockTime)
-        assertMsg "HTLC: bad preimage" (sha256 preimage == hashLock)
+        assertMsg "HTLC: bad preimage" (keccak256 preimage == hashLock)
         -- Fire the real Splice release. Executor authority is pre-delegated, so
         -- this succeeds without sender/receiver having to co-sign here.
         exercise allocationCid Allocation_ExecuteTransfer with extraArgs = allocationContext

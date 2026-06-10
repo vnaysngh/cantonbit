@@ -4,9 +4,9 @@
 -- for the on-node spike.
 --
 -- PASS CRITERIA:
---   P1 hashlock parity : printed sha256(preimage) == the EVM leg's H
---                        (0xa5146db745a9b5587adf7c6bbd18b9ca4094fa4c52b2c345ed8ec8f3d0546cbb,
---                         once the preimage encoding is reconciled — see VERIFY.md)
+--   P1 hashlock parity : keccak256(secretHex) == the EVM leg's keccak256(rawBytes)
+--                        == 0x94277b389401042e35f8709846050797955e2b321bee500555c2fbdc2f4e9903
+--                        (secretHex is the hex of the EVM test's raw preImage). HARD-ASSERTED.
 --   P2 hashlock gate   : Claim w/ correct preimage executes; wrong preimage fails
 --   P3 timelock gate   : Claim fails at/after unlockTime; Refund fails before, succeeds at/after
 --   P4 authority       : only `executor` can Claim; only `locker` can Refund
@@ -17,7 +17,8 @@ module CbtcHtlcTest where
 
 import CbtcHtlc
 import Daml.Script
-import DA.Crypto.Text (sha256)
+import DA.Crypto.Text (keccak256)
+import DA.Assert ((===))
 import DA.Time (time)
 import DA.Date (date, Month(..))
 
@@ -25,8 +26,10 @@ import Splice.Api.Token.AllocationV1
 import Splice.Api.Token.HoldingV1 (InstrumentId(..))
 import Splice.Api.Token.MetadataV1
 
+-- The hex string of the EVM test's raw preImage "the-cross-chain-secret-32bytes!!".
+-- keccak256 of these decoded bytes == the EVM hashValue (parity).
 secretHex : Text
-secretHex = "0000000000000000000000000000000000000000000000001234567890abcdef"
+secretHex = "7468652d63726f73732d636861696e2d7365637265742d333262797465732121"
 
 t0 : Time
 t0 = time (date 2026 Jun 10) 0 0 0
@@ -83,7 +86,7 @@ setup = do
   executor <- allocateParty "executor"  -- platform/solver, pre-delegated
   admin    <- allocateParty "cbtc-admin"
   setTime t0
-  let h = sha256 secretHex
+  let h = keccak256 secretHex
 
   -- locker + receiver + executor jointly create the mock allocation (stand-in for
   -- the registry-created, pre-delegated Allocation)
@@ -98,12 +101,13 @@ setup = do
       hashLock = h; unlockTime = tUnlock
   pure (locker, receiver, executor, htlcCid)
 
--- P1
+-- P1: HARD parity assertion — Daml keccak256 of the hex MUST equal the EVM
+-- keccak256 of the raw bytes. Locks the two legs to one secret.
 test_hashlock_parity : Script ()
 test_hashlock_parity = do
-  let h = sha256 secretHex
-  debug ("Daml sha256(secretHex) = " <> h)
-  pure ()
+  let h = keccak256 secretHex
+  debug ("Daml keccak256(secretHex) = " <> h)
+  h === "94277b389401042e35f8709846050797955e2b321bee500555c2fbdc2f4e9903"
 
 -- P2 (hashlock) + P4 (authority) + P5 (execute wiring), before timelock
 test_claim_paths : Script ()
@@ -132,7 +136,7 @@ test_claim_success : Script ()
 test_claim_success = do
   p <- allocateParty "soloparty"   -- one party plays sender+receiver+executor (full delegation)
   setTime t0
-  let h = sha256 secretHex
+  let h = keccak256 secretHex
   allocCid <- submit p do
     createCmd MockAllocation with locker = p; receiver = p; executor = p; admin = p
   let allocICid = toInterfaceContractId @Allocation allocCid
