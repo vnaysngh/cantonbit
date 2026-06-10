@@ -1,20 +1,11 @@
 "use client";
 
-import { usePathname } from "next/navigation";
 import { TopNav } from "@/components/TopNav";
 
 /**
- * Renders the TopNav + main content wrapper for authenticated pages.
- * Suppressed entirely on /login so that page gets a clean full-screen layout.
+ * Renders the TopNav + main content wrapper around every page.
  */
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const pathname = usePathname();
-  const isLogin = pathname === "/login";
-
-  if (isLogin) {
-    return <>{children}</>;
-  }
-
   return (
     <>
       {/* Atmospheric gradient — two large blurred color blobs (orange top-right,
