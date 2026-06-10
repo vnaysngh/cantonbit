@@ -91,7 +91,13 @@ template HtlcLock
       --   SHOULD be <= the Allocation's settleBefore so the registry agrees.
   where
     signatory locker
-    observer receiver, executor
+    -- NOTE: `receiver` is deliberately NOT an observer. If it were, a cross-
+    -- participant receiver's participant would have to vet this custom DAR
+    -- (NO_SYNCHRONIZER_FOR_SUBMISSION / "not vetted" otherwise). The receiver does
+    -- NOT need to see this wrapper — they receive the cBTC via the underlying
+    -- standard Allocation (which all participants vet) when Claim fires
+    -- Allocation_ExecuteTransfer. Only `executor` (local, has the DAR) observes.
+    observer executor
 
     -- | Reveal the preimage to release the locked asset to `receiver`. The
     -- `executor` drives it (it holds the pre-delegated Allocation authority); the
