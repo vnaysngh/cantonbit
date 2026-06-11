@@ -20,6 +20,8 @@ export interface SwapOrder {
   cbtcAmount: string;
   solverTimelock: number;
   mainLockTx?: string;
+  /** canton-to-evm: the SOLVER's EVM WBTC lock tx (the counter leg). */
+  counterLockTx?: string;
   counterClaimUpdateId?: string;
   revealedPreimage?: `0x${string}`;
   mainClaimTx?: string;

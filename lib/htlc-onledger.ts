@@ -168,7 +168,12 @@ async function allocationChoiceContext(
   };
 }
 
-/** STEP 1 — lock cBTC in an Allocation (solver = sender = executor). */
+/** STEP 1 — lock cBTC in an Allocation.
+ *  EVM→Canton (default): solver = sender = executor (locks its own float).
+ *  Canton→EVM (reverse): senderParty = the USER's hosted party (backend CanActAs
+ *  signs as them — Cancore's "platform auto-locks"); executor stays the solver so
+ *  ExecuteTransfer's receiver+executor authorizers are BOTH the solver (it claims
+ *  alone after the on-ledger keccak gate). */
 export async function allocate(params: {
   solverParty: string;
   receiverParty: string;
@@ -178,7 +183,10 @@ export async function allocate(params: {
   settlementId: string;
   settleBefore: Date;
   allocateBefore: Date;
+  /** transferLeg.sender + actAs party. Defaults to solverParty (forward direction). */
+  senderParty?: string;
 }): Promise<{ updateId: string; allocationCid: string }> {
+  const sender = params.senderParty ?? params.solverParty;
   const jwt = await getLedgerJwt();
   const now = new Date().toISOString();
   const allocation = {
@@ -192,7 +200,7 @@ export async function allocate(params: {
     },
     transferLegId: "leg-0",
     transferLeg: {
-      sender: params.solverParty,
+      sender,
       receiver: params.receiverParty,
       amount: params.amountBtc,
       instrumentId: NETWORK.instrumentId,
@@ -233,7 +241,7 @@ export async function allocate(params: {
 
   const { updateId, createdCids } = await submit(
     jwt,
-    [params.solverParty],
+    [sender], // sender authority locks the holdings (CanActAs covers hosted users)
     [{
       ExerciseCommand: {
         templateId: ALLOCATION_FACTORY_INTERFACE,
@@ -256,20 +264,25 @@ export async function allocate(params: {
   return { updateId, allocationCid };
 }
 
-/** STEP 2 — wrap the Allocation in our HtlcLock (records hashLock + timelock). */
+/** STEP 2 — wrap the Allocation in our HtlcLock (records hashLock + timelock).
+ *  Reverse direction (Canton→EVM): lockerParty = the USER's hosted party (signatory;
+ *  backend CanActAs signs the create) — executor stays the solver. */
 export async function createHtlcLock(params: {
   solverParty: string;
   receiverParty: string;
   allocationCid: string;
   hashLock: string; // lowercase hex, no 0x — keccak256 of the preimage hex
   unlockTime: Date;
+  /** HtlcLock.locker + actAs party. Defaults to solverParty (forward direction). */
+  lockerParty?: string;
 }): Promise<{ htlcCid: string; htlcBlob: string }> {
+  const locker = params.lockerParty ?? params.solverParty;
   const jwt = await getLedgerJwt();
-  const { created } = await submit(jwt, [params.solverParty], [{
+  const { created } = await submit(jwt, [locker], [{
     CreateCommand: {
       templateId: HTLC_TID,
       createArguments: {
-        locker: params.solverParty,
+        locker,
         receiver: params.receiverParty,
         executor: params.solverParty,
         allocationCid: params.allocationCid,
@@ -391,17 +404,20 @@ export async function claimAsReceiver(params: {
   return { updateId };
 }
 
-/** Refund path — after timelock, locker withdraws the Allocation via HtlcLock.Refund. */
+/** Refund path — after timelock, the LOCKER withdraws the Allocation via
+ *  HtlcLock.Refund. Reverse direction: lockerParty = the user's hosted party
+ *  (backend CanActAs); defaults to the solver (forward direction). */
 export async function refundHtlcLock(params: {
   solverParty: string;
   htlcCid: string;
   allocationCid: string;
+  lockerParty?: string;
 }): Promise<{ updateId: string }> {
   const jwt = await getLedgerJwt();
   const ctx = await allocationChoiceContext(params.allocationCid, "withdraw");
   const { updateId } = await submit(
     jwt,
-    [params.solverParty],
+    [params.lockerParty ?? params.solverParty],
     [{
       ExerciseCommand: {
         templateId: HTLC_TID,

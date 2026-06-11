@@ -40,7 +40,13 @@ interface Order {
   id: string; status: string; hashLock: Hex;
   wbtcAmount: string; userEvmAddress: string; solverEvmAddress: string;
   revealedPreimage?: Hex; mainClaimTx?: string;
+  direction?: string; solverTimelock?: number; counterLockTx?: string;
 }
+
+const ERC20_ABI = [
+  { type: "function", name: "approve", stateMutability: "nonpayable", inputs: [{ name: "s", type: "address" }, { name: "a", type: "uint256" }], outputs: [{ type: "bool" }] },
+  { type: "function", name: "allowance", stateMutability: "view", inputs: [{ name: "o", type: "address" }, { name: "s", type: "address" }], outputs: [{ type: "uint256" }] },
+] as const;
 
 async function jget(path: string) {
   const r = await fetch(`${API_BASE}${path}`);
@@ -85,6 +91,70 @@ async function main() {
       const { orders } = (await jget("/api/htlc/active")) as { orders: Order[] };
 
       for (const o of orders ?? []) {
+        // ================= REVERSE (canton-to-evm) =================
+        // Main leg = user's cBTC (locked by our backend, LONG timelock); counter
+        // leg = OUR WBTC (SHORT timelock). See docs/canton-to-evm-design.md.
+        if (o.direction === "canton-to-evm") {
+          // R-STEP 3 — cBTC locked on-ledger (our own backend's write) → lock WBTC
+          // on EVM: same hashLock, receiver = the USER's EVM address, SHORT timelock.
+          if (o.status === "main_locked" && !lockedCounter.has(o.id)) {
+            const amount = BigInt(o.wbtcAmount);
+            const unlock = BigInt(o.solverTimelock ?? 0);
+            if (unlock <= BigInt(Math.floor(Date.now() / 1000) + 300)) { console.log(`[solver] ${o.id.slice(0,12)} rev: timelock too close — skip`); continue; }
+            const existing = (await escrow.read.locks([o.hashLock])) as readonly [bigint, bigint, Address, Address, Address];
+            if (existing[1] === 0n) {
+              const wbtc = reqEnv("WBTC_ADDRESS") as Address;
+              const allowance = (await pub.readContract({ address: wbtc, abi: ERC20_ABI, functionName: "allowance", args: [account.address, ESCROW] })) as bigint;
+              if (allowance < amount) {
+                const atx = await wallet.writeContract({ address: wbtc, abi: ERC20_ABI, functionName: "approve", args: [ESCROW, amount * 100n], account, chain: null });
+                await pub.waitForTransactionReceipt({ hash: atx });
+              }
+              console.log(`[solver] ${o.id.slice(0,12)} rev: locking ${amount} WBTC for user ${o.userEvmAddress.slice(0,10)}…`);
+              const tx = await escrow.write.lock([o.hashLock, unlock, amount, wbtc, o.userEvmAddress as Address], { account, chain: null });
+              await pub.waitForTransactionReceipt({ hash: tx });
+              await jpost(`/api/htlc/${o.id}/counter-lock`, { counterLockTx: tx });
+            } else {
+              await jpost(`/api/htlc/${o.id}/counter-lock`, { counterLockTx: "already-locked" }).catch(() => {});
+            }
+            lockedCounter.add(o.id);
+            continue;
+          }
+
+          // R-STEP 4/5 WATCHTOWER — counter_locked: watch the EVM lock. If the user
+          // claimed (lock gone), pull the preimage from the Claimed event and claim
+          // the cBTC. NEVER rely only on the browser reporting the claim — a silent
+          // WBTC claim + later cBTC auto-refund would rob the solver of both legs.
+          if ((o.status === "counter_locked" || o.status === "counter_claimed") && !claimedMain.has(o.id)) {
+            let preimage: Hex | undefined = o.revealedPreimage;
+            if (!preimage) {
+              const lock = (await escrow.read.locks([o.hashLock])) as readonly [bigint, bigint, Address, Address, Address];
+              if (lock[1] !== 0n) {
+                // Still locked. If OUR retake window opened (user never claimed), retake.
+                if (o.solverTimelock && Date.now() / 1000 > o.solverTimelock + 30) {
+                  console.log(`[solver] ${o.id.slice(0,12)} rev: user never claimed — retaking WBTC`);
+                  const tx = await escrow.write.retake([o.hashLock], { account, chain: null });
+                  await pub.waitForTransactionReceipt({ hash: tx });
+                  claimedMain.add(o.id);
+                }
+                continue;
+              }
+              // Lock is gone → the user claimed. Find the Claimed event → preimage.
+              const logs = await pub.getContractEvents({
+                address: ESCROW, abi: HTLC_ESCROW_ABI, eventName: "Claimed",
+                args: { hashValue: o.hashLock }, fromBlock: "earliest", toBlock: "latest",
+              });
+              const ev = logs[logs.length - 1] as { args?: { preImage?: Hex } } | undefined;
+              preimage = ev?.args?.preImage;
+              if (!preimage) { console.log(`[solver] ${o.id.slice(0,12)} rev: lock gone but no Claimed event found yet`); continue; }
+            }
+            console.log(`[solver] ${o.id.slice(0,12)} rev: preimage public → claiming cBTC on Canton…`);
+            await jpost(`/api/htlc/${o.id}/claim-main`, { preimage: (preimage as string).replace(/^0x/, "") });
+            claimedMain.add(o.id);
+            continue;
+          }
+          continue; // reverse orders never fall through to the forward branches
+        }
+
         // STEP 4 — order is main_locked: verify the WBTC lock on-chain, lock counter.
         if (o.status === "main_locked" && !lockedCounter.has(o.id)) {
           const lock = (await escrow.read.locks([o.hashLock])) as readonly [bigint, bigint, Address, Address, Address];

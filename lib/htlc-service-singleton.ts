@@ -303,6 +303,111 @@ class HtlcService {
     return { order: o, updateId };
   }
 
+  // ===================== REVERSE DIRECTION (canton-to-evm) =====================
+  // Main leg = CANTON (user's cBTC, LONG timelock = userTimelock). Counter leg =
+  // EVM (solver's WBTC, SHORT timelock = solverTimelock). The user reveals the
+  // secret by MetaMask-claiming the WBTC; the solver then claims the cBTC via the
+  // on-ledger keccak-gated HtlcLock.Claim. Fully trustless (email users only —
+  // both Canton parties are local on warpx). See docs/canton-to-evm-design.md.
+
+  /** REVERSE STEP 2 — backend locks the USER's cBTC on-ledger (CanActAs = Cancore's
+   *  "platform auto-locks"): Allocation sender=user, receiver=solver, executor=
+   *  solver + HtlcLock locker=user. Idempotent (allocation persisted first). */
+  async lockMainCanton(id: string): Promise<SwapOrder> {
+    const o = await this.must(id);
+    if (o.direction !== "canton-to-evm") throw new Error(`lock-main is canton-to-evm only`);
+    if (o.counterMode !== "managed") throw new Error("canton-to-evm requires a participant-managed (email) user in v1");
+    if (o.status === "main_locked" && o.allocationCid && o.htlcCid) return o;
+    const hashLockHex = o.hashLock.startsWith("0x") ? o.hashLock.slice(2) : o.hashLock;
+    // Retry after a partial run: allocation exists, HtlcLock create failed.
+    if (o.allocationCid && !o.htlcCid) {
+      const { htlcCid, htlcBlob } = await createHtlcLock({
+        solverParty: o.solverCantonParty, receiverParty: o.solverCantonParty,
+        lockerParty: o.userCantonParty, allocationCid: o.allocationCid,
+        hashLock: hashLockHex, unlockTime: new Date(o.userTimelock * 1000 - 60_000),
+      });
+      o.htlcCid = htlcCid; o.htlcBlob = htlcBlob; o.status = "main_locked"; await this.store.put(o); return o;
+    }
+    if (o.status !== "accepted") throw new Error(`order not accepted (${o.status})`);
+
+    const holdings = await getHoldings(o.userCantonParty); // the USER's cBTC
+    const now = Date.now();
+    const settleBeforeMs = o.userTimelock * 1000; // LONG leg
+    const { allocationCid } = await allocate({
+      solverParty: o.solverCantonParty,        // executor
+      senderParty: o.userCantonParty,          // the user locks THEIR holdings
+      receiverParty: o.solverCantonParty,      // solver receives on claim
+      amountBtc: o.cbtcAmount,
+      inputHoldings: holdings,
+      inputHoldingCids: holdings.map((h) => h.contractId),
+      settlementId: `htlc-rev-${o.id.slice(0, 18)}-${now}`,
+      settleBefore: new Date(settleBeforeMs),
+      allocateBefore: new Date(Math.min(now + 10 * 60 * 1000, settleBeforeMs - 30_000)),
+    });
+    o.allocationCid = allocationCid; await this.store.put(o); // double-spend guard
+    const { htlcCid, htlcBlob } = await createHtlcLock({
+      solverParty: o.solverCantonParty, receiverParty: o.solverCantonParty,
+      lockerParty: o.userCantonParty, allocationCid,
+      hashLock: hashLockHex, unlockTime: new Date(settleBeforeMs - 60_000),
+    });
+    o.htlcCid = htlcCid; o.htlcBlob = htlcBlob;
+    o.status = "main_locked"; await this.store.put(o); return o;
+  }
+
+  /** REVERSE STEP 3 record — the solver locked the WBTC on EVM (short timelock). */
+  async recordCounterLocked(id: string, counterLockTx: string): Promise<SwapOrder> {
+    const o = await this.must(id);
+    if (o.direction !== "canton-to-evm") throw new Error("counter-lock is canton-to-evm only");
+    if (o.status === "counter_locked") return o; // idempotent
+    if (o.status !== "main_locked") throw new Error(`main not locked (${o.status})`);
+    o.counterLockTx = counterLockTx;
+    o.status = "counter_locked"; await this.store.put(o); return o;
+  }
+
+  /** REVERSE STEP 5 — the SOLVER claims the user's cBTC with the preimage the user
+   *  revealed on EVM (recorded by the UI or by the daemon's Claimed-event watch).
+   *  HtlcLock.Claim controller=receiver=solver (LOCAL, own authority) → on-ledger
+   *  keccak gate → Allocation_ExecuteTransfer. */
+  async claimMainAsSolver(id: string, preimageHex?: string): Promise<{ order: SwapOrder; updateId: string }> {
+    const o = await this.must(id);
+    if (o.direction !== "canton-to-evm") throw new Error("claim-main is canton-to-evm only");
+    if (o.status === "main_claimed") return { order: o, updateId: o.counterClaimUpdateId ?? "" };
+    if (o.status !== "counter_claimed" && o.status !== "counter_locked") {
+      throw new Error(`unexpected status ${o.status}`);
+    }
+    const preimage = preimageHex ?? (o.revealedPreimage ? o.revealedPreimage.slice(2) : undefined);
+    if (!preimage) throw new Error("no preimage — user has not revealed yet");
+    if (!preimageMatches(preimage, o.hashLock)) throw new Error("invalid preimage");
+    if (!o.htlcCid || !o.allocationCid) throw new Error("on-ledger HtlcLock not present");
+    const { updateId } = await claimAsReceiver({
+      receiverParty: o.solverCantonParty, // the solver IS the receiver here
+      solverParty: o.solverCantonParty,
+      htlcCid: o.htlcCid, htlcBlob: o.htlcBlob,
+      allocationCid: o.allocationCid, preimageHex: preimage,
+    });
+    o.revealedPreimage = ("0x" + (preimage.startsWith("0x") ? preimage.slice(2) : preimage)) as `0x${string}`;
+    o.status = "main_claimed"; await this.store.put(o);
+    return { order: o, updateId };
+  }
+
+  /** REVERSE refund — after the LONG (Canton) timelock, return the cBTC to the
+   *  USER: HtlcLock.Refund as locker=user (backend CanActAs) → Allocation_Withdraw. */
+  async refundMainCanton(id: string): Promise<{ order: SwapOrder; updateId: string }> {
+    const o = await this.must(id);
+    if (o.direction !== "canton-to-evm") throw new Error("refund-main is canton-to-evm only");
+    if (o.status !== "main_locked" && o.status !== "counter_locked") {
+      throw new Error(`not refundable (${o.status})`);
+    }
+    if (!o.htlcCid || !o.allocationCid) throw new Error("on-ledger HtlcLock not present");
+    if (Date.now() / 1000 < o.userTimelock) throw new Error("Canton timelock not reached yet");
+    const { updateId } = await refundHtlcLock({
+      solverParty: o.solverCantonParty, lockerParty: o.userCantonParty,
+      htlcCid: o.htlcCid, allocationCid: o.allocationCid,
+    });
+    o.status = "refunded"; await this.store.put(o);
+    return { order: o, updateId };
+  }
+
   /** STEP 6b — record that the USER's Loop wallet submitted the Claim (cBTC released,
    *  preimage now public on-ledger). The frontend calls this with the updateId after
    *  provider.submitTransaction succeeds. Stores the preimage for the solver's EVM claim. */

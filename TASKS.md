@@ -49,23 +49,55 @@
       (warpx for email, Loop for Loop); EVM wallet is a subset (EVM-only header dropdown);
       Canton party = identity (AccountControl + Log out → /login); no-party → /login gate.
 
-## ⏸ PAUSED — waiting on the Loop team
+## ✅ DONE — Loop / external-wallet flow (R1 RESOLVED + tested in browser)
 
-- [ ] **R1. Loop-wallet on-ledger claim.** A Loop user's EXTERNAL participant can't
-      EXERCISE our custom HtlcLock.Claim (TEMPLATES_NOT_FOUND — disclosure shows the
-      contract but the controller's participant needs our package to interpret the
-      choice). Asked the Loop team: can a Loop wallet exercise a custom-package choice
-      via disclosure, or must our DAR be vetted on Loop — and how does Cancore do it?
-      Until then, Loop users are on hold; **participant-managed (email) is the working,
-      fully-trustless mainline.**
+Loop team confirmed (2026-06-11): Loop will NEVER vet our DAR; a Loop user can't
+exercise OR even be an informee on our custom contract. Proven on-node 3×. Their
+Option 1 = Loop user signs ONLY standard Splice choices; all secret/claim logic on
+our node. We reverse-engineered Cancore's production bundle: their Loop mode is
+EXACTLY this — transfer-to-venue, venue runs the HTLC, custody-during-swap. We match it.
+
+- [x] **R1. Loop external-wallet swap — BUILT + TESTED in browser.** counterMode="loop"
+      (derived server-side from the receiver's namespace). Custody ordering: user clicks
+      Claim → REVEAL secret first → backend verifies preimage + the real on-chain WBTC
+      lock (verifyEvmLock) → flips counter_claimed (solver can now claim WBTC) → delivers
+      cBTC via a STANDARD TransferFactory_Transfer. With the mandatory cBTC auto-accept
+      (preapproval) ON, the transfer SELF-COMPLETES — no wallet popup (delivered=true).
+      Fallback: standard TransferInstruction_Accept the user signs. NO custom DAR touches
+      the Loop user. **Trust: trust-minimized on the Canton leg (atomicity = EVM HTLC +
+      solver ordering + timelock), NOT a Canton on-ledger gate — forced by Loop policy.**
+      Files: lib/htlc-service-singleton.ts (claimCounter), lib/transfer.ts
+      (prepareAcceptCommand, findOfferFromSender, transferKind), app/api/htlc/[id]/
+      {claim-counter,prepare-accept}, migration 008. Docs: LOOP-CONSTRAINTS-LOCKED.md.
 
 ## 🔵 NEXT (real, not blocked)
 
-- [ ] Real two-party UI click-through (distinct EVM wallets + hosted user party) — prove
-      WBTC user→solver AND cBTC solver→user end to end in the browser, not just scripts.
-- [ ] Canton → EVM direction (reverse) in the UI.
-- [ ] cBTC balance for the SESSION party in /swap (currently reads Loop wallet).
+- [x] cBTC balance for the SESSION party in /swap — /api/parties/balance + useBalance
+      branch (Loop provider → Loop wallet; else session party server-read). DONE.
+- [x] **Canton → EVM (reverse) — BUILT (email users, fully trustless), needs browser
+      test.** Cancore-mirrored design (docs/canton-to-evm-design.md): backend locks the
+      USER's cBTC on-ledger (Allocation sender=user + HtlcLock locker=user via CanActAs,
+      LONG timelock) → daemon locks WBTC on EVM (SHORT, receiver=user) → user claims
+      WBTC in MetaMask (= the reveal) → daemon claims cBTC via the on-ledger keccak gate.
+      Daemon has its own EVM Claimed-event watchtower (never trusts only the browser) +
+      WBTC retake after solverTimelock. UI: direction toggle on /swap (managed users
+      only; Loop sellers = phase 2). Migration 009 (counter_lock_tx) — NEEDS APPLYING.
+      Reverse refunds are manual in v1 (UI button + refund-main route); auto-refund
+      sweep doesn't cover reverse yet.
 - [ ] Order history / tracking view from Supabase (htlc_orders).
+- [ ] Cleanup: delete the DEAD legacy Loop on-ledger claim path (app/api/htlc/[id]/
+      claim-prepare route, prepareClaim in service + client, prepareClaimCommand usage
+      for Loop) — superseded by claim-counter; UI no longer references it.
+- [ ] (PARKED — analysed 2026-06-11, NOT a real trust upgrade for EVM→Canton) Allocation
+      escrow for external-wallet buyers: a standard Allocation has NO hash gate, so either
+      the user can execute it (→ takes cBTC without revealing the secret → SOLVER ROBBED)
+      or only the solver executes (→ user still trusts the solver, ≈ today; solver also
+      keeps sender-alone Allocation_Withdraw). Real benefits shrink to solvency-proof +
+      audit trail — transparency, not trust. Keep parked.
+      WHERE THE IDEA IS REAL: Canton→EVM LOOP SELLERS — user signs standard
+      AllocationFactory_Allocate (user=sender, Allocation_Withdraw = their own on-ledger
+      refund) instead of naked transfer-to-venue custody. Revisit there (phase 2 of the
+      reverse direction), gated on Loop signing the Allocation choices.
 
 ---
 
@@ -86,8 +118,12 @@
   DAR. The hash IS enforced on the Daml ledger via that DAR. PROVEN.
 - The on-ledger claim works for **local (participant-managed) receivers** where the DAR
   is vetted + the backend has CanActAs. Cross-participant (external Loop) receivers
-  can't use the custom DAR (NO_SYNCHRONIZER) → they use standard TransferInstruction_Accept.
-- "Loop mode" in Cancore = **self-swap**, not "external users". The default is
-  participant-managed = our proven on-ledger path.
+  can't use the custom DAR (NO_SYNCHRONIZER) → they use a standard transfer they
+  accept (or which auto-accepts via preapproval).
+- Cancore's ACTUAL Loop mode (reverse-engineered from their prod bundle, 2026-06-11) =
+  **transfer-to-venue custody**: Loop user signs ONE standard transfer to the venue, the
+  venue runs the HTLC on its own node. NOT a trustless on-ledger HTLC for external wallets.
+  Their on-node ("browser-extension") users get the full custom HTLC = our managed path.
+  See docs/LOOP-CONSTRAINTS-LOCKED.md + the htlc-swap-mental-model memory.
 - EVM leg is a real on-chain HTLC (keccak). Docs say SHA-256 but the deployed contract
   is keccak256 — we use keccak256.
