@@ -15,9 +15,15 @@ import { keccak_256 } from "@noble/hashes/sha3";
 
 import { getHoldings } from "./canton";
 import { SWAP_CHAIN } from "./swap-evm";
-import { createTransfer, findOfferFromSender, prepareAcceptCommand } from "./transfer";
+import {
+  createTransfer, findOfferFromSender, prepareAcceptCommand,
+  prepareTransferCommand, listPendingOffers, acceptTransfer,
+} from "./transfer";
 import { NETWORK } from "./constants";
-import { allocate, createHtlcLock, prepareClaimCommand, claimAsReceiver, refundHtlcLock } from "./htlc-onledger";
+import {
+  allocate, createHtlcLock, prepareClaimCommand, claimAsReceiver, refundHtlcLock,
+  prepareWithdrawCommand,
+} from "./htlc-onledger";
 import { SupabaseSwapStore, type SwapStore } from "./htlc-order-store";
 import type { SwapOrder, SwapStatus, SwapDirection } from "./htlc-types";
 
@@ -31,17 +37,13 @@ const HTLC_ESCROW_ADDR =
   process.env.NEXT_PUBLIC_HTLC_ESCROW ?? "0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1";
 /** Min seconds the solver needs left on the EVM lock to safely claim after a reveal. */
 const EVM_CLAIM_MARGIN_SECONDS = 10 * 60;
+/** Loop-seller custody: if the WBTC counter-lock hasn't happened within this grace,
+ *  the sweep returns the custody early (no point holding the user's funds). */
+const LOOP_CUSTODY_GRACE_SECONDS = 30 * 60;
 
-/**
- * SERVER-SIDE EVM LOCK CHECK (solver-robbery guard for the Loop path): before we
- * deliver cBTC, verify on-chain that the user's WBTC is REALLY locked in the HTLC
- * escrow under this order's hashLock — right amount, claimable by OUR solver, with
- * enough time left. Without this, a faked recordMainLock would let a user collect
- * cBTC against a non-existent WBTC lock. (The daemon re-checks at claim time too.)
- */
-async function verifyEvmLock(o: SwapOrder): Promise<void> {
-  const hashLock = (o.hashLock.startsWith("0x") ? o.hashLock.slice(2) : o.hashLock).toLowerCase();
-  // locks(bytes32) getter — selector = first 4 bytes of keccak256 of the signature.
+/** Raw read of the escrow's lock for a hashLock: { unlockTime, amount, receiver }. */
+async function readEvmLock(hashLockRaw: string): Promise<{ unlockTime: number; amount: bigint; receiver: string }> {
+  const hashLock = (hashLockRaw.startsWith("0x") ? hashLockRaw.slice(2) : hashLockRaw).toLowerCase();
   const selector = toHexLower(keccak_256(new TextEncoder().encode("locks(bytes32)"))).slice(2, 10);
   const res = await fetch(SWAP_CHAIN.rpcUrls[0], {
     method: "POST",
@@ -56,9 +58,22 @@ async function verifyEvmLock(o: SwapOrder): Promise<void> {
   const { result, error } = (await res.json()) as { result?: string; error?: { message?: string } };
   if (error || !result || result.length < 2 + 5 * 64) throw new Error(`EVM lock check failed: ${error?.message ?? "bad rpc result"}`);
   const word = (i: number) => result.slice(2 + i * 64, 2 + (i + 1) * 64);
-  const unlockTime = parseInt(word(0), 16);          // Lock.unlockTime (uint64)
-  const amount = BigInt(`0x${word(1)}`);             // Lock.amount
-  const receiver = `0x${word(4).slice(24)}`.toLowerCase(); // Lock.receiverAddress
+  return {
+    unlockTime: parseInt(word(0), 16),
+    amount: BigInt(`0x${word(1)}`),
+    receiver: `0x${word(4).slice(24)}`.toLowerCase(),
+  };
+}
+
+/**
+ * SERVER-SIDE EVM LOCK CHECK (solver-robbery guard for the Loop path): before we
+ * deliver cBTC, verify on-chain that the user's WBTC is REALLY locked in the HTLC
+ * escrow under this order's hashLock — right amount, claimable by OUR solver, with
+ * enough time left. Without this, a faked recordMainLock would let a user collect
+ * cBTC against a non-existent WBTC lock. (The daemon re-checks at claim time too.)
+ */
+async function verifyEvmLock(o: SwapOrder): Promise<void> {
+  const { unlockTime, amount, receiver } = await readEvmLock(o.hashLock);
   if (amount === 0n) throw new Error("EVM lock not found — WBTC is not locked under this hashLock");
   if (amount < BigInt(o.wbtcAmount)) throw new Error(`EVM lock amount too small (${amount} < ${o.wbtcAmount})`);
   if (receiver !== o.solverEvmAddress.toLowerCase()) throw new Error("EVM lock receiver is not the solver");
@@ -380,16 +395,87 @@ class HtlcService {
     const preimage = preimageHex ?? (o.revealedPreimage ? o.revealedPreimage.slice(2) : undefined);
     if (!preimage) throw new Error("no preimage — user has not revealed yet");
     if (!preimageMatches(preimage, o.hashLock)) throw new Error("invalid preimage");
-    if (!o.htlcCid || !o.allocationCid) throw new Error("on-ledger HtlcLock not present");
-    const { updateId } = await claimAsReceiver({
-      receiverParty: o.solverCantonParty, // the solver IS the receiver here
-      solverParty: o.solverCantonParty,
-      htlcCid: o.htlcCid, htlcBlob: o.htlcBlob,
-      allocationCid: o.allocationCid, preimageHex: preimage,
-    });
+    let updateId: string;
+    if (o.counterMode === "loop") {
+      // LOOP SELLER (Variant A custody): the cBTC entered our float at lock time
+      // (transfer-to-venue accept). The user's EVM claim revealed the preimage —
+      // the swap is settled; NO Canton action remains. Just record completion.
+      if (!o.counterTransferUpdateId) throw new Error("custody transfer not recorded — lock step incomplete");
+      updateId = o.counterTransferUpdateId;
+    } else {
+      if (!o.htlcCid || !o.allocationCid) throw new Error("on-ledger HtlcLock not present");
+      ({ updateId } = await claimAsReceiver({
+        receiverParty: o.solverCantonParty, // the solver IS the receiver here
+        solverParty: o.solverCantonParty,
+        htlcCid: o.htlcCid, htlcBlob: o.htlcBlob,
+        allocationCid: o.allocationCid, preimageHex: preimage,
+      }));
+    }
     o.revealedPreimage = ("0x" + (preimage.startsWith("0x") ? preimage.slice(2) : preimage)) as `0x${string}`;
     o.status = "main_claimed"; await this.store.put(o);
     return { order: o, updateId };
+  }
+
+  // ============ LOOP SELLERS (canton-to-evm, external wallet) ============
+  // The user locks via the STANDARD AllocationFactory_Allocate signed in THEIR
+  // wallet (Variant B — escrow with a unilateral Allocation_Withdraw exit). No
+  // custom contract touches the Loop party. VARIANT A (transfer-to-venue custody,
+  // = Cancore): the allocation-escrow variant was proven UNSETTLEABLE on-node
+  // (DvpLegAllocation.ExecuteTransfer needs sender+receiver+executor, all three,
+  // live — impossible cross-participant). See docs/canton-to-evm-design.md.
+
+  /** STEP 2a (LOOP SELLER, Variant A = Cancore's transfer-to-venue) — build the
+   *  STANDARD TransferFactory_Transfer (user → venue) for the user's wallet.
+   *  Holding cids are read in the BROWSER (we can't see a Loop party's holdings).
+   *
+   *  WHY NOT THE ALLOCATION ESCROW (settled 2026-06-12, proven on-node): the cBTC
+   *  DvpLegAllocation's ExecuteTransfer needs sender+receiver+executor ALL THREE at
+   *  execute time — a bare allocation with a cross-participant party can be locked
+   *  but settled by NO ONE. Custody is forced; it's exactly what Cancore ships. */
+  async prepareLoopSellerLock(id: string, holdingCids: string[]): Promise<{ command: unknown; disclosedContracts: unknown[]; synchronizerId: string }> {
+    const o = await this.must(id);
+    if (o.direction !== "canton-to-evm" || o.counterMode !== "loop") {
+      throw new Error("prepare-lock-loop is for Loop-seller (canton-to-evm) orders only");
+    }
+    if (o.status !== "accepted") throw new Error(`order not accepted (${o.status})`);
+    if (!holdingCids?.length) throw new Error("no input holdings supplied");
+    return prepareTransferCommand({
+      senderParty: o.userCantonParty,
+      receiverParty: o.solverCantonParty,
+      amountBtc: o.cbtcAmount,
+      inputHoldingCids: holdingCids,
+    });
+  }
+
+  /** STEP 2b (LOOP SELLER) — find the user's transfer offer in OUR view and ACCEPT
+   *  it as the venue (custody starts) → main_locked. Never trusts the browser. */
+  async confirmLoopSellerLock(id: string): Promise<SwapOrder> {
+    const o = await this.must(id);
+    if (o.direction !== "canton-to-evm" || o.counterMode !== "loop") {
+      throw new Error("confirm-lock-loop is for Loop-seller orders only");
+    }
+    if (o.status === "main_locked") return o; // idempotent
+    if (o.status !== "accepted") throw new Error(`order not accepted (${o.status})`);
+    const offers = await listPendingOffers(o.solverCantonParty);
+    const offer = offers.find(
+      (x) => x.sender === o.userCantonParty && parseFloat(x.amountBtc) + 1e-9 >= parseFloat(o.cbtcAmount),
+    );
+    if (!offer) throw new Error("transfer offer not visible on-ledger yet");
+    const { updateId } = await acceptTransfer({
+      receiverParty: o.solverCantonParty,
+      offerContractId: offer.contractId,
+    });
+    o.counterTransferOfferCid = offer.contractId;
+    o.counterTransferUpdateId = updateId;
+    o.status = "main_locked"; await this.store.put(o); return o;
+  }
+
+  /** LOOP-SELLER refund prep — the user's unilateral exit: standard
+   *  Allocation_Withdraw signed in their wallet. */
+  async prepareLoopSellerWithdraw(id: string): Promise<{ command: unknown; disclosedContracts: unknown[]; synchronizerId: string }> {
+    const o = await this.must(id);
+    if (o.counterMode !== "loop" || !o.allocationCid) throw new Error("no loop allocation to withdraw");
+    return prepareWithdrawCommand({ allocationCid: o.allocationCid });
   }
 
   /** REVERSE refund — after the LONG (Canton) timelock, return the cBTC to the
@@ -400,12 +486,29 @@ class HtlcService {
     if (o.status !== "main_locked" && o.status !== "counter_locked") {
       throw new Error(`not refundable (${o.status})`);
     }
-    if (!o.htlcCid || !o.allocationCid) throw new Error("on-ledger HtlcLock not present");
     if (Date.now() / 1000 < o.userTimelock) throw new Error("Canton timelock not reached yet");
-    const { updateId } = await refundHtlcLock({
-      solverParty: o.solverCantonParty, lockerParty: o.userCantonParty,
-      htlcCid: o.htlcCid, allocationCid: o.allocationCid,
-    });
+    let updateId: string;
+    if (o.counterMode === "loop") {
+      // LOOP SELLER custody refund — fully automatable on OUR side: send the
+      // custodied cBTC straight back (direct transfer; the user's preapproval
+      // auto-accepts). Guard: the secret must NOT be revealed (a revealed swap
+      // settles via claim-main, never refunds).
+      if (o.revealedPreimage) throw new Error("preimage revealed — swap must settle, not refund");
+      if (!o.counterTransferUpdateId) throw new Error("no custody transfer recorded — nothing to refund");
+      const holdings = await getHoldings(o.solverCantonParty);
+      ({ updateId } = await createTransfer({
+        senderParty: o.solverCantonParty,
+        receiverParty: o.userCantonParty,
+        amountBtc: o.cbtcAmount,
+        inputHoldings: holdings,
+      }));
+    } else {
+      if (!o.htlcCid || !o.allocationCid) throw new Error("on-ledger HtlcLock not present");
+      ({ updateId } = await refundHtlcLock({
+        solverParty: o.solverCantonParty, lockerParty: o.userCantonParty,
+        htlcCid: o.htlcCid, allocationCid: o.allocationCid,
+      }));
+    }
     o.status = "refunded"; await this.store.put(o);
     return { order: o, updateId };
   }
@@ -431,6 +534,10 @@ class HtlcService {
 
   async recordMainClaim(id: string, mainClaimTx: string) {
     const o = await this.must(id);
+    // FORWARD-ONLY endpoint (records the solver's EVM WBTC claim). A stale daemon
+    // once hit this for a REVERSE order and falsely marked it main_claimed without
+    // the Canton settlement ever happening. Hard-reject reverse orders.
+    if (o.direction === "canton-to-evm") throw new Error("main-claim is forward-only; reverse orders settle via claim-main");
     if (o.status !== "counter_claimed") throw new Error(`counter not claimed (${o.status})`);
     o.status = "main_claimed"; o.mainClaimTx = mainClaimTx; await this.store.put(o); return o;
   }
@@ -476,7 +583,7 @@ class HtlcService {
    *  - staleForwardMain: evm→canton orders stuck in main_locked past the EVM
    *    timelock — nothing of OURS is locked (the user retakes their WBTC on EVM
    *    with their own key); mark refunded so the active list drains. */
-  async expiredOrders(): Promise<{ forwardCounter: SwapOrder[]; reverseMain: SwapOrder[]; staleForwardMain: SwapOrder[] }> {
+  async expiredOrders(): Promise<{ forwardCounter: SwapOrder[]; reverseMain: SwapOrder[]; staleForwardMain: SwapOrder[]; staleLoopSeller: SwapOrder[]; loopCustodyStalled: SwapOrder[] }> {
     const now = Math.floor(Date.now() / 1000);
     const [counterLocked, mainLocked] = await Promise.all([
       this.store.byStatus("counter_locked"),
@@ -487,19 +594,55 @@ class HtlcService {
         (o) => o.direction === "evm-to-canton" && o.counterMode !== "loop" && !!o.htlcCid && now >= o.solverTimelock,
       ),
       reverseMain: [...mainLocked, ...counterLocked].filter(
-        (o) => o.direction === "canton-to-evm" && !!o.htlcCid && now >= o.userTimelock,
+        (o) => o.direction === "canton-to-evm" && o.counterMode !== "loop" && !!o.htlcCid && now >= o.userTimelock,
       ),
       staleForwardMain: mainLocked.filter(
         (o) => o.direction === "evm-to-canton" && now >= o.userTimelock,
       ),
+      // LOOP SELLERS (Variant A custody): WE hold the cBTC → the sweep sends it
+      // straight back after the timelock (refundMainCanton, fully automated).
+      staleLoopSeller: [...mainLocked, ...counterLocked].filter(
+        (o) => o.direction === "canton-to-evm" && o.counterMode === "loop" && now >= o.userTimelock,
+      ),
+      // EARLY refund (hardening): custody taken but the WBTC counter-lock never
+      // happened within the grace window — return the custody NOW instead of
+      // making the user wait out the full timelock. Verified safe in
+      // earlyRefundLoopCustody (on-chain check that NO WBTC lock exists).
+      loopCustodyStalled: mainLocked.filter(
+        (o) => o.direction === "canton-to-evm" && o.counterMode === "loop" && now >= o.createdAt + LOOP_CUSTODY_GRACE_SECONDS && now < o.userTimelock,
+      ),
     };
   }
 
-  /** Bookkeeping: mark a dead order refunded (no on-ledger action — used when the
-   *  only locked funds are the USER's EVM-side WBTC, which they retake themselves). */
+  /** EARLY custody return for a stalled Loop-seller swap (no WBTC counter-lock).
+   *  SAFETY: only from main_locked, only when the secret is unrevealed, and only
+   *  after an ON-CHAIN check that no WBTC lock exists under this hashLock (so a
+   *  daemon that locked but failed to report can't be double-paid). */
+  async earlyRefundLoopCustody(id: string): Promise<{ order: SwapOrder; updateId: string }> {
+    const o = await this.must(id);
+    if (o.direction !== "canton-to-evm" || o.counterMode !== "loop") throw new Error("early refund is loop-seller only");
+    if (o.status !== "main_locked") throw new Error(`not stalled (${o.status})`);
+    if (o.revealedPreimage) throw new Error("preimage revealed — swap must settle, not refund");
+    if (!o.counterTransferUpdateId) throw new Error("no custody transfer recorded");
+    const lock = await readEvmLock(o.hashLock);
+    if (lock.amount > 0n) throw new Error("WBTC lock exists on-chain — not stalled, do not refund");
+    const holdings = await getHoldings(o.solverCantonParty);
+    const { updateId } = await createTransfer({
+      senderParty: o.solverCantonParty,
+      receiverParty: o.userCantonParty,
+      amountBtc: o.cbtcAmount,
+      inputHoldings: holdings,
+    });
+    o.status = "refunded"; await this.store.put(o);
+    return { order: o, updateId };
+  }
+
+  /** Bookkeeping: mark a dead order refunded (no on-ledger action by US — used when
+   *  the locked funds are recoverable only by the USER's own signature: their EVM
+   *  WBTC retake, or a Loop seller's Allocation_Withdraw). */
   async markRefunded(id: string): Promise<SwapOrder> {
     const o = await this.must(id);
-    if (o.status !== "main_locked") throw new Error(`not stale (${o.status})`);
+    if (o.status !== "main_locked" && o.status !== "counter_locked") throw new Error(`not stale (${o.status})`);
     o.status = "refunded"; await this.store.put(o); return o;
   }
 

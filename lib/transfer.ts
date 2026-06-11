@@ -389,6 +389,66 @@ async function listPendingOffersAs(partyId: string): Promise<PendingOffer[]> {
 }
 
 /**
+ * LOOP SELLER (Variant A — transfer-to-venue custody, = Cancore): PREPARE the
+ * standard TransferFactory_Transfer for the USER to sign in their own wallet
+ * (sender = their Loop party, receiver = our venue/solver party). Their holdings
+ * live on THEIR participant (cids read in the browser); the registry rule/config
+ * contracts are disclosed via the factory choice-context.
+ */
+export async function prepareTransferCommand(params: {
+  senderParty: string;     // the Loop user
+  receiverParty: string;   // our venue/solver party
+  amountBtc: string;
+  inputHoldingCids: string[];
+}): Promise<{ command: unknown; disclosedContracts: DisclosedContract[]; synchronizerId: string }> {
+  const now = new Date().toISOString();
+  const executeBefore = new Date(Date.now() + TRANSFER_TTL_MS).toISOString();
+  const transfer = {
+    sender: params.senderParty,
+    receiver: params.receiverParty,
+    amount: params.amountBtc,
+    instrumentId: NETWORK.instrumentId,
+    lock: null,
+    requestedAt: now,
+    executeBefore,
+    inputHoldingCids: params.inputHoldingCids,
+    meta: { values: {} },
+  };
+  const registryUrl = `${NETWORK.registryUrl}/api/token-standard/v0/registrars/${NETWORK.decentralizedPartyId}/registry/transfer-instruction/v1/transfer-factory`;
+  const factoryRes = await fetch(registryUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      choiceArguments: {
+        expectedAdmin: NETWORK.decentralizedPartyId,
+        transfer,
+        extraArgs: { context: { values: {} }, meta: { values: {} } },
+      },
+    }),
+    cache: "no-store",
+  });
+  if (!factoryRes.ok) throw new Error(`TransferFactory registry call failed (${factoryRes.status}): ${await factoryRes.text()}`);
+  const factory = (await factoryRes.json()) as TransferFactoryResponse;
+  const disclosedContracts = factory.choiceContext.disclosedContracts.map((dc) => ({
+    ...dc, synchronizerId: dc.synchronizerId ?? "",
+  }));
+  const synchronizerId = disclosedContracts.find((d) => d.synchronizerId)?.synchronizerId ?? "";
+  const command = {
+    ExerciseCommand: {
+      templateId: TRANSFER_FACTORY_INTERFACE,
+      contractId: factory.factoryId,
+      choice: "TransferFactory_Transfer",
+      choiceArgument: {
+        expectedAdmin: NETWORK.decentralizedPartyId,
+        transfer,
+        extraArgs: { context: factory.choiceContext.choiceContextData, meta: { values: {} } },
+      },
+    },
+  };
+  return { command, disclosedContracts, synchronizerId };
+}
+
+/**
  * Phase 2 (LOOP / cross-participant receiver) — PREPARE the standard
  * TransferInstruction_Accept command for the USER to sign in their own wallet.
  *

@@ -51,6 +51,7 @@ import {
   evmClaim,
   evmRetake,
 } from "@/lib/htlc-client";
+import { listLoopCbtcHoldingCids } from "@/lib/loop-holdings";
 import {
   timelocksFromExpiration,
   EXPIRATION_OPTIONS,
@@ -607,8 +608,40 @@ export default function SwapPage() {
         solverTimelock,
       });
       await htlcApi.accept(id);
-      // Backend locks the user's cBTC on-ledger (the "platform auto-locks" step).
-      await htlcApi.lockMain(id);
+      if (isParticipantManaged) {
+        // EMAIL: backend locks the user's cBTC on-ledger (the "auto-locks" step).
+        await htlcApi.lockMain(id);
+      } else {
+        // LOOP SELLER: the user locks via the STANDARD AllocationFactory_Allocate
+        // signed in THEIR wallet (escrow with a unilateral Allocation_Withdraw
+        // exit — no custom contract ever touches the Loop party).
+        const provider = wallet.provider;
+        if (!provider) throw new Error("Connect your Loop wallet to lock your cBTC.");
+        const holdingCids = await listLoopCbtcHoldingCids(
+          provider as unknown as { getActiveContracts: (p?: { interfaceId?: string }) => Promise<unknown[]> },
+        );
+        if (!holdingCids.length) throw new Error("No unlocked cBTC holdings found in your Loop wallet.");
+        const prep = await htlcApi.prepareLockLoop(id, holdingCids);
+        const userParty = (provider as { party_id?: string }).party_id ?? wallet.partyId ?? "";
+        await provider.submitAndWaitForTransaction(
+          {
+            commands: [prep.command],
+            disclosedContracts: prep.disclosedContracts,
+            packageIdSelectionPreference: [],
+            actAs: [userParty],
+            readAs: [userParty],
+            synchronizerId: prep.synchronizerId,
+          },
+          undefined,
+        );
+        // Backend verifies the allocation from ITS OWN ledger view (never the browser).
+        let confirmed = false;
+        for (let i = 0; i < 10; i++) {
+          try { await htlcApi.confirmLockLoop(id); confirmed = true; break; }
+          catch { await sleep(2000); }
+        }
+        if (!confirmed) { fail("Your cBTC allocation was signed but not yet visible on-ledger — reopen this swap from Orders in a moment."); return; }
+      }
       // Wait for the solver daemon to lock the WBTC counter on EVM.
       let counterLocked = false;
       for (let i = 0; i < 60; i++) {
@@ -623,7 +656,7 @@ export default function SwapPage() {
     } catch (e) {
       fail(getSwapErrorMessage(e));
     }
-  }, [evm.account, destinationParty, amount, expirationSeconds]);
+  }, [evm.account, destinationParty, amount, expirationSeconds, isParticipantManaged, wallet]);
 
   // REVERSE claim — the user claims the WBTC in MetaMask. This on-chain
   // claim(preimage) IS the secret reveal; the daemon then claims the cBTC.
@@ -854,23 +887,22 @@ export default function SwapPage() {
               }
             />
 
-            {/* Direction toggle — flips WBTC→CBTC ↔ CBTC→WBTC. Selling cBTC
-                (canton-to-evm) is participant-managed (email) only in v1. */}
+            {/* Direction toggle — flips WBTC→CBTC ↔ CBTC→WBTC. Email sellers lock
+                via the on-ledger HtlcLock (trustless); Loop sellers lock via the
+                standard Allocation escrow signed in their wallet. */}
             <div className="relative z-10 -my-3 flex justify-center">
               <button
                 type="button"
                 aria-label="Flip swap direction"
                 onClick={() => {
-                  if (!isReverse && !isParticipantManaged) return; // Loop sellers: phase 2
                   setDirection(isReverse ? "evm-to-canton" : "canton-to-evm");
                   setAmount("");
                 }}
-                disabled={!isReverse && !isParticipantManaged}
-                title={!isReverse && !isParticipantManaged ? "Selling CBTC requires an email account (coming for Loop wallets)" : "Flip direction"}
-                className="flex size-9 items-center justify-center rounded-xl border-4 border-card bg-muted transition-all hover:bg-muted/70 active:scale-95 disabled:cursor-default disabled:hover:bg-muted"
+                title="Flip direction"
+                className="flex size-9 items-center justify-center rounded-xl border-4 border-card bg-muted transition-all hover:bg-muted/70 active:scale-95"
               >
                 <span className="material-symbols-outlined text-[20px] text-on-surface-variant">
-                  {isParticipantManaged ? "swap_vert" : "arrow_downward"}
+                  swap_vert
                 </span>
               </button>
             </div>
@@ -1068,10 +1100,20 @@ export default function SwapPage() {
             >
               {stage.kind === "rev-claiming" ? "Claiming…" : "Claim WBTC"}
             </button>
-            {/* Stuck-swap escape: refund the locked cBTC (after the Canton timelock). */}
+            {/* Stuck-swap escape: refund the locked cBTC (after the Canton timelock).
+                Email: backend HtlcLock.Refund. Loop seller: the user signs the
+                standard Allocation_Withdraw in their wallet (their unilateral exit). */}
             {stage.kind === "rev-claimable" && stage.claimError && (
               <button
-                onClick={() => void htlcApi.refundMain(stage.swapId).then(reset).catch(() => {})}
+                onClick={() => void (async () => {
+                  try {
+                    // Both modes refund via the backend after the timelock:
+                    // email = HtlcLock.Refund (CanActAs); loop seller (Variant A
+                    // custody) = we send the custodied cBTC straight back.
+                    await htlcApi.refundMain(stage.swapId);
+                    reset();
+                  } catch { /* surfaced via the existing claimError state on retry */ }
+                })()}
                 className="mt-2 w-full rounded-2xl border border-foreground/15 px-4 py-2.5 text-sm hover:bg-foreground/5"
               >
                 Refund my cBTC (after timelock)

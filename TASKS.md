@@ -70,6 +70,20 @@ EXACTLY this — transfer-to-venue, venue runs the HTLC, custody-during-swap. We
       (prepareAcceptCommand, findOfferFromSender, transferKind), app/api/htlc/[id]/
       {claim-counter,prepare-accept}, migration 008. Docs: LOOP-CONSTRAINTS-LOCKED.md.
 
+## 🟡 LOOP TRUST UPGRADES (researched 2026-06-12 — both concrete, both need decisions)
+
+- [ ] **Utility Settlement App Dvp** — the standard pre-delegation we proved bare
+      allocations lack: `Dvp` signed by operator+buyer+seller, `Dvp_Settle` controller=
+      operator alone (carries buyer+seller authority). In the Utility DARs Loop lists as
+      supported. Upgrades Loop sellers custody → NON-CUSTODIAL (terms-bound allocation;
+      settle-per-terms or expire-back; residual trust = DA-run Utility operator).
+      Needs: Settlement Utility onboarding (operator/commercial conversation), confirm
+      Loop passes UserService/DvpProposal choices, confirm one-Canton-leg DvP works.
+- [ ] **"Pro mode": externally-signed party on OUR node** (/v2/interactive-submission
+      prepare→execute) — FULL trustlessness with user-held keys (our vetted HtlcLock,
+      user signs client-side, we can censor but never move funds). User creates a new
+      party + moves funds off Loop. Real UX cost; best trust available.
+
 ## 🔵 NEXT (real, not blocked)
 
 - [x] cBTC balance for the SESSION party in /swap — /api/parties/balance + useBalance
@@ -100,6 +114,25 @@ EXACTLY this — transfer-to-venue, venue runs the HTLC, custody-during-swap. We
       Ran 2026-06-12: recovered 0.00611 WBTC (8 old probe locks). PENDING: re-run
       after ~2h for 0x0c9def/0x7c91 (timelocks not yet expired) + the API steps
       (dev server was down mid-run).
+- [x] **LOOP SELLERS (canton-to-evm, external wallet) — Variant A custody (= Cancore),
+      needs browser re-test.** HISTORY (settled 2026-06-12, never revisit): Variant B
+      (AllocationFactory_Allocate escrow) was built + browser-tested first. The Loop
+      wallet DID sign the allocate (proven!) and the lock landed — but settlement is
+      IMPOSSIBLE: the cBTC DvpLegAllocation's ExecuteTransfer demands sender+receiver+
+      executor (ALL THREE) live at execute time, no pre-delegation (proven on-node in
+      BOTH directions: buyer probe missing receiver; seller execute missing sender).
+      A bare cross-participant allocation locks but settles for NO ONE. Our HtlcLock
+      settles only because the CONTRACT aggregates authorities — email-only. Cancore's
+      transfer-to-venue custody is FORCED by Canton's authority model, not laziness.
+      VARIANT A FLOW: user signs ONE standard TransferFactory_Transfer (their cBTC →
+      venue); backend finds + ACCEPTS the offer as the venue (custody, main_locked);
+      daemon locks WBTC (short timelock); user MetaMask-claims (reveal); claim-main
+      just records (cBTC already custodied). Refunds FULLY AUTOMATED on our side
+      (sweep + button → we send the custodied cBTC straight back; guarded on
+      preimage-not-revealed). recordMainClaim now hard-rejects reverse orders (the
+      stale-daemon false-main_claimed bug). Legacy: test order 0xa817… marked failed;
+      its 0.001 cBTC sits in the user-withdrawable allocation (prepare-withdraw-loop
+      route kept for recovery).
 - [ ] Cleanup: delete the DEAD legacy Loop on-ledger claim path (app/api/htlc/[id]/
       claim-prepare route, prepareClaim in service + client, prepareClaimCommand usage
       for Loop) — superseded by claim-counter; UI no longer references it.

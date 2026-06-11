@@ -404,6 +404,174 @@ export async function claimAsReceiver(params: {
   return { updateId };
 }
 
+// ===================== LOOP SELLERS (canton-to-evm, external wallet) =====================
+// The Loop user locks their cBTC via the STANDARD AllocationFactory_Allocate signed in
+// THEIR wallet (sender=user, receiver=executor=solver, settleBefore=long timelock).
+// No custom contract ever touches the Loop party. The solver later executes the
+// allocation (receiver+executor = solver alone — the proven authority shape), and the
+// user's unilateral exit is the standard Allocation_Withdraw (sender-alone).
+
+/** Build the standard AllocationFactory_Allocate command for a LOOP user to sign in
+ *  their own wallet. Returns {command, disclosedContracts, synchronizerId} for
+ *  provider.submitAndWaitForTransaction. The user's input holdings live on THEIR
+ *  participant (no disclosure needed for them); the registry's rule/config contracts
+ *  are disclosed via the factory choice-context. */
+export async function prepareAllocateCommand(params: {
+  senderParty: string;     // the Loop user (locks their cBTC)
+  solverParty: string;     // receiver AND executor
+  amountBtc: string;
+  inputHoldingCids: string[]; // read in the BROWSER via provider.getActiveContracts
+  settlementId: string;
+  settleBefore: Date;
+  allocateBefore: Date;
+}): Promise<{ command: unknown; disclosedContracts: DisclosedContract[]; synchronizerId: string }> {
+  const now = new Date().toISOString();
+  const allocation = {
+    settlement: {
+      executor: params.solverParty,
+      settlementRef: { id: params.settlementId, cid: null },
+      requestedAt: now,
+      allocateBefore: params.allocateBefore.toISOString(),
+      settleBefore: params.settleBefore.toISOString(),
+      meta: { values: {} },
+    },
+    transferLegId: "leg-0",
+    transferLeg: {
+      sender: params.senderParty,
+      receiver: params.solverParty,
+      amount: params.amountBtc,
+      instrumentId: NETWORK.instrumentId,
+      meta: { values: {} },
+    },
+  };
+  const factoryRes = await fetch(reg(`/registry/allocation-instruction/v1/allocation-factory`), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      choiceArguments: {
+        expectedAdmin: NETWORK.decentralizedPartyId,
+        allocation,
+        requestedAt: now,
+        inputHoldingCids: params.inputHoldingCids,
+        extraArgs: { context: { values: {} }, meta: { values: {} } },
+      },
+    }),
+  });
+  if (!factoryRes.ok) throw new Error(`AllocationFactory failed (${factoryRes.status}): ${await factoryRes.text()}`);
+  const factory = (await factoryRes.json()) as {
+    factoryId: string;
+    choiceContext: { choiceContextData: unknown; disclosedContracts: DisclosedContract[] };
+  };
+  const disclosedContracts = factory.choiceContext.disclosedContracts.map((dc) => ({
+    ...dc, synchronizerId: dc.synchronizerId ?? "",
+  }));
+  const synchronizerId = disclosedContracts.find((d) => d.synchronizerId)?.synchronizerId ?? "";
+  const command = {
+    ExerciseCommand: {
+      templateId: ALLOCATION_FACTORY_INTERFACE,
+      contractId: factory.factoryId,
+      choice: "AllocationFactory_Allocate",
+      choiceArgument: {
+        expectedAdmin: NETWORK.decentralizedPartyId,
+        allocation,
+        requestedAt: now,
+        inputHoldingCids: params.inputHoldingCids,
+        extraArgs: { context: factory.choiceContext.choiceContextData, meta: { values: {} } },
+      },
+    },
+  };
+  return { command, disclosedContracts, synchronizerId };
+}
+
+/** VERIFY-then-trust: find the Loop user's allocation in the SOLVER's own ACS (the
+ *  solver is receiver+executor → stakeholder → sees it) and check its terms match
+ *  the order. Returns the cid, or null if absent/mismatched (with the reason). */
+export async function findAllocationBySettlement(params: {
+  solverParty: string;
+  settlementId: string;
+  senderParty: string;
+  minAmountBtc: string;
+  minSettleBefore: Date; // must cover the order's long timelock
+}): Promise<{ cid: string } | { cid: null; reason: string }> {
+  const jwt = await getLedgerJwt();
+  const endRes = await fetch(`${NETWORK.ledgerHost}/v2/state/ledger-end`, { headers: { Authorization: `Bearer ${jwt}` } });
+  const offset = ((await endRes.json()) as { offset: number }).offset;
+  const wildcard = { cumulative: [{ identifierFilter: { WildcardFilter: { value: { includeCreatedEventBlob: false } } } }] };
+  const r = await fetch(`${NETWORK.ledgerHost}/v2/state/active-contracts`, {
+    method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
+    body: JSON.stringify({ filter: { filtersByParty: { [params.solverParty]: wildcard } }, verbose: false, activeAtOffset: offset }),
+  });
+  if (!r.ok) return { cid: null, reason: `ACS read failed (${r.status})` };
+  const entries = (await r.json()) as any[];
+  for (const e of entries) {
+    const c = e?.contractEntry?.JsActiveContract?.createdEvent;
+    const tpl = c?.templateId ?? "";
+    if (!c?.contractId || !/Allocation/i.test(tpl) || /:Holding$/.test(tpl)) continue;
+    const a = c.createArgument ?? {};
+    const settlement = a.settlement ?? a.allocation?.settlement;
+    const leg = a.transferLeg ?? a.allocation?.transferLeg;
+    if (settlement?.settlementRef?.id !== params.settlementId) continue;
+    // Terms check — the user signed OUR prepared command, but verify on-ledger anyway.
+    if (leg?.sender !== params.senderParty) return { cid: null, reason: "allocation sender mismatch" };
+    if (leg?.receiver !== params.solverParty) return { cid: null, reason: "allocation receiver is not the solver" };
+    if (settlement?.executor !== params.solverParty) return { cid: null, reason: "allocation executor is not the solver" };
+    if (parseFloat(leg?.amount ?? "0") + 1e-9 < parseFloat(params.minAmountBtc)) return { cid: null, reason: `allocation amount too small (${leg?.amount})` };
+    if (new Date(settlement?.settleBefore ?? 0).getTime() < params.minSettleBefore.getTime()) {
+      return { cid: null, reason: "allocation settleBefore is earlier than the order timelock" };
+    }
+    return { cid: c.contractId };
+  }
+  return { cid: null, reason: "allocation not found yet" };
+}
+
+/** LOOP-SELLER claim — the solver executes the user's allocation directly
+ *  (Allocation_ExecuteTransfer; receiver+executor = solver ALONE — proven shape).
+ *  No on-ledger hash gate here (standard allocation); the orchestrator validates the
+ *  revealed preimage before calling this (custody-ordering, same trust as delivery). */
+export async function executeAllocationAsSolver(params: {
+  solverParty: string;
+  allocationCid: string;
+}): Promise<{ updateId: string }> {
+  const jwt = await getLedgerJwt();
+  const ctx = await allocationChoiceContext(params.allocationCid, "execute-transfer");
+  const ALLOCATION_INTERFACE = "#splice-api-token-allocation-v1:Splice.Api.Token.AllocationV1:Allocation";
+  const { updateId } = await submit(
+    jwt,
+    [params.solverParty],
+    [{
+      ExerciseCommand: {
+        templateId: ALLOCATION_INTERFACE,
+        contractId: params.allocationCid,
+        choice: "Allocation_ExecuteTransfer",
+        choiceArgument: { extraArgs: { context: ctx.data, meta: { values: {} } } },
+      },
+    }],
+    ctx.disclosed,
+  );
+  return { updateId };
+}
+
+/** LOOP-SELLER refund — prepare the standard Allocation_Withdraw for the USER to
+ *  sign in their wallet (sender-alone, their unilateral on-ledger exit). */
+export async function prepareWithdrawCommand(params: {
+  allocationCid: string;
+}): Promise<{ command: unknown; disclosedContracts: DisclosedContract[]; synchronizerId: string }> {
+  const ctx = await allocationChoiceContext(params.allocationCid, "withdraw");
+  const synchronizerId = ctx.disclosed.find((d) => d.synchronizerId)?.synchronizerId ?? "";
+  return {
+    command: {
+      ExerciseCommand: {
+        templateId: "#splice-api-token-allocation-v1:Splice.Api.Token.AllocationV1:Allocation",
+        contractId: params.allocationCid,
+        choice: "Allocation_Withdraw",
+        choiceArgument: { extraArgs: { context: ctx.data, meta: { values: {} } } },
+      },
+    },
+    disclosedContracts: ctx.disclosed,
+    synchronizerId,
+  };
+}
+
 /** Refund path — after timelock, the LOCKER withdraws the Allocation via
  *  HtlcLock.Refund. Reverse direction: lockerParty = the user's hosted party
  *  (backend CanActAs); defaults to the solver (forward direction). */

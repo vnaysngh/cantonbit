@@ -64,6 +64,13 @@ export const htlcApi = {
   // REVERSE (canton-to-evm): backend locks the user's cBTC on-ledger (CanActAs).
   lockMain: (id: string) => jpost(`/api/htlc/${id}/lock-main`),
   refundMain: (id: string) => jpost(`/api/htlc/${id}/refund-main`),
+  // LOOP SELLER (canton-to-evm, external wallet): the user locks via the STANDARD
+  // AllocationFactory_Allocate signed in their wallet; backend verifies on-ledger.
+  prepareLockLoop: (id: string, holdingCids: string[]): Promise<{ command: unknown; disclosedContracts: unknown[]; synchronizerId: string }> =>
+    jpost(`/api/htlc/${id}/prepare-lock-loop`, { holdingCids }),
+  confirmLockLoop: (id: string) => jpost(`/api/htlc/${id}/confirm-lock-loop`),
+  prepareWithdrawLoop: (id: string): Promise<{ command: unknown; disclosedContracts: unknown[]; synchronizerId: string }> =>
+    jpost(`/api/htlc/${id}/prepare-withdraw-loop`),
   lockCounter: (id: string) => jpost(`/api/htlc/${id}/lock-counter`),
   // Loop reveal+deliver. delivered=true → the cBTC auto-accepted (preapproval) and
   // there is NOTHING to accept — skip the wallet popup entirely.

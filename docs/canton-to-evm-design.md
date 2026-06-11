@@ -64,20 +64,39 @@ reverse orders in `counter_locked` (extract preimage from the log). If we relied
 only on the browser's recordCounterClaimed and the user claimed WBTC silently, the
 auto-refund would later return their cBTC → solver loses both legs.
 
-## Loop sellers (Canton→EVM, external wallet) — PHASE 2, NOT in this build
+## Loop sellers (Canton→EVM, external wallet) — Variant A custody (FINAL, 2026-06-12)
 
-Cancore's answer = transfer-to-venue custody (Flow B above). Our possible upgrade
-over naked custody: the user signs a standard `AllocationFactory_Allocate`
-(user=sender; `Allocation_Withdraw` = their own on-ledger refund) — REAL trust
-improvement for sellers, gated on the Loop wallet signing the standard Allocation
-choices (untested). Decided: ship email direction first; Loop sellers are a
-separate later decision. See TASKS.md parked item + LOOP-CONSTRAINTS-LOCKED.md
-(the Loop party can NEVER appear on our custom contracts).
+**The allocation-escrow idea (Variant B) is DEAD — proven on-node, both directions.**
+We built it and browser-tested it: the Loop wallet DID sign `AllocationFactory_Allocate`
+(the lock landed on-ledger). But settlement is impossible: the cBTC
+`DvpLegAllocation`'s `ExecuteTransfer` demands **sender + receiver + executor — all
+three — live at execute time** (no pre-delegation; error transcript: "requires
+authorizers [loop user], [warpx]"). A bare allocation between cross-participant
+parties can be locked but settled by NO ONE: we lack the Loop party's authority,
+the user lacks ours. Our custom HtlcLock settles only because the CONTRACT
+aggregates authorities (locker = signatory, receiver = controller) — which needs
+the DAR on the controller's participant → email-only. **Cancore's transfer-to-venue
+custody is FORCED by Canton's authority model.** Never propose Loop allocation
+escrows again — in either direction (the buyer-direction probe failed the same way
+on the missing receiver).
 
-NOTE (analysed, settled): the same Allocation-escrow idea is NOT a real trust
-upgrade for EVM→Canton buyers — a standard Allocation has no hash gate, so either
-the user can execute it (takes cBTC without revealing the secret → solver robbed)
-or only the solver executes (user still trusts solver ≈ today). Don't revisit.
+**Variant A flow (built):**
+1. User signs ONE standard `TransferFactory_Transfer` (their cBTC → venue party);
+   holding cids read in the browser (`provider.getActiveContracts` — raw ACS-entry
+   shape, NOT the SDK's documented flat shape).
+2. Backend finds the offer in ITS OWN view and ACCEPTS as the venue
+   (`confirmLoopSellerLock`) → custody begins → `main_locked`.
+3. Daemon locks WBTC (short timelock, receiver = user's EVM address).
+4. User MetaMask-claims the WBTC (the reveal). `claim-main` just records — the
+   cBTC is already in our float (custody settled at lock time).
+5. Refunds: FULLY AUTOMATED on our side — the sweep (and the UI button →
+   refund-main) sends the custodied cBTC straight back via a direct transfer
+   (auto-accepts via the user's preapproval); guarded on preimage-not-revealed.
+   `recordMainClaim` hard-rejects reverse orders (stale-daemon false-completion fix).
+
+Trust: custody-during-swap (identical to Cancore's production Loop mode). The
+user's protections: the venue accept is atomic + visible, the EVM lock is verified
+before they reveal, and refunds are automated.
 
 ## Build inventory (additive; frozen paths untouched)
 
