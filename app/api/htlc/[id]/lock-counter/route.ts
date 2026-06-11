@@ -10,7 +10,16 @@ import { htlcService } from "@/lib/htlc-service-singleton";
 export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   try {
-    const order = await htlcService().lockCounter(id);
+    const svc = htlcService();
+    const existing = await svc.getOrder(id);
+    // LOOP orders: NO Canton action here. Custody ordering (solver-robbery guard):
+    // the cBTC is delivered only AFTER the user reveals the secret (claim-counter →
+    // claimCounter does reveal-then-deliver). Returning the order unchanged lets the
+    // daemon mark this step done; the UI drives the reveal.
+    // Managed (email) orders keep the proven on-ledger HtlcLock path, untouched.
+    const order = existing?.counterMode === "loop"
+      ? existing
+      : await svc.lockCounter(id);
     return NextResponse.json({ order });
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 400 });

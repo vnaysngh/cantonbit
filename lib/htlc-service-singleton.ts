@@ -14,6 +14,8 @@
 import { keccak_256 } from "@noble/hashes/sha3";
 
 import { getHoldings } from "./canton";
+import { SWAP_CHAIN } from "./swap-evm";
+import { createTransfer, findOfferFromSender, prepareAcceptCommand } from "./transfer";
 import { NETWORK } from "./constants";
 import { allocate, createHtlcLock, prepareClaimCommand, claimAsReceiver, refundHtlcLock } from "./htlc-onledger";
 import { SupabaseSwapStore, type SwapStore } from "./htlc-order-store";
@@ -23,6 +25,45 @@ export type { SwapOrder, SwapStatus, SwapDirection };
 
 function toHexLower(bytes: Uint8Array): string {
   return "0x" + Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+const HTLC_ESCROW_ADDR =
+  process.env.NEXT_PUBLIC_HTLC_ESCROW ?? "0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1";
+/** Min seconds the solver needs left on the EVM lock to safely claim after a reveal. */
+const EVM_CLAIM_MARGIN_SECONDS = 10 * 60;
+
+/**
+ * SERVER-SIDE EVM LOCK CHECK (solver-robbery guard for the Loop path): before we
+ * deliver cBTC, verify on-chain that the user's WBTC is REALLY locked in the HTLC
+ * escrow under this order's hashLock — right amount, claimable by OUR solver, with
+ * enough time left. Without this, a faked recordMainLock would let a user collect
+ * cBTC against a non-existent WBTC lock. (The daemon re-checks at claim time too.)
+ */
+async function verifyEvmLock(o: SwapOrder): Promise<void> {
+  const hashLock = (o.hashLock.startsWith("0x") ? o.hashLock.slice(2) : o.hashLock).toLowerCase();
+  // locks(bytes32) getter — selector = first 4 bytes of keccak256 of the signature.
+  const selector = toHexLower(keccak_256(new TextEncoder().encode("locks(bytes32)"))).slice(2, 10);
+  const res = await fetch(SWAP_CHAIN.rpcUrls[0], {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0", id: 1, method: "eth_call",
+      params: [{ to: HTLC_ESCROW_ADDR, data: `0x${selector}${hashLock}` }, "latest"],
+    }),
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`EVM lock check failed (rpc ${res.status})`);
+  const { result, error } = (await res.json()) as { result?: string; error?: { message?: string } };
+  if (error || !result || result.length < 2 + 5 * 64) throw new Error(`EVM lock check failed: ${error?.message ?? "bad rpc result"}`);
+  const word = (i: number) => result.slice(2 + i * 64, 2 + (i + 1) * 64);
+  const unlockTime = parseInt(word(0), 16);          // Lock.unlockTime (uint64)
+  const amount = BigInt(`0x${word(1)}`);             // Lock.amount
+  const receiver = `0x${word(4).slice(24)}`.toLowerCase(); // Lock.receiverAddress
+  if (amount === 0n) throw new Error("EVM lock not found — WBTC is not locked under this hashLock");
+  if (amount < BigInt(o.wbtcAmount)) throw new Error(`EVM lock amount too small (${amount} < ${o.wbtcAmount})`);
+  if (receiver !== o.solverEvmAddress.toLowerCase()) throw new Error("EVM lock receiver is not the solver");
+  const now = Math.floor(Date.now() / 1000);
+  if (unlockTime - now < EVM_CLAIM_MARGIN_SECONDS) throw new Error("EVM lock expires too soon for the solver to claim safely");
 }
 
 function preimageMatches(preimageHex: string, hashLock: string): boolean {
@@ -127,6 +168,102 @@ class HtlcService {
     o.status = "counter_locked"; await this.store.put(o); return o;
   }
 
+  /** LOOP REVEAL + DELIVER — Cancore's venue/custody ordering: SECRET FIRST, then cBTC.
+   *
+   *  Why this order (solver-robbery guard): if we delivered the cBTC on main_locked,
+   *  a user could accept it, never reveal the secret, and retake their WBTC after the
+   *  EVM timelock — robbing the solver. So the user's "Claim" click sends us the
+   *  preimage FIRST; once we hold a valid preimage we can ALWAYS claim the WBTC
+   *  (status flips to counter_claimed → the daemon claims it), and only then do we
+   *  deliver the cBTC via a STANDARD TransferFactory_Transfer the user accepts in
+   *  their Loop wallet. The user signs ONLY standard choices; all secret logic is on
+   *  our node (Loop's Option 1, same custody model Cancore ships for Loop users).
+   *
+   *  IDEMPOTENT on retry: preimage step keys on status; delivery keys on
+   *  counterTransferUpdateId (persisted the instant createTransfer returns).
+   */
+  async claimCounter(id: string, preimageHex: string): Promise<{ order: SwapOrder; updateId: string; delivered: boolean }> {
+    const o = await this.must(id);
+    if (o.counterMode !== "loop") {
+      throw new Error(`claim-counter is the Loop path (mode ${o.counterMode ?? "managed"}); managed users use claim-managed`);
+    }
+    // main_claimed is fine too — the daemon may have already claimed the WBTC after
+    // the reveal (the custody ordering); the user is just completing their accept.
+    if (o.status !== "main_locked" && o.status !== "counter_claimed" && o.status !== "main_claimed") {
+      throw new Error(`unexpected status ${o.status}`);
+    }
+    if (!preimageMatches(preimageHex, o.hashLock)) throw new Error("invalid preimage");
+
+    // 0. EVM LOCK CHECK — the WBTC must REALLY be locked for our solver with time to
+    // spare. Guards against a faked recordMainLock collecting cBTC for nothing.
+    await verifyEvmLock(o);
+
+    // 1. SECRET FIRST — persist the preimage + flip to counter_claimed BEFORE any
+    // delivery. From this moment the daemon can claim the WBTC; we are unrobbable.
+    // (Only from main_locked — never downgrade counter_claimed/main_claimed.)
+    if (o.status === "main_locked") {
+      o.revealedPreimage = ("0x" + (preimageHex.startsWith("0x") ? preimageHex.slice(2) : preimageHex)) as `0x${string}`;
+      o.status = "counter_claimed";
+      await this.store.put(o);
+    }
+
+    // 2. DELIVER the cBTC via a STANDARD transfer (no custom DAR). When the user's
+    // Loop wallet has the cBTC PREAPPROVAL (the mandatory auto-accept gate), the
+    // registry executes this as a DIRECT transfer — it COMPLETES in one step and
+    // there is NO offer to accept (delivered=true). Otherwise an offer is created
+    // and the user accepts it with TransferInstruction_Accept (delivered=false).
+    // DOUBLE-SPEND GUARD: the updateId is persisted the instant createTransfer
+    // returns, so a retry never re-sends.
+    let delivered = false;
+    if (!o.counterTransferUpdateId) {
+      const holdings = await getHoldings(o.solverCantonParty);
+      const { updateId, offerContractId, transferKind } = await createTransfer({
+        senderParty: o.solverCantonParty,
+        receiverParty: o.userCantonParty, // the Loop party (cross-participant)
+        amountBtc: o.cbtcAmount,
+        inputHoldings: holdings,
+      });
+      o.counterTransferUpdateId = updateId;
+      await this.store.put(o);
+      if (offerContractId) { o.counterTransferOfferCid = offerContractId; await this.store.put(o); }
+      // No offer created = the transfer self-completed (preapproval auto-accept).
+      delivered = !offerContractId;
+      console.log(`[htlc] loop deliver ${id}: kind=${transferKind} delivered=${delivered}`);
+    } else if (!o.counterTransferOfferCid) {
+      // RETRY path with no recorded offer: either it auto-accepted (direct) or the
+      // offer was already accepted. If no pending offer exists on-ledger, the cBTC
+      // is with the user — nothing left to accept.
+      const pending = await findOfferFromSender(o.solverCantonParty, o.userCantonParty);
+      if (pending) { o.counterTransferOfferCid = pending; await this.store.put(o); }
+      else delivered = true;
+    }
+    return { order: o, updateId: o.counterTransferUpdateId ?? "", delivered };
+  }
+
+  /** PREPARE the standard TransferInstruction_Accept command for the Loop user to
+   *  sign in their own wallet. Standard Splice choice (no custom DAR) → runs on
+   *  Loop's node. Only available AFTER the reveal+deliver (claimCounter). */
+  async prepareLoopAccept(id: string): Promise<{ command: unknown; disclosedContracts: unknown[]; synchronizerId: string }> {
+    const o = await this.must(id);
+    if (o.counterMode !== "loop") throw new Error(`order is not a loop swap (mode ${o.counterMode})`);
+    // counter_claimed = revealed+delivered; main_claimed = daemon already took the
+    // WBTC too (normal custody ordering) — the user's accept is valid in both.
+    if (o.status !== "counter_claimed" && o.status !== "main_claimed") {
+      throw new Error(`counter transfer not ready (status ${o.status}) — reveal the secret first`);
+    }
+    if (!o.counterTransferUpdateId) throw new Error("counter transfer not sent yet — reveal the secret first");
+    // RECOVERY: if the offer cid wasn't captured from the tx tree at create time,
+    // find it from the SENDER's ACS (the solver sees the offers it created, even
+    // when the receiver is cross-participant).
+    if (!o.counterTransferOfferCid) {
+      const recovered = await findOfferFromSender(o.solverCantonParty, o.userCantonParty);
+      if (!recovered) throw new Error("cBTC transfer offer not found on-ledger — it may have expired (24h TTL)");
+      o.counterTransferOfferCid = recovered;
+      await this.store.put(o);
+    }
+    return prepareAcceptCommand({ offerContractId: o.counterTransferOfferCid });
+  }
+
   /** STEP 6a — PREPARE the user's Claim command. The Claim is controller=receiver,
    *  so the USER submits it from their Loop wallet (backend CANNOT). Returns the
    *  command + disclosed contracts for the browser's provider.submitTransaction. */
@@ -174,6 +311,11 @@ class HtlcService {
     if (o.status !== "counter_locked" && o.status !== "counter_claimed") {
       throw new Error(`unexpected status ${o.status}`);
     }
+    // VALIDATE the preimage (same gate as the managed path). The browser supplies it,
+    // so reject a junk preimage here — recording a bad one as counter_claimed would
+    // stall the solver's EVM claim with an unusable secret. (The on-chain claim also
+    // re-checks keccak, but we must not corrupt order state.)
+    if (!preimageMatches(preimageHex, o.hashLock)) throw new Error("invalid preimage");
     o.revealedPreimage = ("0x" + (preimageHex.startsWith("0x") ? preimageHex.slice(2) : preimageHex)) as `0x${string}`;
     o.counterClaimUpdateId = updateId;
     o.status = "counter_claimed"; await this.store.put(o);

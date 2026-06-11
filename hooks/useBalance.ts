@@ -29,21 +29,30 @@ const ZERO: Fetched = { total: "0", locked: "0", utxoCount: 0 };
 const POLL_INTERVAL_MS = 30_000;
 
 /**
- * Fetch the user's cBTC balance from their CONNECTED LOOP WALLET via
- * provider.getHolding(). This reads the user's OWN holdings through their Loop
- * connection — the correct source, since the app's m2m JWT cannot read a Loop
- * party hosted on another participant.
+ * Fetch the user's cBTC balance.
+ *  - LOOP user: read their OWN holdings via provider.getHolding() (the m2m JWT
+ *    can't read a Loop party hosted on another participant).
+ *  - PARTICIPANT-MANAGED (email) user: no Loop provider, so read the session
+ *    party's on-ledger holdings server-side via /api/parties/balance (the m2m JWT
+ *    CAN read warpx-hosted parties). This is why a managed user's real cBTC used
+ *    to show 0.
  */
 export function useBalance(): BalanceState {
   const { provider, connected, party } = useLoopWallet();
+  const useLoop = connected && !!provider;
 
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["balance", party],
-    enabled: connected && !!provider,
+    queryKey: ["balance", useLoop ? party : "session"],
     queryFn: async (): Promise<Fetched> => {
-      if (!provider) return ZERO;
-      const { total, locked, count } = await readLoopCbtcBalance(provider);
-      return { total, locked, utxoCount: count };
+      if (useLoop && provider) {
+        const { total, locked, count } = await readLoopCbtcBalance(provider);
+        return { total, locked, utxoCount: count };
+      }
+      // Session-party (email) path — server reads the warpx party's holdings.
+      const r = await fetch("/api/parties/balance");
+      if (!r.ok) return ZERO;
+      const j = (await r.json()) as { total?: string; utxoCount?: number };
+      return { total: j.total ?? "0", locked: "0", utxoCount: j.utxoCount ?? 0 };
     },
     refetchInterval: POLL_INTERVAL_MS,
     refetchIntervalInBackground: false,
@@ -55,7 +64,7 @@ export function useBalance(): BalanceState {
     total: view.total,
     locked: view.locked,
     utxoCount: view.utxoCount,
-    isLoading: connected && isLoading,
+    isLoading,
     error: error instanceof Error ? error.message : null,
     refetch: () => void refetch(),
   };

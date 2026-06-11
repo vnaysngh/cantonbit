@@ -56,6 +56,10 @@ interface LoopState {
   connected: boolean;
   /** Connection in progress (popup open). */
   connecting: boolean;
+  /** A stored session is being silently restored (autoConnect in flight). Pages must
+   *  NOT treat "no party yet" as logged-out while this is true — doing so causes an
+   *  infinite login↔swap redirect loop on every full page load. */
+  restoring: boolean;
   /** The connected Canton party id, or "" if not connected. */
   party: string;
   email: string | null;
@@ -67,7 +71,7 @@ interface LoopState {
 }
 
 const LoopContext = createContext<LoopState>({
-  ready: false, connected: false, connecting: false, party: "", email: null,
+  ready: false, connected: false, connecting: false, restoring: false, party: "", email: null,
   provider: null, error: null,
   connect: async () => {}, logout: () => {},
 });
@@ -77,6 +81,13 @@ const APP_NAME = "OranjSwap";
 export function LoopWalletProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
   const [connecting, setConnecting] = useState(false);
+  // True while a STORED session is being restored on page load. Starts true when a
+  // stored session exists (checked synchronously below) so there is never a frame
+  // where ready=true, restoring=false, party="" on a logged-in reload.
+  const [restoring, setRestoring] = useState<boolean>(() => {
+    try { return typeof window !== "undefined" && !!localStorage.getItem("loop_connect"); }
+    catch { return false; }
+  });
   const [provider, setProvider] = useState<LoopProvider | null>(null);
   const [error, setError] = useState<string | null>(null);
   // The `loop` singleton from the SDK, loaded once.
@@ -121,8 +132,13 @@ export function LoopWalletProvider({ children }: { children: ReactNode }) {
         if (hasSession) {
           try { await loop.autoConnect(); } catch { /* session expired/invalid — fine */ }
         }
+        // Restore settled (success → onAccept set the provider; failure → logged out).
+        if (!cancelled) setRestoring(false);
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : "Failed to load Loop SDK");
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : "Failed to load Loop SDK");
+          setRestoring(false);
+        }
       }
     })();
     return () => { cancelled = true; };
@@ -158,6 +174,7 @@ export function LoopWalletProvider({ children }: { children: ReactNode }) {
     ready,
     connected: !!provider,
     connecting,
+    restoring,
     party: provider?.party_id ?? "",
     email: provider?.email ?? null,
     provider,

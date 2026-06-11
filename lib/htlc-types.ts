@@ -24,8 +24,20 @@ export interface SwapOrder {
   revealedPreimage?: `0x${string}`;
   mainClaimTx?: string;
   createdAt: number;
-  // on-ledger HTLC (the DAR path)
+  // How the cBTC counter-leg is settled:
+  //   "managed" — participant-managed (email) user: on-ledger HtlcLock, backend
+  //               claims via CanActAs. Fully trustless (on-ledger keccak gate).
+  //   "loop"    — Loop-wallet user: their party is on Loop's node where our DAR
+  //               CANNOT run, so we use Loop's Option 1 — the solver delivers cBTC
+  //               via a STANDARD transfer that auto-accepts in the user's wallet.
+  //               All secret/claim logic stays on OUR node. Defaults to "managed"
+  //               when unset so existing orders keep the proven behavior.
+  counterMode?: "managed" | "loop";
+  // on-ledger HTLC (the DAR path — "managed" only)
   allocationCid?: string;
   htlcCid?: string;
   htlcBlob?: string;
+  // standard-transfer counter-leg (the "loop" path): the TransferInstruction offer cid.
+  counterTransferOfferCid?: string;
+  counterTransferUpdateId?: string;
 }

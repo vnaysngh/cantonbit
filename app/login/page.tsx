@@ -1,6 +1,7 @@
 "use client";
 
 import Image from "next/image";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
@@ -33,20 +34,25 @@ export default function LoginPage() {
 
   const supabase = createSupabaseBrowserClient();
   const loop = useLoopWallet();
+  const router = useRouter();
 
   // Loop login: the Loop wallet IS the user's identity (it carries their email +
   // Canton party). On connect, register the party (loop-wallet mode) → go to swap.
+  // Use client-side nav (router.replace) NOT a full reload, so the in-memory Loop
+  // provider survives — a full reload drops it and races the /swap gate into a loop.
+  const [navigated, setNavigated] = useState(false);
   useEffect(() => {
-    if (loop.connected && loop.party) {
+    if (loop.connected && loop.party && !navigated) {
+      setNavigated(true);
       void fetch("/api/parties/register-loop", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ partyId: loop.party }),
       })
         .catch(() => {})
-        .finally(() => { window.location.href = "/swap"; });
+        .finally(() => { router.replace("/swap"); });
     }
-  }, [loop.connected, loop.party]);
+  }, [loop.connected, loop.party, navigated, router]);
 
   useEffect(() => {
     if (stage.kind !== "otp") return;

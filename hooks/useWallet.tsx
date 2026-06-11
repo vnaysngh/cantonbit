@@ -132,7 +132,9 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     isConnected: loop.connected && !!partyId,
     partyId,
     email: loop.email ?? sessionEmail,
-    isLoading: !loop.ready || loop.connecting || registering,
+    // restoring: a stored Loop session is still being silently re-established on
+    // page load — callers (e.g. the /swap login gate) must wait, not redirect.
+    isLoading: !loop.ready || loop.connecting || loop.restoring || registering,
     connectLoop: loop.connect,
     logoutLoop,
     loopReady: loop.ready,

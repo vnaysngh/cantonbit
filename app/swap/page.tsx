@@ -425,6 +425,8 @@ export default function SwapPage() {
           solverCantonParty: SOLVER_CANTON,
           cbtcAmount,
           solverTimelock,
+          // managed (email) → on-ledger HtlcLock; loop → standard transfer + accept.
+          counterMode: isParticipantManaged ? "managed" : "loop",
         });
         await htlcApi.accept(id); // (the independent solver also accepts; idempotent)
       } catch (e) {
@@ -464,6 +466,13 @@ export default function SwapPage() {
         for (let i = 0; i < 60; i++) {
           await sleep(3000);
           const { order } = await htlcApi.getOrder(id);
+          // LOOP orders skip the Canton counter-lock entirely (custody ordering: the
+          // cBTC is delivered at reveal time) — claimable as soon as the WBTC lock
+          // is recorded. Managed orders wait for the on-ledger HtlcLock as before.
+          if (order?.counterMode === "loop" && order?.status === "main_locked") {
+            counterLocked = true;
+            break;
+          }
           if (order?.status === "counter_locked" || order?.status === "counter_claimed" || order?.status === "main_claimed") {
             counterLocked = true;
             break;
@@ -493,7 +502,14 @@ export default function SwapPage() {
       try {
         const preimage = secretToPreimage(secret);
 
-        if (isParticipantManaged) {
+        // Branch on the ORDER's counterMode (set authoritatively server-side from
+        // the receiver party's namespace) — NOT the UI's isParticipantManaged, which
+        // can be a stale closure from before the session probe resolved.
+        const { order: claimOrder } = await htlcApi.getOrder(swapId);
+        const mode = (claimOrder as { counterMode?: string } | undefined)?.counterMode
+          ?? (isParticipantManaged ? "managed" : "loop");
+
+        if (mode === "managed") {
           // PARTICIPANT-MANAGED: the backend signs HtlcLock.Claim AS the hosted
           // receiver (CanActAs). One call, no wallet popup. The daemon then claims
           // the WBTC from the revealed preimage.
@@ -502,11 +518,24 @@ export default function SwapPage() {
           return;
         }
 
-        // LOOP path: the user's Loop wallet signs HtlcLock.Claim itself (controller=
-        // receiver). The backend prepares the command + disclosed contracts.
+        // LOOP path (Loop's Option 1, custody ordering like Cancore's venue flow):
+        // 1. REVEAL FIRST — send the secret to our node. The backend verifies the
+        //    preimage AND the real on-chain WBTC lock, then delivers the cBTC via a
+        //    standard transfer. (Secret-before-delivery = the solver can always claim
+        //    the WBTC; delivery-before-secret would let a user rob the solver.)
+        // 2. The user signs a STANDARD TransferInstruction_Accept in their wallet —
+        //    a built-in Splice choice on Loop's node (NO custom DAR).
         const provider = wallet.provider;
-        if (!provider) throw new Error("Connect your Loop wallet to claim your cBTC.");
-        const { command, disclosedContracts, synchronizerId } = await htlcApi.prepareClaim(swapId, preimage);
+        if (!provider) throw new Error("Connect your Loop wallet to accept your cBTC.");
+        const reveal = await htlcApi.claimCounter(swapId, preimage); // reveal → verify → deliver
+        if (reveal.delivered) {
+          // Preapproval auto-accepted the transfer — the cBTC is ALREADY in the
+          // user's Loop wallet. Nothing to sign; record and finish.
+          await htlcApi.recordClaim(swapId, preimage, reveal.updateId).catch(() => {});
+          setStage({ kind: "htlc-done", swapId, lockTx });
+          return;
+        }
+        const { command, disclosedContracts, synchronizerId } = await htlcApi.prepareAccept(swapId);
         const userParty = (provider as { party_id?: string }).party_id ?? wallet.partyId ?? "";
         const result = (await provider.submitAndWaitForTransaction(
           {
@@ -520,6 +549,8 @@ export default function SwapPage() {
           undefined
         )) as { updateId?: string; transactionTree?: { updateId?: string } };
         const updateId = result?.updateId ?? result?.transactionTree?.updateId ?? "submitted";
+        // Reveal the preimage to our node so the solver claims the WBTC (the user's
+        // standard accept above is their only Canton action).
         await htlcApi.recordClaim(swapId, preimage, updateId);
         setStage({ kind: "htlc-done", swapId, lockTx });
       } catch (e) {

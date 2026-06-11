@@ -17,8 +17,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   try {
     const { preimage } = await req.json();
     if (!preimage) return NextResponse.json({ error: "missing preimage" }, { status: 400 });
-    const { order, updateId } = await htlcService().claimCounter(id, preimage);
-    return NextResponse.json({ order, updateId });
+    const { order, updateId, delivered } = await htlcService().claimCounter(id, preimage);
+    return NextResponse.json({ order, updateId, delivered });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     const status = msg.includes("invalid preimage") ? 400 : 500;

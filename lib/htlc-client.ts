@@ -19,6 +19,8 @@ export interface HtlcOrderInput {
   solverCantonParty: string;
   cbtcAmount: string;       // BTC decimal string
   solverTimelock: number;
+  // "managed" (email, on-ledger HtlcLock) | "loop" (standard transfer + accept).
+  counterMode?: "managed" | "loop";
 }
 
 const bytesToHex = (b: Uint8Array) => "0x" + Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("");
@@ -57,10 +59,17 @@ export const htlcApi = {
   accept: (id: string) => jpost(`/api/htlc/${id}/accept`),
   recordMainLock: (id: string, mainLockTx: string) => jpost(`/api/htlc/${id}/main-lock`, { mainLockTx }),
   lockCounter: (id: string) => jpost(`/api/htlc/${id}/lock-counter`),
-  claimCounter: (id: string, preimage: string) => jpost(`/api/htlc/${id}/claim-counter`, { preimage }),
+  // Loop reveal+deliver. delivered=true → the cBTC auto-accepted (preapproval) and
+  // there is NOTHING to accept — skip the wallet popup entirely.
+  claimCounter: (id: string, preimage: string): Promise<{ order: unknown; updateId: string; delivered: boolean }> =>
+    jpost(`/api/htlc/${id}/claim-counter`, { preimage }),
   // On-ledger DAR claim (user signs via Loop): prepare the command, then record the result.
   prepareClaim: (id: string, preimage: string): Promise<{ command: unknown; disclosedContracts: unknown[]; synchronizerId: string }> =>
     jpost(`/api/htlc/${id}/claim-prepare`, { preimage }),
+  // LOOP standard accept (user signs a STANDARD TransferInstruction_Accept in their
+  // wallet — no custom DAR). Then record the revealed preimage so the solver claims WBTC.
+  prepareAccept: (id: string): Promise<{ command: unknown; disclosedContracts: unknown[]; synchronizerId: string }> =>
+    jpost(`/api/htlc/${id}/prepare-accept`),
   recordClaim: (id: string, preimage: string, updateId: string) =>
     jpost(`/api/htlc/${id}/claim-record`, { preimage, updateId }),
   // Participant-managed claim: the backend signs the cBTC claim via CanActAs (no Loop popup).

@@ -20,7 +20,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     }
     const { updateId } = await claimAsReceiver({
       receiverParty: order.userCantonParty,
+      solverParty: order.solverCantonParty,
       htlcCid: order.htlcCid,
+      htlcBlob: order.htlcBlob,
       allocationCid: order.allocationCid,
       preimageHex: preimage,
     });

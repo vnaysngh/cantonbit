@@ -7,6 +7,7 @@
  */
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
+import { NETWORK } from "@/lib/constants";
 
 export async function POST(req: Request) {
   try {
@@ -19,6 +20,13 @@ export async function POST(req: Request) {
     for (const k of required) {
       if (body[k] === undefined) return NextResponse.json({ error: `missing ${k}` }, { status: 400 });
     }
+    // AUTHORITATIVE counterMode — derived from WHERE the receiver party lives, not
+    // from the client (a UI race once sent "loop" for a warpx-hosted party). A party
+    // in OUR warpx namespace → managed (on-ledger HtlcLock, backend CanActAs claim);
+    // anything else (e.g. a Loop party) → loop (standard transfer + auto-accept).
+    const warpxNs = NETWORK.warpxPartyId.split("::")[1] ?? "";
+    const receiverNs = String(body.userCantonParty).split("::")[1] ?? "";
+    body.counterMode = warpxNs && receiverNs === warpxNs ? "managed" : "loop";
     const order = await htlcService().createOrder(body);
     return NextResponse.json({ order });
   } catch (e) {

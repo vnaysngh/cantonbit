@@ -29,9 +29,12 @@ function rowToOrder(r: Record<string, unknown>): SwapOrder {
     counterClaimUpdateId: (r.counter_claim_update_id as string) ?? undefined,
     revealedPreimage: (r.revealed_preimage as `0x${string}`) ?? undefined,
     mainClaimTx: (r.main_claim_tx as string) ?? undefined,
+    counterMode: (r.counter_mode as "managed" | "loop") ?? undefined,
     allocationCid: (r.allocation_cid as string) ?? undefined,
     htlcCid: (r.htlc_cid as string) ?? undefined,
     htlcBlob: (r.htlc_blob as string) ?? undefined,
+    counterTransferOfferCid: (r.counter_transfer_offer_cid as string) ?? undefined,
+    counterTransferUpdateId: (r.counter_transfer_update_id as string) ?? undefined,
     createdAt: r.created_at ? Math.floor(new Date(r.created_at as string).getTime() / 1000) : 0,
   };
 }
@@ -54,9 +57,12 @@ function orderToRow(o: SwapOrder): Record<string, unknown> {
     counter_claim_update_id: o.counterClaimUpdateId ?? null,
     revealed_preimage: o.revealedPreimage ?? null,
     main_claim_tx: o.mainClaimTx ?? null,
+    counter_mode: o.counterMode ?? null,
     allocation_cid: o.allocationCid ?? null,
     htlc_cid: o.htlcCid ?? null,
     htlc_blob: o.htlcBlob ?? null,
+    counter_transfer_offer_cid: o.counterTransferOfferCid ?? null,
+    counter_transfer_update_id: o.counterTransferUpdateId ?? null,
     updated_at: new Date().toISOString(),
   };
 }

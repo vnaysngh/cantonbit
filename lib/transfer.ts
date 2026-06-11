@@ -19,6 +19,7 @@ import "server-only";
 import { getLedgerJwt } from "./auth";
 import { NETWORK } from "./constants";
 import { formatSatoshis } from "./format";
+import { extractCreatedOfferCid } from "./mint-processor-logic";
 import type { Holding } from "./types";
 
 const TAG = "[transfer]";
@@ -59,6 +60,9 @@ interface TransferFactoryResponse {
 export interface CreateTransferResult {
   updateId: string;
   offerContractId: string;
+  /** Registry transferKind: "offer" needs a receiver accept; "direct"/"self" means
+   *  the transfer COMPLETED in one step (receiver preapproval auto-accepted it). */
+  transferKind: string;
 }
 
 /**
@@ -226,20 +230,40 @@ export async function createTransfer(params: {
   };
   const updateId = submitJson.transactionTree?.updateId ?? "";
 
-  // The transfer is SUBMITTED (updateId set). We try to find the created
-  // TransferOffer from the receiver's ACS — but that read 403s when the receiver
-  // is on ANOTHER participant (cross-participant), which is the normal case for an
-  // external Loop user. The transfer still succeeded; the offer lookup is
-  // best-effort, so a 403 / not-found must NOT fail the transfer.
-  let offerContractId = "";
-  try {
-    offerContractId = (await findOfferForInputs(receiverParty, inputHoldingCids)) ?? "";
-  } catch (e) {
-    console.log(`${TAG} offer lookup skipped (cross-participant / ${e instanceof Error ? e.message.slice(0, 60) : e})`);
+  // The created TransferInstruction is in OUR OWN tx tree (the sender always sees
+  // what it created) — read it from there, NO cross-participant ACS read needed.
+  // This is the cid the Loop receiver accepts. Reuse the tested extractCreatedOfferCid
+  // (handles both the CreatedTreeEvent and flat CreatedEvent shapes). Fall back to the
+  // receiver-ACS lookup only if the tree didn't surface it (best-effort; a 403 must
+  // NOT fail the transfer).
+  let offerContractId = extractCreatedOfferCid(submitJson.transactionTree?.eventsById) ?? "";
+  if (!offerContractId) {
+    try {
+      offerContractId = (await findOfferForInputs(receiverParty, inputHoldingCids)) ?? "";
+    } catch (e) {
+      console.log(`${TAG} offer lookup skipped (cross-participant / ${e instanceof Error ? e.message.slice(0, 60) : e})`);
+    }
   }
 
-  console.log(`${TAG} ✅ createTransfer ok updateId=${updateId.slice(0, 20)}... offerCid=${offerContractId.slice(0, 20) || "(cross-participant, not read)"}`);
-  return { updateId, offerContractId };
+  console.log(`${TAG} ✅ createTransfer ok updateId=${updateId.slice(0, 20)}... kind=${factory.transferKind} offerCid=${offerContractId.slice(0, 20) || "(none — direct/auto-accepted)"}`);
+  return { updateId, offerContractId, transferKind: factory.transferKind ?? "" };
+}
+
+/**
+ * RECOVERY: find a pending TransferOffer/TransferInstruction from the SENDER's own
+ * ACS (the sender is a stakeholder, so this works even when the receiver is on
+ * another participant). Used when the offer cid wasn't captured at create time.
+ * Returns the newest matching offer to `receiverParty`, or null.
+ */
+export async function findOfferFromSender(
+  senderParty: string,
+  receiverParty: string,
+): Promise<string | null> {
+  const offers = await listPendingOffersAs(senderParty);
+  const match = offers.filter((o) => o.receiver === receiverParty && o.sender === senderParty);
+  // Newest first by requestedAt — if several, the latest is ours.
+  match.sort((a, b) => (a.requestedAt < b.requestedAt ? 1 : -1));
+  return match[0]?.contractId ?? null;
 }
 
 /**
@@ -273,6 +297,15 @@ export interface PendingOffer {
  * given party is the receiver.
  */
 export async function listPendingOffers(partyId: string): Promise<PendingOffer[]> {
+  const all = await listPendingOffersAs(partyId);
+  return all.filter((o) => o.receiver === partyId);
+}
+
+/**
+ * List ALL active TransferInstruction/TransferOffer contracts visible to `partyId`
+ * (no receiver filter — a SENDER sees the offers it created, even cross-participant).
+ */
+async function listPendingOffersAs(partyId: string): Promise<PendingOffer[]> {
   const jwt = await getLedgerJwt();
   const endRes = await fetch(`${NETWORK.ledgerHost}/v2/state/ledger-end`, {
     headers: { Authorization: `Bearer ${jwt}` },
@@ -341,7 +374,7 @@ export async function listPendingOffers(partyId: string): Promise<PendingOffer[]
       continue;
     }
     const t = ev.createArgument?.transfer;
-    if (!t?.receiver || t.receiver !== partyId) continue;
+    if (!t?.receiver) continue;
     out.push({
       contractId: ev.contractId,
       sender: t.sender ?? "",
@@ -353,6 +386,52 @@ export async function listPendingOffers(partyId: string): Promise<PendingOffer[]
     });
   }
   return out;
+}
+
+/**
+ * Phase 2 (LOOP / cross-participant receiver) — PREPARE the standard
+ * TransferInstruction_Accept command for the USER to sign in their own wallet.
+ *
+ * For a Loop receiver we CANNOT backend-submit (we lack authority over their
+ * party), so the user signs the accept themselves. This is a STANDARD Splice
+ * choice (TransferInstruction_Accept) that runs on Loop's node — no custom DAR.
+ * Returns the command + disclosed contracts + synchronizerId for the browser to
+ * hand to provider.submitAndWaitForTransaction(). The secret/claim logic stays on
+ * our node (the solver claims the WBTC); the user only signs this standard accept.
+ */
+export async function prepareAcceptCommand(params: {
+  offerContractId: string;
+}): Promise<{ command: unknown; disclosedContracts: DisclosedContract[]; synchronizerId: string }> {
+  const { offerContractId } = params;
+  const ctxUrl = `${NETWORK.registryUrl}/api/token-standard/v0/registrars/${NETWORK.decentralizedPartyId}/registry/transfer-instruction/v1/${offerContractId}/choice-contexts/accept`;
+  const ctxRes = await fetch(ctxUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ meta: {} }),
+    cache: "no-store",
+  });
+  if (!ctxRes.ok) {
+    const text = await ctxRes.text().catch(() => "<no body>");
+    throw new Error(`accept choice-contexts failed (${ctxRes.status}): ${text}`);
+  }
+  const ctx = (await ctxRes.json()) as {
+    choiceContextData: unknown;
+    disclosedContracts: DisclosedContract[];
+  };
+  const disclosedContracts = (ctx.disclosedContracts ?? []).map((dc) => ({
+    ...dc,
+    synchronizerId: dc.synchronizerId ?? "",
+  }));
+  const synchronizerId = disclosedContracts.find((d) => d.synchronizerId)?.synchronizerId ?? "";
+  const command = {
+    ExerciseCommand: {
+      templateId: TRANSFER_INSTRUCTION_INTERFACE,
+      contractId: offerContractId,
+      choice: "TransferInstruction_Accept",
+      choiceArgument: { extraArgs: { context: ctx.choiceContextData, meta: { values: {} } } },
+    },
+  };
+  return { command, disclosedContracts, synchronizerId };
 }
 
 /**
