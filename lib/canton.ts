@@ -256,6 +256,27 @@ export async function getHoldings(partyId: string): Promise<Holding[]> {
       console.log(`${TAG} getHoldings skipping contractId=${ev.contractId} owner=${String(payload.owner).slice(0,30)}... (not our party)`);
       continue;
     }
+    // Filter to only the cBTC instrument. The party also holds CC/Amulet
+    // (admin=DSO::…, id=Amulet) which implements the same Holding interface — but
+    // it is NOT cBTC, and feeding it to the cBTC TransferFactory makes the
+    // registry reject the inputs ("Given holdings are invalid").
+    const inst = (payload as { instrumentId?: { admin?: string; id?: string } }).instrumentId;
+    if (!inst || inst.admin !== NETWORK.instrumentId.admin || inst.id !== NETWORK.instrumentId.id) {
+      console.log(`${TAG} getHoldings skipping contractId=${ev.contractId} instrument=${inst?.admin?.slice(0,12)}…/${inst?.id} (not cBTC)`);
+      continue;
+    }
+    // Skip LOCKED holdings — the registry rejects a locked holding as an input
+    // ("Given holdings are invalid"). A lock with no/future expiry = locked; a
+    // past expiresAt = spendable again. (Mirrors the solver's isActivelyLocked.)
+    const lock = payload.lock as { expiresAt?: string | null; expiresAfter?: string | null } | null | undefined;
+    if (lock != null) {
+      const nowIso = new Date().toISOString();
+      const locked = lock.expiresAt ? lock.expiresAt > nowIso : true; // expiresAfter/indefinite → locked
+      if (locked) {
+        console.log(`${TAG} getHoldings skipping contractId=${ev.contractId} (locked)`);
+        continue;
+      }
+    }
     const p = payload as unknown as Record<string, unknown>;
     console.log(`${TAG} getHoldings including contractId=${ev.contractId} owner=${String(payload.owner).slice(0,30)}... amount=${JSON.stringify(p.amount ?? p.quantity ?? "?")}`);
     out.push({

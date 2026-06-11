@@ -68,11 +68,14 @@ export interface CreateTransferResult {
  */
 function selectHoldings(holdings: Holding[], amountBtc: string): Holding[] {
   const target = BigInt(Math.round(parseFloat(amountBtc) * 1e8));
+  // Sort SMALLEST-first: use small holdings to cover the target, avoiding the
+  // huge registrar/aggregate holding (which the registry can reject as an input)
+  // and keeping good UTXO hygiene. Falls through to larger ones only if needed.
   const sorted = [...holdings].sort((a, b) => {
     const aSats = BigInt(Math.round(parseFloat(a.payload.amount ?? "0") * 1e8));
     const bSats = BigInt(Math.round(parseFloat(b.payload.amount ?? "0") * 1e8));
-    if (bSats > aSats) return 1;
-    if (bSats < aSats) return -1;
+    if (aSats > bSats) return 1;
+    if (aSats < bSats) return -1;
     return 0;
   });
   const picked: Holding[] = [];
@@ -223,17 +226,19 @@ export async function createTransfer(params: {
   };
   const updateId = submitJson.transactionTree?.updateId ?? "";
 
-  // The TransferInstruction we just created is the `output.value.transferInstructionCid`
-  // on the ExerciseResult — but extracting it from the tree is finicky, so we
-  // look it up from the receiver's ACS instead.
-  const offerContractId = await findOfferForInputs(receiverParty, inputHoldingCids);
-  if (!offerContractId) {
-    throw new Error(
-      `Transfer submitted (updateId=${updateId}) but no TransferOffer found for receiver=${receiverParty.slice(0, 30)}...`,
-    );
+  // The transfer is SUBMITTED (updateId set). We try to find the created
+  // TransferOffer from the receiver's ACS — but that read 403s when the receiver
+  // is on ANOTHER participant (cross-participant), which is the normal case for an
+  // external Loop user. The transfer still succeeded; the offer lookup is
+  // best-effort, so a 403 / not-found must NOT fail the transfer.
+  let offerContractId = "";
+  try {
+    offerContractId = (await findOfferForInputs(receiverParty, inputHoldingCids)) ?? "";
+  } catch (e) {
+    console.log(`${TAG} offer lookup skipped (cross-participant / ${e instanceof Error ? e.message.slice(0, 60) : e})`);
   }
 
-  console.log(`${TAG} ✅ createTransfer ok updateId=${updateId.slice(0, 20)}... offerCid=${offerContractId.slice(0, 20)}...`);
+  console.log(`${TAG} ✅ createTransfer ok updateId=${updateId.slice(0, 20)}... offerCid=${offerContractId.slice(0, 20) || "(cross-participant, not read)"}`);
   return { updateId, offerContractId };
 }
 

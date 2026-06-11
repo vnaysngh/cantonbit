@@ -148,7 +148,13 @@ function rawErrorMessage(e: unknown): string {
   // viem/provider errors expose a concise `shortMessage`; prefer it (CoW does).
   const short = (e as { shortMessage?: string }).shortMessage;
   if (typeof short === "string" && short) return short;
-  return e instanceof Error ? e.message : String(e);
+  if (e instanceof Error) return e.message;
+  // Raw provider/RPC errors are plain objects — dig out a message rather than
+  // String(e) (which renders "[object Object]").
+  const o = e as { message?: string; reason?: string; data?: { message?: string }; error?: { message?: string } };
+  const nested = o?.message || o?.reason || o?.data?.message || o?.error?.message;
+  if (typeof nested === "string" && nested) return nested;
+  try { return JSON.stringify(e); } catch { return String(e); }
 }
 
 /** True if the error is a user-rejected wallet prompt (CoW: isRejectRequestProviderError). */
@@ -174,8 +180,8 @@ export function getSwapErrorMessage(e: unknown): string {
   return rawErrorMessage(e) || "Something went wrong. Please try again.";
 }
 
-async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${SWAP_API_URL}${path}`, {
+async function req<T>(path: string, init?: RequestInit, baseUrl?: string): Promise<T> {
+  const res = await fetch(`${baseUrl ?? SWAP_API_URL}${path}`, {
     ...init,
     headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
   });
@@ -195,10 +201,11 @@ export function getQuote(input: {
   wbtcAmount: string; // base units (8dp)
   cantonParty: string;
 }): Promise<QuoteResponse> {
+  // HTLC-native quote — same-origin route, no dependency on the old solver service.
   return req<QuoteResponse>("/quote", {
     method: "POST",
     body: JSON.stringify(input),
-  });
+  }, "/api/htlc");
 }
 
 export function submitOrder(input: {

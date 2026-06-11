@@ -42,6 +42,18 @@ import {
   cleanPastedAmount,
   truncateToDecimals
 } from "@/lib/swap-evm";
+import {
+  generateSecret,
+  secretToPreimage,
+  htlcApi,
+  evmApproveAndLock,
+} from "@/lib/htlc-client";
+
+// HTLC EVM leg config (Base Sepolia). The new trustless escrow (replaces the old
+// oracle InputSettlerEscrow for swaps).
+const HTLC_ESCROW = process.env.NEXT_PUBLIC_HTLC_ESCROW ?? "0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1";
+const SOLVER_EVM = process.env.NEXT_PUBLIC_SOLVER_EVM ?? "0x0B95ec21579aee6Ef7b712976bD86689D68b5A08";
+const SOLVER_CANTON = process.env.NEXT_PUBLIC_SOLVER_CANTON ?? "";
 
 type Stage =
   | { kind: "idle" }
@@ -52,6 +64,14 @@ type Stage =
   | { kind: "signing"; quote: QuoteResponse }
   | { kind: "submitting"; quote: QuoteResponse }
   | { kind: "tracking"; orderId: string; order: OrderView | null }
+  // HTLC: waiting for the independent solver to lock the cBTC counter.
+  | { kind: "htlc-locking"; quote: QuoteResponse; swapId: string; secret: string; lockTx: string }
+  // HTLC: both legs locked — the USER can now claim (press to reveal).
+  | { kind: "htlc-claimable"; swapId: string; secret: string; lockTx: string; claimError?: string }
+  // HTLC: the user's claim (reveal) is in flight.
+  | { kind: "htlc-claiming"; swapId: string; secret: string; lockTx: string }
+  // HTLC swap completed. swapId = hashLock.
+  | { kind: "htlc-done"; swapId: string; lockTx: string }
   | { kind: "error"; message: string };
 
 // NOTE: pending-order persistence + multi-order tracking now lives in
@@ -334,92 +354,123 @@ export default function SwapPage() {
         retry("Wallet disconnected — reconnect and try again.");
         return;
       }
-      const needed = BigInt(quote.order.inputs[0][1]);
-
-      // 2. ensure Permit2 allowance
-      try {
-        const allowance = decodeUint(
-          await evm.call(
-            quote.wbtc,
-            encodeAllowance(evm.account, PERMIT2_ADDRESS)
-          )
-        );
-        if (allowance < needed) {
-          setStage({ kind: "approving", quote });
-          const txHash = await evm.sendTransaction({
-            to: quote.wbtc,
-            data: encodeApprove(PERMIT2_ADDRESS)
-          });
-          // Best-effort wait: poll the allowance until it reflects (or timeout).
-          for (let i = 0; i < 30; i++) {
-            await sleep(2000);
-            const a = decodeUint(
-              await evm.call(
-                quote.wbtc,
-                encodeAllowance(evm.account, PERMIT2_ADDRESS)
-              )
-            );
-            if (a >= needed) break;
-            if (i === 29)
-              throw new Error(`approve tx ${txHash} not yet reflected`);
-          }
-        }
-      } catch (e) {
-        retry(
-          isUserRejection(e)
-            ? "Approval cancelled. Approve WBTC to continue."
-            : getSwapErrorMessage(e)
-        );
+      if (!SOLVER_CANTON) {
+        retry("Solver Canton party not configured (NEXT_PUBLIC_SOLVER_CANTON).");
         return;
       }
+      const wbtcUnits = BigInt(quote.order.inputs[0][1]);
+      const cbtcUnits = BigInt(quote.order.outputs[0].amount);
+      const cbtcAmount = (Number(cbtcUnits) / 1e8).toFixed(8); // cBTC decimal string
 
-      // 3. sign the Permit2 witness.
-      // eth_signTypedData_v4 requires EIP712Domain to be declared in `types`
-      // (viem's signer auto-injects it, but raw wallet RPC does not). Declare it
-      // to match the domain fields the API sent (name, chainId, verifyingContract),
-      // or the wallet signs a different digest → Permit2 reverts InvalidSigner.
-      let signature: string;
-      try {
-        setStage({ kind: "signing", quote });
-        const typesWithDomain = {
-          EIP712Domain: [
-            { name: "name", type: "string" },
-            { name: "chainId", type: "uint256" },
-            { name: "verifyingContract", type: "address" }
-          ],
-          ...quote.permit2.types
-        };
-        signature = await evm.signTypedData({
-          domain: quote.permit2.domain,
-          types: typesWithDomain,
-          primaryType: quote.permit2.primaryType,
-          message: quote.permit2.message
-        });
-      } catch (e) {
-        retry(
-          isUserRejection(e)
-            ? "Signature cancelled. Sign to lock your WBTC and start the swap."
-            : getSwapErrorMessage(e)
-        );
-        return;
-      }
-
-      // 4. submit to the solver (it submits openFor on Base)
+      // ===== HTLC FLOW (trustless EVM leg + Cancore-style reveal on cBTC) =====
+      // 1. generate the secret (stays in the browser until the reveal) + create order
+      const { secret, hashLock } = generateSecret();
+      const id = hashLock; // swapId = hashLock
+      const now = Math.floor(Date.now() / 1000);
+      const userTimelock = now + 4 * 3600; // EVM (longer)
+      const solverTimelock = now + 3 * 3600; // Canton (shorter)
       try {
         setStage({ kind: "submitting", quote });
-        const { orderId } = await submitOrder({
-          order: quote.order,
-          signature,
-          cantonParty: quote.cantonParty
+        await htlcApi.createOrder({
+          id,
+          direction: "evm-to-canton",
+          hashLock,
+          userEvmAddress: evm.account,
+          solverEvmAddress: SOLVER_EVM,
+          wbtcAmount: wbtcUnits.toString(),
+          userTimelock,
+          userCantonParty: quote.cantonParty,
+          solverCantonParty: SOLVER_CANTON,
+          cbtcAmount,
+          solverTimelock,
         });
-        startTracking(orderId);
+        await htlcApi.accept(id); // (the independent solver also accepts; idempotent)
       } catch (e) {
-        // Submit failure is rarely user-recoverable (already-signed), so surface it
-        // but keep the quote so they can retry the submit.
-        retry(`${getSwapErrorMessage(e)} Please try again.`);
+        retry(`Could not create the swap order: ${getSwapErrorMessage(e)}`);
+        return;
+      }
+
+      // 2/3. approve WBTC to the HTLC escrow + lock it (MetaMask) — THE USER's action.
+      let lockTx: string;
+      try {
+        setStage({ kind: "approving", quote });
+        const wbtcToken = SWAP_CHAIN.wbtc || quote.wbtc;
+        lockTx = await evmApproveAndLock(evm.sendTransaction, evm.call, evm.account, {
+          wbtc: wbtcToken,
+          escrow: HTLC_ESCROW,
+          amount: wbtcUnits,
+          hashLock,
+          unlockTime: userTimelock,
+          receiver: SOLVER_EVM,
+        });
+        await htlcApi.recordMainLock(id, lockTx);
+      } catch (e) {
+        retry(
+          isUserRejection(e)
+            ? "Lock cancelled. Approve + lock your WBTC to start the swap."
+            : getSwapErrorMessage(e)
+        );
+        return;
+      }
+
+      // 4. WAIT for the INDEPENDENT SOLVER to lock the cBTC counter (htlc_active).
+      // The solver daemon verifies our on-chain WBTC lock first, then locks. We do
+      // NOT lock or claim here — the user claims as a separate, deliberate step.
+      try {
+        setStage({ kind: "htlc-locking", quote, swapId: id, secret, lockTx });
+        let counterLocked = false;
+        for (let i = 0; i < 60; i++) {
+          await sleep(3000);
+          const { order } = await htlcApi.getOrder(id);
+          if (order?.status === "counter_locked" || order?.status === "counter_claimed" || order?.status === "main_claimed") {
+            counterLocked = true;
+            break;
+          }
+        }
+        if (!counterLocked) {
+          retry("The solver hasn't locked the cBTC counter yet. Is the solver running? Try again or refund after the timelock.");
+          return;
+        }
+        // htlc_active — both legs locked. Now the USER claims.
+        setStage({ kind: "htlc-claimable", swapId: id, secret, lockTx });
+      } catch (e) {
+        retry(`Waiting for the solver failed: ${getSwapErrorMessage(e)}`);
       }
     },
-    [evm, startTracking]
+    [evm]
+  );
+
+  // THE USER's CLAIM (the real reveal) — signed by the USER's Loop wallet.
+  // HtlcLock.Claim is controller=receiver, so it MUST be submitted by the user's
+  // own wallet (their participant supplies the receiver authority; Preapproval
+  // auto-accepts the cBTC delivery). The backend only PREPARES the command. Then
+  // the solver daemon reads the now-public preimage and claims the WBTC on EVM.
+  const handleClaim = useCallback(
+    async (swapId: string, secret: string, lockTx: string) => {
+      setStage({ kind: "htlc-claiming", swapId, secret, lockTx });
+      try {
+        const provider = wallet.provider;
+        if (!provider) throw new Error("Connect your Loop wallet to claim your cBTC.");
+        const preimage = secretToPreimage(secret);
+
+        // 1. backend builds the Claim command + disclosed contracts
+        const { command, disclosedContracts } = await htlcApi.prepareClaim(swapId, preimage);
+
+        // 2. THE USER's LOOP WALLET signs + submits it (the reveal happens on-ledger)
+        const result = (await provider.submitAndWaitForTransaction(
+          { commands: [command], disclosedContracts },
+          undefined
+        )) as { updateId?: string; transactionTree?: { updateId?: string } };
+        const updateId = result?.updateId ?? result?.transactionTree?.updateId ?? "submitted";
+
+        // 3. tell the backend the preimage is now public (for the solver's EVM claim)
+        await htlcApi.recordClaim(swapId, preimage, updateId);
+        setStage({ kind: "htlc-done", swapId, lockTx });
+      } catch (e) {
+        setStage({ kind: "htlc-claimable", swapId, secret, lockTx, claimError: getSwapErrorMessage(e) });
+      }
+    },
+    [wallet]
   );
 
   // On first load, if the pending-orders list restored any in-flight swap, focus
@@ -672,6 +723,59 @@ export default function SwapPage() {
               onReset={reset}
               onRefund={handleRefundOrder}
             />
+          </div>
+        )}
+
+        {stage.kind === "htlc-locking" && (
+          <div className="px-1 pb-1 pt-4 text-center">
+            <div className="mx-auto mb-3 h-10 w-10 animate-spin rounded-full border-2 border-foreground/20 border-t-foreground/70" />
+            <h3 className="text-lg font-semibold">WBTC locked — waiting for the solver</h3>
+            <p className="mt-1 text-sm text-foreground/60">
+              Your WBTC is locked on-chain. The solver is verifying it and locking the cBTC
+              counter. You’ll claim your cBTC next.
+            </p>
+            <p className="mt-2 break-all text-xs text-foreground/40">lock tx {stage.lockTx.slice(0, 18)}…</p>
+          </div>
+        )}
+
+        {(stage.kind === "htlc-claimable" || stage.kind === "htlc-claiming") && (
+          <div className="px-1 pb-1 pt-4 text-center">
+            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/15 text-2xl">🔓</div>
+            <h3 className="text-lg font-semibold">Both legs locked — claim your cBTC</h3>
+            <p className="mt-1 text-sm text-foreground/60">
+              Press Claim to reveal your secret and receive your cBTC. Revealing it lets the
+              solver claim the WBTC you locked — this is what makes the swap atomic.
+            </p>
+            {stage.kind === "htlc-claimable" && stage.claimError && (
+              <p className="mt-2 text-sm text-red-500">⚠️ {stage.claimError}</p>
+            )}
+            <button
+              onClick={() => handleClaim(stage.swapId, stage.secret, stage.lockTx)}
+              disabled={stage.kind === "htlc-claiming"}
+              className={cn(
+                "mt-4 w-full rounded-2xl px-4 py-3 font-semibold text-white",
+                stage.kind === "htlc-claiming" ? "bg-foreground/40" : "bg-[#b04a2a] hover:opacity-90"
+              )}
+            >
+              {stage.kind === "htlc-claiming" ? "Claiming…" : "Claim cBTC"}
+            </button>
+          </div>
+        )}
+
+        {stage.kind === "htlc-done" && (
+          <div className="px-1 pb-1 pt-4 text-center">
+            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-green-500/15 text-2xl">✅</div>
+            <h3 className="text-lg font-semibold">Swap complete</h3>
+            <p className="mt-1 text-sm text-foreground/60">
+              You claimed your cBTC (revealing the secret). The solver claims the WBTC you
+              locked with that same secret — both legs settle.
+            </p>
+            <p className="mt-2 break-all text-xs text-foreground/40">
+              swap {stage.swapId.slice(0, 14)}… · lock tx {stage.lockTx.slice(0, 14)}…
+            </p>
+            <button onClick={reset} className="mt-4 rounded-xl border border-foreground/15 px-4 py-2 text-sm hover:bg-foreground/5">
+              New swap
+            </button>
           </div>
         )}
       </div>

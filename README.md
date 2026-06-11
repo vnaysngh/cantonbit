@@ -1,263 +1,166 @@
-# Oranj
+# OranjSwap — Trustless Atomic Cross-Chain Swaps (EVM ↔ Canton)
 
-A web app for converting between native Bitcoin (BTC) and cBTC — a token that represents Bitcoin 1:1 on the Canton Network blockchain.
-
-You deposit real BTC, you get cBTC. You return cBTC, you get real BTC back.
-
----
-
-## What problem does this solve?
-
-Bitcoin and Canton Network don't natively talk to each other. Canton is used by institutional finance — think regulated asset transfers, tokenized securities. Bitcoin is, well, Bitcoin. If you want to use BTC value inside a Canton-based system, you need a bridge.
-
-**Oranj is the front door to that bridge.** It lets you:
-
-- **Mint** — lock real BTC in the bridge, receive cBTC on Canton
-- **Redeem** — burn cBTC on Canton, receive real BTC back
-
-That's the entire product. It's not a Canton wallet, it's not a Bitcoin wallet, it doesn't send cBTC between users. Mint and redeem only.
+> **Single source of truth for this repo.** What we're building, how it works, and
+> what's proven. Task list lives in [`TASKS.md`](./TASKS.md). Project/runtime
+> instructions live in [`CLAUDE.md`](./CLAUDE.md).
 
 ---
 
-## Who's involved in making this work
+## 1. What we're building
 
-Oranj doesn't run the bridge. It's a UI that coordinates between several independent parties:
+A **Cancore-equivalent** trustless atomic swap between **EVM tokens** (WBTC/USDC on
+Base/Arbitrum) and **Canton tokens** (cBTC, CC). Priority direction: **EVM → Canton**.
 
-| Party | What they do |
+The swap is bound by a single secret (HTLC). Reveal the secret → both legs settle.
+Timeout without reveal → both sides refund. Neither party can take the other's funds
+without giving up their own.
+
+Modeled on **Cancore** (cancore.io — a live production EVM↔Canton HTLC swap), whose
+design we reverse-engineered from their verified contract + app bundle + docs.
+
+---
+
+## 2. How it works — the HTLC flow (EVM → Canton)
+
+```
+1. Create Order   (user)    publish order, commit to hashLock H = keccak256(secret)
+2. Accept Order   (solver)  solver takes the order
+3. HTLC Proposal  (user)    user APPROVES + LOCKS WBTC on the EVM HTLC under H   ← MetaMask
+4. Counter HTLC   (solver)  solver LOCKS cBTC on Canton (Allocation + HtlcLock under H)
+5/6. Claim Counter(user)    user CLAIMS the cBTC → reveals the secret             ← see §4
+7. Claim Main     (solver)  solver reads the revealed secret, CLAIMS the WBTC on EVM
+8. Completed
+```
+
+**One secret `s`, one hash `H = keccak256(s)`** binds both legs. Staggered timelocks:
+EVM (user) timelock **longer** than Canton (solver) timelock, so the solver always has
+time to claim after seeing the reveal.
+
+### keccak256 parity (critical)
+- EVM: `keccak256(rawSecretBytes)`
+- Daml: `DA.Crypto.Text.keccak256(hexString)` — decodes the hex back to the same raw
+  bytes, then hashes → **identical H**.
+- Canonical test vector: secret `the-cross-chain-secret-32bytes!!`
+  (hex `7468652d…2121`) → **H = `0x94277b389401042e35f8709846050797955e2b321bee500555c2fbdc2f4e9903`**.
+- (Note: Cancore's *docs* say SHA-256, but their *deployed contract* uses keccak256.
+  We use keccak256 — proven parity on both legs.)
+
+---
+
+## 3. The two wallet modes (Cancore's model, confirmed from their docs §6)
+
+| Mode | Who | Canton party hosted on | Canton signing |
+|---|---|---|---|
+| **Participant-managed (DEFAULT)** | email/password users | **our node** (warpx) | the platform/backend signs for them — **no popup** |
+| **Loop / browser-extension** | self-swap ("Loop mode") | external Loop participant | user signs in the Loop wallet popup |
+
+**Key insight:** "Loop mode" in Cancore means a **self-swap** (sender = recipient), NOT
+"normal external users". The **mainline product is participant-managed** — the user's
+Canton party lives on our node, and the backend signs the on-ledger claim for them.
+**This is the fully-trustless on-ledger path we built and proved.**
+
+---
+
+## 4. The cBTC leg — fully on-ledger trustless (PROVEN)
+
+cBTC has **no native on-ledger hashlock** (proven: Allocation/TransferInstruction are
+not hash-aware). So we wrap a standard Splice **Allocation** in our **custom Daml HTLC
+template** (`canton-htlc/daml/CbtcHtlc.daml`, `HtlcLock`) that enforces the hash:
+
+```
+LOCK   solver allocates cBTC (AllocationFactory_Allocate, solver = sender = executor)
+       + creates HtlcLock wrapping it (records hashLock + timelock)
+CLAIM  receiver exercises HtlcLock.Claim(preimage)
+       → the Daml LEDGER checks keccak256(preimage) == hashLock   ← ON-LEDGER HASH GATE
+       → fires Allocation_ExecuteTransfer → cBTC delivered to the receiver
+       → the preimage is now public on-ledger (drives the EVM claim)
+REFUND after timelock, locker exercises HtlcLock.Refund → Allocation_Withdraw
+```
+
+### Why the claim works for hosted (participant-managed) users — the three keys
+1. **DAR `observer receiver`** (v0.1.4): the receiver is a LOCAL party on our node where
+   the DAR is vetted, so they can observe + exercise the choice. (A *cross-participant*
+   observer would fail with `NO_SYNCHRONIZER_FOR_SUBMISSION` — which is why Loop-wallet
+   users need a different path.)
+2. **`CanActAs` grant**: the backend's ledger user is granted `CanActAs` over the hosted
+   receiver party, so it can sign the claim for them (exactly Cancore's participant-managed).
+3. **Disclose the Allocation** to the receiver in the claim submission (the receiver
+   must see the Allocation that `HtlcLock.Claim` fetches).
+
+### ✅ PROVEN on the live WarpX DevNet node
+Full on-ledger claim succeeded: receiver exercised `HtlcLock.Claim` → ledger verified
+the keccak hash → `Allocation_ExecuteTransfer` fired → cBTC delivered (updateId
+`12203ce0…`). Server log: *"HtlcLock.Claim by receiver — on-ledger keccak check passed,
+cBTC released."*
+
+### Loop-wallet users (self-swap edge case)
+Their party is on an external participant that doesn't have our DAR. For them, Cancore
+uses a **standard `TransferInstruction_Accept`** (no custom template) with the hash
+checked **backend-side** (`encryptedPreimage` off-chain). Trust-minimized, not on-ledger.
+
+---
+
+## 5. The EVM leg — fully trustless on-chain HTLC
+
+`contracts/src/HTLCEscrow.sol` — aligned to Cancore's verified `HTLC.sol` + hardened:
+- `lock(hashValue, unlockTime, amount, token, receiver)` — locks ERC20 under the hashlock.
+- `claim(bytes preImage)` — receiver-only, before unlockTime; on-chain
+  `keccak256(preImage) == hashValue` check; reveals preImage in the `Claimed` event.
+- `retake(bytes32 hashValue)` — sender-only refund after unlockTime.
+- Hardened: SafeERC20, ReentrancyGuard, delete-before-transfer, custom errors, events.
+- **13/13 Foundry tests.** Deployed Base Sepolia: `0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1`.
+
+---
+
+## 6. Trust model (honest)
+
+| Leg | Trust |
 |---|---|
-| **You** | You have a Loop wallet (Canton wallet) and a Bitcoin wallet. You click the buttons. |
-| **Five North** | Runs the Canton validator node. Your party identity lives here. |
-| **Loop wallet** | Your personal Canton wallet. It signs every transaction you make. You need it installed. |
-| **BitSafe / DLC.link** | Runs the actual BTC-to-cBTC bridge. They watch Bitcoin, mint cBTC, and release BTC on redemption. |
-| **Canton Network** | The underlying blockchain that records all cBTC contracts and balances. |
+| **EVM** | ✅ **Fully trustless** — real on-chain HTLC, hash enforced by the contract |
+| **cBTC — participant-managed users** | ✅ **Fully trustless** — hash enforced **on the Daml ledger** (our DAR) |
+| **cBTC — Loop-wallet (self-swap) users** | ⚠️ Trust-minimized — standard accept + **backend** hash gate (same as Cancore's Loop users) |
 
-When you click "Mint", Oranj talks to most of these in sequence. If any of them is down or misconfigured, you'll see an error — and the error message will tell you which one.
-
----
-
-## Before you start
-
-You need all of these. Nothing works without them.
-
-### 1. Loop wallet
-Download from [cantonloop.com](https://cantonloop.com). Install it, create or import a Canton account. Connect it to Oranj using the button in the top-right corner of the app.
-
-### 2. A Canton party ID on Five North's validator
-Your Loop wallet gives you a party identity, but it has to be hosted on a validator. Five North runs the one Oranj uses. Contact them to get your party onboarded.
-
-### 3. Authentik OAuth credentials
-These go in `.env.local`. Oranj uses them to read Canton ledger state on the server side (not for your personal transactions — those go through Loop).
-
-Get these from Five North (the Client ID and Client Secret from their Authentik instance):
-
-```
-KEYCLOAK_TOKEN_URL=https://auth.validator.devnet.warpx.fivenorth.io/application/o/token/
-KEYCLOAK_CLIENT_ID=<from Five North>
-KEYCLOAK_CLIENT_SECRET=<from Five North>
-```
-
-### 4. cBTC DARs installed on the validator
-DARs are Canton smart contract packages. Without them, the Canton network doesn't know what a cBTC contract is. Five North installs these through their dashboard — you don't do this yourself. Ask them to confirm they're installed.
-
-### 5. Bitcoin (the real kind, or testnet BTC)
-- **DevNet**: regtest BTC (provided by the test environment)
-- **Testnet**: free from a Bitcoin testnet faucet
-- **Mainnet**: real BTC
-
-### 6. BitSafe Minter/Holder credential
-To create a deposit or withdraw account, your Canton party needs a credential issued by BitSafe authorizing it to use the bridge. Contact BitSafe at [docs.bitsafe.finance](https://docs.bitsafe.finance) to get this set up for your party.
+For users we host (the mainline), **both legs are fully trustless.** User funds are
+always protected by the EVM HTLC + timeout refunds even if the solver misbehaves.
 
 ---
 
-## How minting works (BTC → cBTC)
+## 7. Repo layout
 
-Clicking "Generate deposit address" triggers a sequence of steps behind the scenes.
-
-### Step 1 — Oranj asks the bridge for its factory contract
-The bridge publishes a shared contract called `CBTCDepositAccountRules`. Oranj fetches its contract ID from the DLC.link coordinator. This is invisible to you — it happens in the background before the Loop popup appears.
-
-### Step 2 — Oranj creates a deposit account for you on Canton
-A deposit account is a Canton contract that says: *"This party (you) wants to receive cBTC. When BTC arrives at the address linked to this account, mint cBTC for this party."*
-
-Your Loop wallet pops up and asks you to approve creating this contract. Once created, it's reused on future mints — you won't be asked again.
-
-### Step 3 — Oranj asks the bridge for your Bitcoin deposit address
-The bridge looks at your deposit account contract and assigns it a unique Bitcoin address. You'll see it as a QR code and copyable text. The address format depends on the network:
-- DevNet: `bcrt1p…` (regtest)
-- Testnet: `tb1p…` (testnet3)
-- Mainnet: `bc1p…` (mainnet bech32m)
-
-### Step 4 — You send BTC
-Open your Bitcoin wallet, paste the address, send at least **0.001 BTC**. That's the minimum the bridge accepts.
-
-### Step 5 — Wait (~60 minutes + a little more)
-Bitcoin transactions need 6 confirmations before the bridge trusts them. That's roughly 60 minutes. After the 6th confirmation, the bridge's attestor network verifies the transaction — this takes an additional 60–120 seconds.
-
-**Important detail about where the cBTC lands first.** BitSafe does not mint cBTC directly into your personal party. It mints into the validator's holding party ("warpx"), the party that owns the bridge relationship on this node. Oranj then runs a **mint processor** that detects the freshly-minted cBTC on warpx and transfers it to your party automatically. So the mint completes in two stages:
-
-1. **BitSafe → warpx** (the actual mint, after 6 BTC confirmations)
-2. **warpx → you** (Oranj's mint processor delivers it to your party)
-
-You don't do anything for stage 2 — the processor handles it. See [How the mint processor works](#how-the-mint-processor-works) below for the details.
-
-Oranj polls your balance every 30 seconds while you're on the mint page, and the mint processor runs both on-demand (while the page is open) and via a background cron. You can close the tab and come back — the mint still completes.
-
-### What can go wrong
-
-| What you see | What it means |
+| Path | What |
 |---|---|
-| "Coordinator POST failed (530)" or "Cloudflare 1016" | The DLC.link bridge is temporarily down. Not fixable on your end. |
-| Loop popup appears, then "transaction rejected" | Your party doesn't have a Minter credential from BitSafe, or the cBTC DARs aren't installed on the validator. |
-| Loop popup never appears | Loop wallet isn't connected, or browser pop-ups are blocked. |
-| BTC confirmed (6 blocks), but balance still 0 | Either BitSafe hasn't minted to warpx yet, or the mint processor hasn't delivered it from warpx to your party yet. Give the processor a moment (it polls / runs on a cron). See [How the mint processor works](#how-the-mint-processor-works). |
-| BTC sent, 6 confirmations shown on a block explorer, but no cBTC after 2 hours | The mint never reached warpx — a bridge issue. Contact BitSafe with your deposit account contract ID. |
+| `contracts/` | EVM HTLC (`HTLCEscrow.sol`) + Foundry tests + Cancore reference |
+| `canton-htlc/` | Daml HTLC DAR (`CbtcHtlc.daml`, `HtlcLock`) + tests |
+| `lib/htlc-onledger.ts` | on-ledger cBTC: allocate, createHtlcLock, claim, refund (the DAR path) |
+| `lib/htlc-service-singleton.ts` | swap order lifecycle service (open→…→completed) |
+| `lib/htlc-client.ts`, `lib/htlc-evm-encode.ts` | frontend client + EVM calldata encoders |
+| `app/api/htlc/*` | swap API routes (create/accept/lock/claim-prepare/claim-record/preimage) |
+| `app/swap/page.tsx` | the swap UI (MetaMask lock, claim, timeline) |
+| `swap-solver/src/htlc-*.ts(.mts)` | solver daemon, settler, e2e scripts, the on-node spike |
 
 ---
 
-## How the mint processor works
+## 8. Key on-chain / on-ledger references
 
-BitSafe mints cBTC into the validator's **warpx** holding party, not directly into your wallet. The **mint processor** is the piece of Oranj that moves that cBTC from warpx to the right user party. It's the most safety-critical part of the system — it moves real money — so it's worth understanding at a high level.
-
-### What it does
-
-1. **Looks at what cBTC is sitting on warpx right now.** Any cBTC holding owned by warpx is "unfinished work" — it has been minted but not yet delivered to a user.
-2. **Figures out which holdings are real mints.** Not everything on warpx is a fresh mint (some holdings are change/leftovers from other operations). A real mint is identified by its on-ledger signature: the transaction that created the holding also *archived a deposit account*. Only those get transferred.
-3. **Figures out which user each mint belongs to** by looking up the archived deposit account in Oranj's database.
-4. **Transfers the cBTC to that user's party** using a two-phase transfer (create an offer, then accept it on the user's behalf).
-
-### Why it's designed this way ("holding-based")
-
-An earlier version tracked progress with a moving bookmark ("process everything new since offset X"). That could **strand** a mint: if a transfer failed, the bookmark moved past it and the cBTC was never retried. The current design instead treats **"is the cBTC still sitting on warpx?"** as the source of truth. A holding stays visible until it's actually delivered — so nothing can be silently skipped, and re-running the processor is always safe.
-
-### Safety guarantees
-
-The processor is built so that, no matter how many times it runs or how it's interrupted, it never:
-
-- **Creates duplicate transfers.** The created offer is recorded in the database *before* it's accepted, so a retry accepts the existing offer instead of creating a new one. An atomic per-mint "claim" ensures only one worker processes a given mint.
-- **Runs two copies at once.** A lease-based lock means only one processor run executes at a time (the frontend poll and the cron can't collide).
-- **Transfers the wrong amount.** It always transfers the full minted holding — never a partial amount — so no leftover change is created.
-- **Strands a failed mint.** A failed transfer leaves the cBTC on warpx, where the next run sees it again and retries automatically.
-
-### How it's triggered
-
-- **While you're on the mint page:** Oranj calls the processor on a poll, so your mint gets delivered shortly after BitSafe completes it.
-- **Background cron:** [`scripts/process-mints.sh`](scripts/process-mints.sh) can be scheduled (e.g. on Railway) to run the processor independently of any open browser. It authenticates with a `CRON_SECRET` bearer token.
-
----
-
-## How redeeming works (cBTC → BTC)
-
-You have cBTC. You want BTC back at a specific Bitcoin address.
-
-### Step 1 — Enter amount and destination address
-Pick how much cBTC to burn (minimum: 0.001 BTC). Paste a Bitcoin address you control.
-
-**The address format must match the network** — a mainnet `bc1…` address will be rejected if you're on devnet.
-
-### Step 2 — Oranj creates a withdraw account
-A withdraw account is the mirror of a deposit account: a Canton contract that says *"This party wants to withdraw to this specific Bitcoin address."*
-
-If you've redeemed to this exact address before, the existing withdraw account is reused and no Loop popup appears for this step. If it's a new address, Loop asks you to approve creating one.
-
-### Step 3 — Oranj collects the burn context from the bridge
-The burn transaction requires five additional contracts from the bridge to be included in the transaction data. Oranj fetches these silently — no action needed from you.
-
-### Step 4 — Oranj selects which cBTC to burn
-If you have multiple cBTC holdings (you might, if you've minted multiple times), Oranj automatically selects the largest ones first until they cover the amount you requested.
-
-### Step 5 — Loop popup: approve the burn
-Approve. Canton burns the selected cBTC holdings. Oranj shows the Canton transaction ID as confirmation.
-
-### Step 6 — Bridge sends you BTC
-The bridge's attestor network detects the burn on Canton and sends the matching BTC from its reserve to your destination address. This is out-of-band — Oranj doesn't track this delivery. Check your destination Bitcoin address on a block explorer to confirm arrival.
-
-### What can go wrong
-
-| What you see | What it means |
+| Thing | Value |
 |---|---|
-| "Not enough spendable holdings" | You don't have enough cBTC, or some of it is locked in another in-flight transaction. Wait and try again. |
-| "Transaction rejected" in Loop | The burn context from the bridge changed, or your party is missing a credential. |
-| Burn confirmed on Canton, but BTC never arrives | Bridge issue. Share the Canton update ID shown in the app with BitSafe support. |
+| EVM HTLCEscrow (Base Sepolia) | `0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1` |
+| cBTC HTLC DAR (current) | `cbtc-htlc v0.1.4` — pkg `0020dac262caab99659564f3e3057ec039a79d36fb31a544974f8ff5fe4410cd` |
+| Canonical hashLock H | `0x94277b389401042e35f8709846050797955e2b321bee500555c2fbdc2f4e9903` |
+| Solver Canton party (devnet) | `warpx-devnet-1::1220231c1885f289…` |
+| Hosted test receiver (devnet) | `oranjswap::1220231c1885f289…` |
 
 ---
 
-## UTXO limits
+## 9. Cancore parameters we adopt (from their docs)
 
-Canton tracks your cBTC as individual "holding" contracts — similar to Bitcoin UTXOs. There is a hard limit of **10 holdings** per party.
-
-- At **8 holdings**: the app warns you that you're approaching the limit.
-- At **10 holdings**: you cannot receive more cBTC until you redeem some.
-
-If you're hitting this limit, redeem a portion of your cBTC first. This consolidates your holdings.
-
----
-
-## Running Oranj locally
-
-```bash
-# Install dependencies
-npm install
-
-# Set up environment
-cp .env.example .env.local
-# Edit .env.local — fill in KEYCLOAK_CLIENT_ID and KEYCLOAK_CLIENT_SECRET from Five North
-
-# Start dev server
-npm run dev
-```
-
-Open [http://localhost:3000](http://localhost:3000). Connect your Loop wallet using the button in the top-right. Your cBTC balance will appear on the dashboard.
-
-### Switching networks
-
-In `.env.local`:
-
-```
-NEXT_PUBLIC_NETWORK=devnet    # or testnet or mainnet
-```
-
-Restart `npm run dev`. All URLs, party IDs, and BTC address format expectations update automatically.
-
----
-
-## What this app deliberately does not do
-
-- **Does not custody anything.** Oranj doesn't hold your keys. Your Loop wallet does. Your Bitcoin stays in the bridge's reserve, not in Oranj.
-- **Does not show real-time confirmation counts.** It polls your balance every 30 seconds. When the number goes up, mint is done.
-- **Does not validate Bitcoin address formats client-side.** The bridge will reject a wrong-network address. Make sure you're pasting the right format.
-- **Does not work if underlying services are down.** Five North validator, DLC.link coordinator, Loop wallet backend — any of these being unreachable breaks the relevant flow.
-
-> **Note:** Earlier versions of this app could not send cBTC between parties and had no activity history. Both now exist: Send/Receive pages move cBTC between Canton parties, the dashboard shows on-ledger activity, and the mint processor delivers minted cBTC from warpx to user parties. The server-side transfer machinery (used by the mint processor) was originally built for those flows.
-
----
-
-## Troubleshooting checklist
-
-Work through these in order when something's broken:
-
-1. **`.env.local` is missing or wrong.** Symptom: `/api/auth/token` returns 500, or the dashboard shows nothing. Fix: copy `.env.example`, fill in the three KEYCLOAK values, restart.
-
-2. **DLC.link coordinator is down.** Symptom: "Generate deposit address" fails immediately with a 530 or 1016 error. Verify with:
-   ```bash
-   curl -X POST https://testnet.dlc.link/attestor-1/app/get-account-contract-rules \
-     -H "Content-Type: application/json" \
-     -d '{"chain":"canton-testnet"}'
-   ```
-   If testnet works but devnet doesn't, it's a DLC.link devnet outage. Contact them.
-
-3. **Loop popup says transaction rejected.** Most likely: your party doesn't have a Minter/Holder credential from BitSafe. Contact [BitSafe support](https://docs.bitsafe.finance).
-
-4. **Loop wallet not connected or stale session.** Symptom: clicking anything does nothing. Fix: disconnect and reconnect. If that fails, clear `localStorage` for `localhost:3000` in browser dev tools and reload.
-
-5. **Balance shows 0 after a confirmed mint.** Remember minting is two stages: BitSafe mints to the warpx holding party, then Oranj's mint processor delivers it to you. Check, in order: (a) cBTC DARs are installed — `curl http://localhost:3000/api/canton/packages` should return > 0; (b) BitSafe actually minted to warpx (the cBTC has to exist there before it can be delivered); (c) the mint processor ran — it triggers on the mint-page poll and via the cron, but you can force it by re-opening the mint page. If the cBTC is on warpx but not on your party, the processor hasn't delivered it yet. See [`docs/TECH.md`](docs/TECH.md) → "Balance shows 0 after a confirmed mint" for the full diagnosis steps.
-
----
-
-## Where to get help
-
-| Who | What for | Link |
-|---|---|---|
-| **Five North** | Validator access, Authentik credentials, DAR installation | [docs.fivenorth.io](https://docs.fivenorth.io) |
-| **BitSafe** | Minter/Holder credential, bridge issues, stuck mints | [docs.bitsafe.finance](https://docs.bitsafe.finance) |
-| **DLC.link** | Coordinator outages | [github.com/DLC-link](https://github.com/DLC-link) |
-| **Loop wallet** | Wallet connection, session issues | [cantonloop.com](https://cantonloop.com) |
+- **Timelocks:** maker ≥ order expiration, taker shorter; **min 2h for Canton swaps**.
+  Expiration options: 30min / 1h / 2h / 4h / 8h / 24h / 48h / 72h. We use 4h/3h default.
+- **Fee:** 1% per side, in the token being sent (optional to implement).
+- **Canton network fee:** paid in CC (Amulet) — hosted user parties need CC funded.
+- **EnableCC:** one-time onboarding so a Canton account can hold/use CC (needed per party).
+- **Order lifecycle:** `open → accepted → htlc_proposal_sent → htlc_active →
+  both_claimed` / `refunded` / `cancelled`.
+- **Refund/Retake:** Canton auto-refunds after timeout (or manual Refund); EVM via
+  `retake(hashLock)` in MetaMask (or directly on Etherscan as a fallback).
+- **Cancel:** maker can cancel before any HTLC locks (no on-chain activity).

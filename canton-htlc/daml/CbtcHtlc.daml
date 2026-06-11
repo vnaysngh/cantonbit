@@ -91,27 +91,29 @@ template HtlcLock
       --   SHOULD be <= the Allocation's settleBefore so the registry agrees.
   where
     signatory locker
-    -- NOTE: `receiver` is deliberately NOT an observer. If it were, a cross-
-    -- participant receiver's participant would have to vet this custom DAR
-    -- (NO_SYNCHRONIZER_FOR_SUBMISSION / "not vetted" otherwise). The receiver does
-    -- NOT need to see this wrapper — they receive the cBTC via the underlying
-    -- standard Allocation (which all participants vet) when Claim fires
-    -- Allocation_ExecuteTransfer. Only `executor` (local, has the DAR) observes.
-    observer executor
+    -- PARTICIPANT-MANAGED model: the receiver is a LOCAL party on our node (where
+    -- this DAR is vetted), so making them an observer is fine — it does NOT hit
+    -- NO_SYNCHRONIZER (that only happens for a CROSS-participant observer). The
+    -- receiver observes + controls Claim, so they can SEE the contract and exercise
+    -- it (supplying the receiver authority Allocation_ExecuteTransfer needs). The
+    -- backend signs for them (it holds CanActAs over the hosted party), exactly like
+    -- Cancore's participant-managed users. (Loop-wallet users use a separate standard
+    -- TransferInstruction_Accept path, not this DAR.)
+    observer executor, receiver
 
-    -- | Reveal the preimage to release the locked asset to `receiver`. The
-    -- `executor` drives it (it holds the pre-delegated Allocation authority); the
-    -- preimage check is THIS contract's gate. Reveals `preimage` on-ledger so the
-    -- EVM-side watcher can read it and claim the EVM leg with the same secret.
+    -- | THE RECEIVER reveals the preimage to release the locked cBTC to themselves.
+    -- The DAML ledger checks keccak256(preimage)==hashLock, then fires
+    -- Allocation_ExecuteTransfer — the receiver's own authority (from exercising
+    -- this choice) + the executor/sender pre-delegation satisfy its controllers.
+    -- Reveals `preimage` on-ledger so the EVM-side watcher can claim the EVM leg.
     --
-    -- `allocationContext` is the registry choice-context for Allocation_ExecuteTransfer,
-    -- fetched off-ledger by the orchestrator and passed in.
+    -- `allocationContext` is the registry choice-context for Allocation_ExecuteTransfer.
     choice Claim : Allocation_ExecuteTransferResult
       with
         preimage : BytesHex
           -- ^ Lowercase-hex string of the raw secret bytes (the EVM preImage).
         allocationContext : ExtraArgs
-      controller executor
+      controller receiver
       do
         now <- getTime
         assertMsg "HTLC: too late (timelock passed)" (now < unlockTime)
