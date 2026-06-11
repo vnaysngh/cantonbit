@@ -10,6 +10,8 @@ import { useWallet } from "@/hooks/useWallet";
 import { useEvmWallet } from "@/hooks/useEvmWallet";
 import { SWAP_CHAIN } from "@/lib/swap-evm";
 import { cn } from "@/lib/utils";
+import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import { useRouter } from "next/navigation";
 
 // Surfaced top-level pages. Mint/Redeem/Send/Receive/Dashboard routes still
 // exist but are intentionally NOT linked here — the header stays focused on the
@@ -27,7 +29,6 @@ const NAV_LINKS = [
 
 export function TopNav() {
   const pathname = usePathname();
-  const { partyId, connectLoop, logoutLoop, loopConnecting, loopReady } = useWallet();
   const evm = useEvmWallet();
   const evmWrongChain = evm.chainId != null && evm.chainId !== SWAP_CHAIN.id;
 
@@ -80,22 +81,80 @@ export function TopNav() {
           })}
         </nav>
 
-        {/* Actions — a single Wallets dropdown */}
+        {/* Actions — wallets dropdown (Canton identity + EVM subset) + Log out */}
         <div className="flex items-center gap-3">
           <WalletsMenu
             evm={evm}
             evmWrongChain={evmWrongChain}
             onEvmSwitch={handleEvmSwitch}
             swapChainName={SWAP_CHAIN.name}
-            party={partyId}
-            connectLoop={connectLoop}
-            logoutLoop={logoutLoop}
-            loopConnecting={loopConnecting}
-            loopReady={loopReady}
           />
+          <LogoutControl />
         </div>
       </div>
     </header>
+  );
+}
+
+/**
+ * The user's Canton identity. Reads from /api/parties/me (server-side, cookie-
+ * reliable on first load — client supabase.auth.getUser() races the cookie right
+ * after login and would briefly show "Log in"). Falls back to the Loop party.
+ * Returns { party, ready }. party=null + ready=true means logged out.
+ */
+function useCantonIdentity(): { party: string | null; ready: boolean; isLoop: boolean } {
+  const { partyId: loopParty } = useWallet();
+  const [state, setState] = useState<{ party: string | null; ready: boolean; isLoop: boolean }>(
+    { party: null, ready: false, isLoop: false },
+  );
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/parties/me")
+      .then((r) => r.json())
+      .then((d) => {
+        if (!alive) return;
+        if (d?.partyId) setState({ party: d.partyId, ready: true, isLoop: d.mode === "loop" });
+        else setState({ party: null, ready: true, isLoop: false });
+      })
+      .catch(() => { if (alive) setState({ party: null, ready: true, isLoop: false }); });
+    return () => { alive = false; };
+  }, []);
+  // Loop wallet connected without a session still counts as identity.
+  if (!state.party && loopParty) return { party: loopParty, ready: true, isLoop: true };
+  return state;
+}
+
+/** Header Log out (outside the dropdown) — clears session + Loop → /login. */
+function LogoutControl() {
+  const router = useRouter();
+  const { logoutLoop } = useWallet();
+  const { party, ready } = useCantonIdentity();
+
+  if (ready && !party) {
+    return (
+      <Link
+        href="/login"
+        className="rounded-lg px-3 py-1.5 text-sm font-medium text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+      >
+        Log in
+      </Link>
+    );
+  }
+
+  const logout = async () => {
+    try { await createSupabaseBrowserClient().auth.signOut(); } catch { /* no session */ }
+    try { logoutLoop(); } catch { /* not connected */ }
+    router.push("/login");
+    router.refresh();
+  };
+
+  return (
+    <button
+      onClick={logout}
+      className="rounded-lg px-2.5 py-1.5 text-sm font-medium text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+    >
+      Log out
+    </button>
   );
 }
 
@@ -109,29 +168,24 @@ interface EvmLike {
 }
 
 /**
- * Single "Wallets" trigger that opens a dropdown listing both wallets (EVM +
- * Canton/Loop). Each row: the chain logo, the connection state, and a connect or
- * disconnect action. Replaces the cluttered row of three chips.
+ * Wallets dropdown — Canton party FIRST (the identity: read-only, copy only, the
+ * user CANNOT disconnect it here — logout is the only way out), then the EVM
+ * wallet (the subset: connect/disconnect for the WBTC leg). The trigger shows the
+ * Canton party (the identity), so it's visible at a glance.
  */
 function WalletsMenu({
   evm, evmWrongChain, onEvmSwitch, swapChainName,
-  party, connectLoop, logoutLoop, loopConnecting, loopReady,
 }: {
   evm: EvmLike;
   evmWrongChain: boolean;
   onEvmSwitch: () => void;
   swapChainName: string;
-  party: string;
-  connectLoop: () => void;
-  logoutLoop: () => void;
-  loopConnecting: boolean;
-  loopReady: boolean;
 }) {
+  const { party, ready } = useCantonIdentity();
   const [open, setOpen] = useState(false);
-  const [copied, setCopied] = useState<"evm" | "canton" | null>(null);
+  const [copied, setCopied] = useState<"canton" | "evm" | null>(null);
   const ref = useRef<HTMLDivElement>(null);
 
-  // Close on outside click / Escape.
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
@@ -141,50 +195,54 @@ function WalletsMenu({
     return () => { document.removeEventListener("mousedown", onDown); document.removeEventListener("keydown", onKey); };
   }, [open]);
 
-  const copy = (text: string, which: "evm" | "canton") => {
+  const copy = (text: string, which: "canton" | "evm") => {
     void navigator.clipboard.writeText(text);
     setCopied(which);
     setTimeout(() => setCopied(null), 1500);
   };
 
-  const evmConnected = !!evm.account;
-  const cantonConnected = !!party;
-  const connectedCount = (evmConnected ? 1 : 0) + (cantonConnected ? 1 : 0);
+  // No identity yet — don't render the wallets trigger (LogoutControl shows "Log in").
+  if (ready && !party) return null;
 
-  // Trigger label summarizes state without crowding the bar.
-  const triggerLabel =
-    connectedCount === 0 ? "Connect wallets"
-    : evmWrongChain ? "Wrong network"
-    : connectedCount === 2 ? "2 wallets"
-    : "1 wallet";
+  const evmConnected = !!evm.account;
+  const shortParty = party ? `${party.slice(0, 8)}…${party.slice(-6)}` : "Loading…";
+  const triggerLabel = evmWrongChain ? "Wrong network" : shortParty;
 
   return (
     <div className="relative" ref={ref}>
       <button
         onClick={() => setOpen((v) => !v)}
         className={cn(
-          "inline-flex h-9 items-center gap-2 rounded-lg px-4 text-body-md transition-all hover:opacity-90 active:scale-95",
+          "inline-flex h-9 items-center gap-2 rounded-lg px-4 font-mono text-sm transition-all hover:opacity-90 active:scale-95",
           evmWrongChain
-            ? "bg-amber-500 text-white"
-            : connectedCount > 0
-              ? "border border-outline-variant bg-surface-container text-on-surface"
-              : "bg-primary text-on-primary",
+            ? "bg-amber-500 font-sans text-white"
+            : "border border-outline-variant bg-surface-container text-on-surface",
         )}
       >
-        {connectedCount > 0 && !evmWrongChain && (
-          <span className="flex items-center -space-x-1">
-            {evmConnected && <span className="inline-block size-2 rounded-full bg-blue-500 ring-1 ring-surface-container" />}
-            {cantonConnected && <span className="inline-block size-2 rounded-full bg-primary ring-1 ring-surface-container" />}
-          </span>
-        )}
+        <span className="inline-block size-2 rounded-full bg-primary ring-1 ring-surface-container" />
         {triggerLabel}
         <span className="material-symbols-outlined text-[18px]">{open ? "expand_less" : "expand_more"}</span>
       </button>
 
       {open && (
         <div className="absolute right-0 z-50 mt-2 w-80 rounded-xl border border-outline-variant bg-surface p-2 shadow-lg">
+          {/* Canton party — the identity. Read-only: copy, but no disconnect. */}
           <WalletRow
-            label="EVM (Arbitrum)"
+            label="Canton party"
+            network="Canton"
+            connected={!!party}
+            address={party ?? undefined}
+            copied={copied === "canton"}
+            readOnly
+            onCopy={() => party && copy(party, "canton")}
+            onConnect={() => {}}
+            connectLabel=""
+            onDisconnect={() => {}}
+          />
+          <div className="my-1 h-px bg-outline-variant/50" />
+          {/* EVM wallet — the subset for the WBTC leg. Connect/disconnect here. */}
+          <WalletRow
+            label="EVM wallet"
             network="Arbitrum"
             connected={evmConnected}
             address={evm.account ?? undefined}
@@ -197,19 +255,6 @@ function WalletsMenu({
             connectDisabled={evm.connecting || !evm.available}
             onDisconnect={evm.disconnect}
           />
-          <div className="my-1 h-px bg-outline-variant/50" />
-          <WalletRow
-            label="Canton (Loop)"
-            network="Canton"
-            connected={cantonConnected}
-            address={party || undefined}
-            copied={copied === "canton"}
-            onCopy={() => party && copy(party, "canton")}
-            onConnect={connectLoop}
-            connectLabel={loopConnecting ? "Connecting…" : loopReady ? "Connect" : "Loading…"}
-            connectDisabled={loopConnecting || !loopReady}
-            onDisconnect={logoutLoop}
-          />
         </div>
       )}
     </div>
@@ -218,7 +263,7 @@ function WalletsMenu({
 
 /** One wallet row inside the WalletsMenu dropdown. */
 function WalletRow({
-  label, network, connected, address, copied, warn, warnAction,
+  label, network, connected, address, copied, warn, warnAction, readOnly,
   onCopy, onConnect, connectLabel, connectDisabled, onDisconnect,
 }: {
   label: string;
@@ -228,6 +273,8 @@ function WalletRow({
   copied: boolean;
   warn?: boolean;
   warnAction?: { label: string; onClick: () => void };
+  /** Identity row (Canton party): copy only — no disconnect, no connect button. */
+  readOnly?: boolean;
   onCopy: () => void;
   onConnect: () => void;
   connectLabel: string;
@@ -260,7 +307,7 @@ function WalletRow({
           )}
         </div>
       </div>
-      {connected ? (
+      {readOnly ? null : connected ? (
         <button
           onClick={onDisconnect}
           className="shrink-0 rounded-full p-1 text-on-surface-variant transition-all hover:bg-surface-container-high hover:text-on-surface"

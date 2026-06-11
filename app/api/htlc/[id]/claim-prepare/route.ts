@@ -13,8 +13,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   try {
     const { preimage } = await req.json();
     if (!preimage) return NextResponse.json({ error: "missing preimage" }, { status: 400 });
-    const { command, disclosedContracts } = await htlcService().prepareClaim(id, preimage);
-    return NextResponse.json({ command, disclosedContracts });
+    const { command, disclosedContracts, synchronizerId } = await htlcService().prepareClaim(id, preimage);
+    return NextResponse.json({ command, disclosedContracts, synchronizerId });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     const status = msg.includes("invalid preimage") ? 400 : 500;

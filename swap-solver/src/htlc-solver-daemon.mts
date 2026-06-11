@@ -66,9 +66,20 @@ async function main() {
   // Track which orders we've acted on (avoid double-submits).
   const lockedCounter = new Set<string>();
   const claimedMain = new Set<string>();
+  let lastSweep = 0;
 
   for (;;) {
     try {
+      // AUTO-REFUND sweep (Cancore parity) — periodically refund counter-locked
+      // swaps past their Canton timelock, freeing the solver's cBTC. Every ~60s.
+      const nowMs = Date.now();
+      if (nowMs - lastSweep > 60_000) {
+        lastSweep = nowMs;
+        try {
+          const r = (await jpost("/api/htlc/auto-refund")) as { due?: number; refunded?: number };
+          if (r.due && r.due > 0) console.log(`[solver] auto-refund swept ${r.refunded}/${r.due} expired swaps`);
+        } catch (e) { console.error("[solver] auto-refund error:", e instanceof Error ? e.message : e); }
+      }
       // The API has no list endpoint yet; the daemon learns order ids from a
       // shared ids feed. We poll the known-active set via /api/htlc/active.
       const { orders } = (await jget("/api/htlc/active")) as { orders: Order[] };

@@ -59,10 +59,17 @@ export const htlcApi = {
   lockCounter: (id: string) => jpost(`/api/htlc/${id}/lock-counter`),
   claimCounter: (id: string, preimage: string) => jpost(`/api/htlc/${id}/claim-counter`, { preimage }),
   // On-ledger DAR claim (user signs via Loop): prepare the command, then record the result.
-  prepareClaim: (id: string, preimage: string): Promise<{ command: unknown; disclosedContracts: unknown[] }> =>
+  prepareClaim: (id: string, preimage: string): Promise<{ command: unknown; disclosedContracts: unknown[]; synchronizerId: string }> =>
     jpost(`/api/htlc/${id}/claim-prepare`, { preimage }),
   recordClaim: (id: string, preimage: string, updateId: string) =>
     jpost(`/api/htlc/${id}/claim-record`, { preimage, updateId }),
+  // Participant-managed claim: the backend signs the cBTC claim via CanActAs (no Loop popup).
+  claimManaged: (id: string, preimage: string): Promise<{ ok: boolean; updateId: string }> =>
+    jpost(`/api/htlc/${id}/claim-managed`, { preimage }),
+  // Refund the cBTC counter (backend, after Canton timelock).
+  refundCounter: (id: string) => jpost(`/api/htlc/${id}/refund-counter`),
+  // Record the user's EVM retake (WBTC refund) after the EVM timelock.
+  recordRetake: (id: string, retakeTx: string) => jpost(`/api/htlc/${id}/retake-main`, { retakeTx }),
   getPreimage: (id: string) => jget(`/api/htlc/${id}/preimage`),
   recordMainClaim: (id: string, mainClaimTx: string) => jpost(`/api/htlc/${id}/main-claim`, { mainClaimTx }),
 };

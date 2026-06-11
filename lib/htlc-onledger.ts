@@ -26,9 +26,12 @@ import type { Holding } from "./types";
 
 const TAG = "[htlc-onledger]";
 
-// Our uploaded cbtc-htlc DAR (v0.1.4 — participant-managed: Claim controller=receiver,
-// observer=executor+receiver so the LOCAL hosted receiver can see + exercise it).
-const HTLC_PKG = "0020dac262caab99659564f3e3057ec039a79d36fb31a544974f8ff5fe4410cd";
+// Our uploaded cbtc-htlc DAR (v0.1.3 — Claim controller=receiver, observer=executor
+// ONLY). The receiver is NOT a static observer (that would force their participant to
+// vet our DAR → NO_SYNCHRONIZER for cross-participant Loop users). Instead the receiver
+// sees the HtlcLock via EXPLICIT DISCLOSURE (createdEventBlob) — no vetting needed.
+// This is how Cancore does it (works for both local and Loop receivers).
+const HTLC_PKG = "791eb59c536045c33cb33154498d6d28cf0b1538513a9edecdb97562db661734";
 const HTLC_TID = `${HTLC_PKG}:CbtcHtlc:HtlcLock`;
 
 const ALLOCATION_FACTORY_INTERFACE =
@@ -52,7 +55,7 @@ async function submit(
   actAs: string[],
   commands: unknown[],
   disclosed: DisclosedContract[] = [],
-): Promise<{ updateId: string; createdCids: string[]; tree: any }> {
+): Promise<{ updateId: string; createdCids: string[]; created: { contractId: string; templateId: string; createdEventBlob: string }[]; tree: any }> {
   const commandId =
     "htlc-" + Math.random().toString(16).slice(2) + Date.now().toString(16);
   const res = await fetch(
@@ -92,6 +95,56 @@ async function submit(
     if (!isPlainHolding) createdCids.push(c.contractId);
   }
   return { updateId: tree?.transactionTree?.updateId ?? "", createdCids, created, tree };
+}
+
+const ALLOCATION_INTERFACE =
+  "#splice-api-token-allocation-v1:Splice.Api.Token.AllocationV1:Allocation";
+
+/**
+ * CLEANUP — withdraw an Allocation directly (Allocation_Withdraw, sender-alone).
+ * For orphaned allocations (no HtlcLock) left by a failed/retried lock. Returns the
+ * solver's cBTC to the solver. Safe: sender-only, no receiver co-sign needed.
+ */
+export async function withdrawAllocation(solverParty: string, allocationCid: string): Promise<{ updateId: string }> {
+  const jwt = await getLedgerJwt();
+  const ctx = await allocationChoiceContext(allocationCid, "withdraw");
+  const { updateId } = await submit(
+    jwt,
+    [solverParty],
+    [{
+      ExerciseCommand: {
+        templateId: ALLOCATION_INTERFACE,
+        contractId: allocationCid,
+        choice: "Allocation_Withdraw",
+        choiceArgument: { extraArgs: { context: ctx.data, meta: { values: {} } } },
+      },
+    }],
+    ctx.disclosed,
+  );
+  console.log(`${TAG} withdrew orphan allocation ${allocationCid.slice(0, 16)}… → cBTC recovered. update ${updateId.slice(0, 16)}…`);
+  return { updateId };
+}
+
+/** List the solver's active Allocation contract ids (to find orphans to clean up). */
+export async function listSolverAllocations(solverParty: string): Promise<string[]> {
+  const jwt = await getLedgerJwt();
+  const endRes = await fetch(`${NETWORK.ledgerHost}/v2/state/ledger-end`, { headers: { Authorization: `Bearer ${jwt}` } });
+  const offset = ((await endRes.json()) as { offset: number }).offset;
+  const wildcard = { cumulative: [{ identifierFilter: { WildcardFilter: { value: { includeCreatedEventBlob: false } } } }] };
+  const r = await fetch(`${NETWORK.ledgerHost}/v2/state/active-contracts`, {
+    method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
+    body: JSON.stringify({ filter: { filtersByParty: { [solverParty]: wildcard } }, verbose: false, activeAtOffset: offset }),
+  });
+  if (!r.ok) return [];
+  const entries = (await r.json()) as any[];
+  const out: string[] = [];
+  for (const e of entries) {
+    const c = e?.contractEntry?.JsActiveContract?.createdEvent;
+    const tpl = c?.templateId ?? "";
+    // Allocation template path contains "Allocation:DvpLegAllocation" (not plain Holding).
+    if (c?.contractId && /Allocation/i.test(tpl) && !/:Holding$/.test(tpl)) out.push(c.contractId);
+  }
+  return out;
 }
 
 /** Registry choice-context for an Allocation lifecycle choice. */
@@ -244,7 +297,7 @@ export async function prepareClaimCommand(params: {
   allocationCid: string;
   solverParty: string; // to read the Allocation blob from the solver's ACS for disclosure
   preimageHex: string; // lowercase hex of the raw secret bytes, no 0x
-}): Promise<{ command: unknown; disclosedContracts: DisclosedContract[] }> {
+}): Promise<{ command: unknown; disclosedContracts: DisclosedContract[]; synchronizerId: string }> {
   const ctx = await allocationChoiceContext(params.allocationCid, "execute-transfer");
   const preimage = params.preimageHex.startsWith("0x") ? params.preimageHex.slice(2) : params.preimageHex;
   const command = {
@@ -264,12 +317,24 @@ export async function prepareClaimCommand(params: {
   // it (created by the solver, receiver reading at a different offset), disclose it
   // explicitly from the solver's ACS.
   const disclosed = [...ctx.disclosed];
+  // The synchronizer the contracts live on — the Loop SDK NEEDS this to route the
+  // submission and resolve the disclosed templates (without it → TEMPLATES_NOT_FOUND).
+  let syncId = disclosed.find((d) => d.synchronizerId)?.synchronizerId ?? "";
   const hasAlloc = disclosed.some((d) => d.contractId === params.allocationCid);
   if (!hasAlloc) {
     const allocBlob = await fetchContractBlob(params.allocationCid, params.solverParty);
-    if (allocBlob) disclosed.push(allocBlob);
+    if (allocBlob) { disclosed.push(allocBlob); if (!syncId) syncId = allocBlob.synchronizerId; }
   }
-  return { command, disclosedContracts: disclosed };
+  // Disclose the HtlcLock so the receiver can SEE it (they're NOT a static observer —
+  // disclosure avoids needing their participant to vet our DAR). Fetch from ACS (the
+  // tx-tree blob is empty) — this also gives us the real synchronizerId.
+  if (!disclosed.some((d) => d.contractId === params.htlcCid)) {
+    const htlcBlob = await fetchContractBlob(params.htlcCid, params.solverParty);
+    if (htlcBlob) { disclosed.push(htlcBlob); if (!syncId) syncId = htlcBlob.synchronizerId; }
+  }
+  // Stamp the resolved synchronizerId on every disclosed contract that lacks one.
+  for (const d of disclosed) if (!d.synchronizerId) d.synchronizerId = syncId;
+  return { command, disclosedContracts: disclosed, synchronizerId: syncId };
 }
 
 /** Fetch a contract's createdEventBlob + templateId from the solver's ACS (for disclosure). */
@@ -285,9 +350,12 @@ async function fetchContractBlob(contractId: string, party: string): Promise<Dis
   if (!r.ok) return null;
   const entries = (await r.json()) as any[];
   for (const e of entries) {
-    const c = e?.contractEntry?.JsActiveContract?.createdEvent;
+    const ac = e?.contractEntry?.JsActiveContract;
+    const c = ac?.createdEvent;
     if (c?.contractId === contractId) {
-      return { templateId: c.templateId, contractId, createdEventBlob: c.createdEventBlob ?? "", synchronizerId: "" };
+      // Capture the REAL synchronizerId — the Loop SDK needs it to route the submission.
+      const synchronizerId = ac?.synchronizerId ?? c?.synchronizerId ?? "";
+      return { templateId: c.templateId, contractId, createdEventBlob: c.createdEventBlob ?? "", synchronizerId };
     }
   }
   return null;

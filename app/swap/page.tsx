@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 
 import { ChainIcon } from "@/components/ChainIcon";
 import { useEvmWallet } from "@/hooks/useEvmWallet";
@@ -47,7 +48,13 @@ import {
   secretToPreimage,
   htlcApi,
   evmApproveAndLock,
+  evmRetake,
 } from "@/lib/htlc-client";
+import {
+  timelocksFromExpiration,
+  EXPIRATION_OPTIONS,
+  DEFAULT_EXPIRATION_SECONDS,
+} from "@/lib/htlc-timelock";
 
 // HTLC EVM leg config (Base Sepolia). The new trustless escrow (replaces the old
 // oracle InputSettlerEscrow for swaps).
@@ -72,6 +79,8 @@ type Stage =
   | { kind: "htlc-claiming"; swapId: string; secret: string; lockTx: string }
   // HTLC swap completed. swapId = hashLock.
   | { kind: "htlc-done"; swapId: string; lockTx: string }
+  // HTLC: the user retook (refunded) their WBTC after a stuck swap.
+  | { kind: "htlc-refunded"; swapId: string; retakeTx: string }
   | { kind: "error"; message: string };
 
 // NOTE: pending-order persistence + multi-order tracking now lives in
@@ -86,19 +95,45 @@ export default function SwapPage() {
   const evm = useEvmWallet();
   const wallet = useWallet();
 
-  // DESTINATION party for the delivered CBTC = the user's CONNECTED LOOP WALLET
-  // party. Both the Loop wallet and the swap solver run on devnet, so the solver
-  // can deliver to it (and the user accepts the incoming CBTC in their own Loop
-  // wallet). NEXT_PUBLIC_SWAP_DEST_PARTY remains an optional override for testing
-  // against a fixed party.
+  // PARTICIPANT-MANAGED (default): the cBTC recipient is the logged-in user's party
+  // hosted on OUR warpx node (fetched from /api/parties/me). The backend signs the
+  // on-ledger claim for them (CanActAs) — no Loop wallet needed. We fall back to the
+  // connected Loop party only if there's no session (the legacy/Loop path).
+  const [sessionParty, setSessionParty] = useState<string | null>(null);
+  const [sessionReadyAuth, setSessionReadyAuth] = useState(false);
+  const [identityProbed, setIdentityProbed] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/parties/me")
+      .then((r) => r.json())
+      .then((d) => { if (alive) { setSessionParty(d?.partyId ?? null); setSessionReadyAuth(!!d?.authed); } })
+      .catch(() => {})
+      .finally(() => { if (alive) setIdentityProbed(true); });
+    return () => { alive = false; };
+  }, []);
+
   const destinationParty =
-    process.env.NEXT_PUBLIC_SWAP_DEST_PARTY ?? wallet.partyId;
-  const loopConnected = wallet.isConnected && !!wallet.partyId;
+    process.env.NEXT_PUBLIC_SWAP_DEST_PARTY ?? sessionParty ?? wallet.partyId;
+  // True once we have a usable recipient party (session party OR Loop wallet).
+  const loopConnected = !!destinationParty;
+
+  // GATE: no Canton party = no identity → /login. Wait until BOTH the session probe
+  // and the Loop wallet have finished loading so we don't redirect prematurely.
+  const router = useRouter();
+  useEffect(() => {
+    if (process.env.NEXT_PUBLIC_SWAP_DEST_PARTY) return; // test override: never gate
+    if (!identityProbed || wallet.isLoading) return;
+    if (!destinationParty) router.replace("/login");
+  }, [identityProbed, wallet.isLoading, destinationParty, router]);
+  // Is this a participant-managed swap (backend signs the claim) vs Loop (user signs)?
+  const isParticipantManaged = !!sessionParty && destinationParty === sessionParty;
 
   // Amount starts EMPTY (CoW-style) — no default value. The input shows its "0.0"
   // placeholder and the button reads "Enter an amount" until the user types. All
   // downstream logic (receiveEstimate, amountState) already treats "" as not-set.
   const [amount, setAmount] = useState("");
+  // Order expiration (Cancore §8) → drives the staggered HTLC timelocks.
+  const [expirationSeconds, setExpirationSeconds] = useState<number>(DEFAULT_EXPIRATION_SECONDS);
   const [stage, setStage] = useState<Stage>({ kind: "idle" });
   const [wbtcBalance, setWbtcBalance] = useState<bigint | null>(null);
 
@@ -178,7 +213,13 @@ export default function SwapPage() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      if (!loopConnected || !wallet.provider) {
+      // Participant-managed (email) users don't have a Loop session — the backend
+      // signs for them, so there's no preapproval signature to check. Mark ready.
+      if (isParticipantManaged) {
+        if (!cancelled) setSessionReady(true);
+        return;
+      }
+      if (!wallet.provider) {
         if (!cancelled) setSessionReady(null);
         return;
       }
@@ -189,7 +230,7 @@ export default function SwapPage() {
     return () => {
       cancelled = true;
     };
-  }, [loopConnected, wallet.provider]);
+  }, [isParticipantManaged, wallet.provider]);
 
   // --- The explicit "Sign in your Loop wallet" action (driven by the prerequisite
   //     popup CTA). One signature → mints the JWT session → unblocks the form. ---
@@ -367,8 +408,9 @@ export default function SwapPage() {
       const { secret, hashLock } = generateSecret();
       const id = hashLock; // swapId = hashLock
       const now = Math.floor(Date.now() / 1000);
-      const userTimelock = now + 4 * 3600; // EVM (longer)
-      const solverTimelock = now + 3 * 3600; // Canton (shorter)
+      // Derive the staggered timelocks from the chosen order expiration (Cancore §8):
+      // userTimelock (EVM, = now + expiration) > solverTimelock (Canton, − gap).
+      const { userTimelock, solverTimelock } = timelocksFromExpiration(now, expirationSeconds);
       try {
         setStage({ kind: "submitting", quote });
         await htlcApi.createOrder({
@@ -437,7 +479,7 @@ export default function SwapPage() {
         retry(`Waiting for the solver failed: ${getSwapErrorMessage(e)}`);
       }
     },
-    [evm]
+    [evm, expirationSeconds]
   );
 
   // THE USER's CLAIM (the real reveal) — signed by the USER's Loop wallet.
@@ -449,28 +491,62 @@ export default function SwapPage() {
     async (swapId: string, secret: string, lockTx: string) => {
       setStage({ kind: "htlc-claiming", swapId, secret, lockTx });
       try {
-        const provider = wallet.provider;
-        if (!provider) throw new Error("Connect your Loop wallet to claim your cBTC.");
         const preimage = secretToPreimage(secret);
 
-        // 1. backend builds the Claim command + disclosed contracts
-        const { command, disclosedContracts } = await htlcApi.prepareClaim(swapId, preimage);
+        if (isParticipantManaged) {
+          // PARTICIPANT-MANAGED: the backend signs HtlcLock.Claim AS the hosted
+          // receiver (CanActAs). One call, no wallet popup. The daemon then claims
+          // the WBTC from the revealed preimage.
+          await htlcApi.claimManaged(swapId, preimage);
+          setStage({ kind: "htlc-done", swapId, lockTx });
+          return;
+        }
 
-        // 2. THE USER's LOOP WALLET signs + submits it (the reveal happens on-ledger)
+        // LOOP path: the user's Loop wallet signs HtlcLock.Claim itself (controller=
+        // receiver). The backend prepares the command + disclosed contracts.
+        const provider = wallet.provider;
+        if (!provider) throw new Error("Connect your Loop wallet to claim your cBTC.");
+        const { command, disclosedContracts, synchronizerId } = await htlcApi.prepareClaim(swapId, preimage);
+        const userParty = (provider as { party_id?: string }).party_id ?? wallet.partyId ?? "";
         const result = (await provider.submitAndWaitForTransaction(
-          { commands: [command], disclosedContracts },
+          {
+            commands: [command],
+            disclosedContracts,
+            packageIdSelectionPreference: [],
+            actAs: [userParty],
+            readAs: [userParty],
+            synchronizerId,
+          },
           undefined
         )) as { updateId?: string; transactionTree?: { updateId?: string } };
         const updateId = result?.updateId ?? result?.transactionTree?.updateId ?? "submitted";
-
-        // 3. tell the backend the preimage is now public (for the solver's EVM claim)
         await htlcApi.recordClaim(swapId, preimage, updateId);
         setStage({ kind: "htlc-done", swapId, lockTx });
       } catch (e) {
         setStage({ kind: "htlc-claimable", swapId, secret, lockTx, claimError: getSwapErrorMessage(e) });
       }
     },
-    [wallet]
+    [wallet, isParticipantManaged]
+  );
+
+  // RETAKE (EVM refund) — if a swap is stuck, the user reclaims their locked WBTC
+  // by signing retake(hashLock) in MetaMask. Only succeeds after the EVM timelock
+  // (the contract enforces TooEarly otherwise). swapId === hashLock.
+  const handleRetake = useCallback(
+    async (swapId: string) => {
+      try {
+        const tx = await evmRetake(evm.sendTransaction, HTLC_ESCROW, swapId);
+        await htlcApi.recordRetake(swapId, tx);
+        setStage({ kind: "htlc-refunded", swapId, retakeTx: tx });
+      } catch (e) {
+        setStage((s) =>
+          s.kind === "htlc-claimable"
+            ? { ...s, claimError: `Retake failed: ${getSwapErrorMessage(e)}` }
+            : s,
+        );
+      }
+    },
+    [evm],
   );
 
   // On first load, if the pending-orders list restored any in-flight swap, focus
@@ -602,9 +678,9 @@ export default function SwapPage() {
         onClick: wallet.connectLoop,
         disabled: wallet.loopConnecting || !wallet.loopReady
       };
-    } else if (sessionReady !== true) {
-      // PREREQUISITE not met: need the one-time signature. The button opens the
-      // sign popup (or shows "Checking…" while the initial probe runs).
+    } else if (!isParticipantManaged && sessionReady !== true) {
+      // LOOP path only: need the one-time Loop-session signature (preapproval gate).
+      // Participant-managed users skip this — the backend signs on their behalf.
       primary = {
         label: sessionReady === null ? "Checking…" : "Sign to continue",
         onClick: () => setSessionReady(false),
@@ -671,7 +747,7 @@ export default function SwapPage() {
               balance={loopConnected ? cbtcBalance : undefined}
             />
 
-            {/* Destination + error + primary action */}
+            {/* Destination + expiration + error + primary action */}
             <div className="px-1 pb-1 pt-3">
               <DetailRow
                 label="Recipient"
@@ -682,6 +758,18 @@ export default function SwapPage() {
                 }
                 ok={loopConnected}
               />
+              <div className="mt-2 flex items-center justify-between text-sm">
+                <span className="text-foreground/60">Order expiration</span>
+                <select
+                  value={expirationSeconds}
+                  onChange={(e) => setExpirationSeconds(Number(e.target.value))}
+                  className="rounded-lg border border-foreground/15 bg-transparent px-2 py-1 text-foreground"
+                >
+                  {EXPIRATION_OPTIONS.map((o) => (
+                    <option key={o.seconds} value={o.seconds}>{o.label}</option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             {stage.kind === "error" && (
@@ -758,6 +846,30 @@ export default function SwapPage() {
               )}
             >
               {stage.kind === "htlc-claiming" ? "Claiming…" : "Claim cBTC"}
+            </button>
+            {/* Stuck-swap escape hatch: retake your WBTC (only works after the EVM
+                timelock — the contract enforces it). */}
+            {stage.kind === "htlc-claimable" && stage.claimError && (
+              <button
+                onClick={() => handleRetake(stage.swapId)}
+                className="mt-2 w-full rounded-2xl border border-foreground/15 px-4 py-2.5 text-sm hover:bg-foreground/5"
+              >
+                Retake my WBTC (refund — after timelock)
+              </button>
+            )}
+          </div>
+        )}
+
+        {stage.kind === "htlc-refunded" && (
+          <div className="px-1 pb-1 pt-4 text-center">
+            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-foreground/10 text-2xl">↩️</div>
+            <h3 className="text-lg font-semibold">WBTC refunded</h3>
+            <p className="mt-1 text-sm text-foreground/60">
+              Your locked WBTC was returned to your wallet (retake).
+            </p>
+            <p className="mt-2 break-all text-xs text-foreground/40">retake tx {stage.retakeTx.slice(0, 16)}…</p>
+            <button onClick={reset} className="mt-4 rounded-xl border border-foreground/15 px-4 py-2 text-sm hover:bg-foreground/5">
+              New swap
             </button>
           </div>
         )}

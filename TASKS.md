@@ -28,48 +28,44 @@
 
 ---
 
-## 🔴 REMAINING — to ship the real product
+## ✅ DONE — participant-managed product (the mainline) is built end-to-end
 
-Ordered. The mainline is **participant-managed** (Cancore's default = our proven path).
+- [x] **R2. Participant-managed onboarding** — allocate party on warpx + grant backend
+      CanActAs (lib/party-onboarding.ts, /api/parties/provision). Proven: fresh party →
+      swap → cBTC delivered. (No EnableCC needed — backend co-signs as receiver.)
+- [x] **R3. Solver daemon end-to-end** — user locks WBTC → daemon locks cBTC (HtlcLock)
+      → backend claims cBTC (claim-managed, CanActAs) → daemon claims WBTC. PROVEN LIVE
+      (htlc-e2e-managed.mts: real WBTC + real cBTC moved, user signed ONE thing).
+- [x] **R4. Refund / Retake both legs** — cBTC HtlcLock.Refund → Allocation_Withdraw
+      (timelock-gated, PROVEN), EVM retake(hashLock) button, auto-refund sweep in the
+      daemon, orphan-allocation cleanup. Fixed allocateBefore ≤ settleBefore bug.
+- [x] **R5. Orders persisted to Supabase** (htlc_orders, migration 007 applied) +
+      Cancel (maker, before lock) + cancelled status. Service fully async/durable.
+- [x] **R6. Timelocks from order expiration** — lib/htlc-timelock.ts (30min–72h, min 2h
+      Canton, maker > taker, gap dominates skew+finality). Expiration dropdown in /swap.
+- [x] **R7. Login/signup** — /login has BOTH email-OTP AND Loop wallet; both create the
+      Canton-party identity. Provisions the warpx party on email login.
+- [x] **R8. /swap wired to the identity model** — recipient = the logged-in user's party
+      (warpx for email, Loop for Loop); EVM wallet is a subset (EVM-only header dropdown);
+      Canton party = identity (AccountControl + Log out → /login); no-party → /login gate.
 
-- [ ] **R1. Two-mode wiring (participant-managed vs Loop).**
-      Branch the claim by user type:
-      - participant-managed (party hosted on warpx): on-ledger HtlcLock.Claim, backend
-        signs (CanActAs). The proven path — make it the default.
-      - Loop-wallet (self-swap): standard TransferInstruction_Accept, backend hash gate.
-      Detect mode from how the user's party is hosted / how they signed up.
+## ⏸ PAUSED — waiting on the Loop team
 
-- [ ] **R2. Participant-managed user onboarding.**
-      Create the user's Canton party on warpx, grant the backend CanActAs over it, and
-      run **EnableCC** (one-time, so the party can hold/pay CC). Needed before any swap.
-      Hosted parties also need a little CC funded for Canton network fees.
+- [ ] **R1. Loop-wallet on-ledger claim.** A Loop user's EXTERNAL participant can't
+      EXERCISE our custom HtlcLock.Claim (TEMPLATES_NOT_FOUND — disclosure shows the
+      contract but the controller's participant needs our package to interpret the
+      choice). Asked the Loop team: can a Loop wallet exercise a custom-package choice
+      via disclosure, or must our DAR be vetted on Loop — and how does Cancore do it?
+      Until then, Loop users are on hold; **participant-managed (email) is the working,
+      fully-trustless mainline.**
 
-- [ ] **R3. Connect the solver daemon to the on-ledger path end-to-end.**
-      Daemon already exists; wire it so: user locks WBTC → daemon allocates+locks cBTC
-      (HtlcLock) → user (or backend, for participant-managed) claims cBTC → daemon reads
-      the revealed preimage → claims WBTC on EVM. Full auto, both legs.
+## 🔵 NEXT (real, not blocked)
 
-- [ ] **R4. Refund / Retake (both legs) + UI.**
-      - cBTC: after timelock, HtlcLock.Refund → Allocation_Withdraw (wire + button).
-      - EVM: retake(hashLock) via MetaMask (button) + the Etherscan fallback path.
-      - Canton-side auto-refund after timeout (Cancore parity).
-      - Cover stuck swaps (e.g. WBTC locked but cBTC claim failed).
-
-- [ ] **R5. Order lifecycle + statuses to match Cancore.**
-      open → accepted → htlc_proposal_sent → htlc_active → both_claimed / refunded /
-      cancelled. Add **Cancel** (maker, before any lock). Persist orders (Supabase)
-      instead of in-memory.
-
-- [ ] **R6. Timelock ladder from order expiration (Cancore params).**
-      Expiration dropdown 30min–72h; min 2h for Canton; maker ≥ expiration, taker shorter.
-      Derive userTimelock/solverTimelock from the chosen expiration.
-
-- [ ] **R7. Real two-party UI run on testnet/devnet.**
-      Distinct EVM wallets (user vs solver) + a participant-managed hosted user party.
-      Prove WBTC moves user→solver AND cBTC moves solver→user, end to end, in the UI.
-
-- [ ] **R8. Canton → EVM direction (reverse) in the UI.**
-      User sells cBTC, buys WBTC. Mirror of the EVM→Canton flow.
+- [ ] Real two-party UI click-through (distinct EVM wallets + hosted user party) — prove
+      WBTC user→solver AND cBTC solver→user end to end in the browser, not just scripts.
+- [ ] Canton → EVM direction (reverse) in the UI.
+- [ ] cBTC balance for the SESSION party in /swap (currently reads Loop wallet).
+- [ ] Order history / tracking view from Supabase (htlc_orders).
 
 ---
 

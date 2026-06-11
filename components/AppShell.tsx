@@ -1,11 +1,22 @@
 "use client";
 
+import { usePathname } from "next/navigation";
+
 import { TopNav } from "@/components/TopNav";
 
+// Routes that render their OWN full-screen layout (no TopNav / main wrapper).
+const BARE_ROUTES = ["/login", "/auth"];
+
 /**
- * Renders the TopNav + main content wrapper around every page.
+ * Renders the TopNav + main content wrapper around every page — EXCEPT bare
+ * routes (e.g. /login) which supply their own full-screen layout.
  */
 export function AppShell({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+  if (BARE_ROUTES.some((r) => pathname.startsWith(r))) {
+    return <>{children}</>;
+  }
+
   return (
     <>
       {/* Atmospheric gradient — two large blurred color blobs (orange top-right,
