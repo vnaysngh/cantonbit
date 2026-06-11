@@ -87,6 +87,8 @@ class HtlcService {
   async getOrder(id: string) { return this.store.get(id); }
   /** Orders the solver should act on (not terminal). */
   async activeOrders(): Promise<SwapOrder[]> { return this.store.active(); }
+  /** Order history for one user party (newest first). */
+  async historyForParty(party: string): Promise<SwapOrder[]> { return this.store.byParty(party); }
 
   async accept(id: string) {
     const o = await this.must(id);
@@ -464,6 +466,41 @@ class HtlcService {
   async refundableOrders(): Promise<SwapOrder[]> {
     const now = Math.floor(Date.now() / 1000);
     return (await this.store.byStatus("counter_locked")).filter((o) => now >= o.solverTimelock);
+  }
+
+  /** All expired-and-actionable orders, categorized for the auto-refund sweep.
+   *  - forwardCounter: evm→canton MANAGED orders whose on-ledger cBTC HtlcLock
+   *    (solver's) expired → refundCounter. (Loop orders never lock cBTC.)
+   *  - reverseMain: canton→evm orders whose on-ledger cBTC HtlcLock (USER's)
+   *    expired → refundMainCanton (backend CanActAs — fully automated).
+   *  - staleForwardMain: evm→canton orders stuck in main_locked past the EVM
+   *    timelock — nothing of OURS is locked (the user retakes their WBTC on EVM
+   *    with their own key); mark refunded so the active list drains. */
+  async expiredOrders(): Promise<{ forwardCounter: SwapOrder[]; reverseMain: SwapOrder[]; staleForwardMain: SwapOrder[] }> {
+    const now = Math.floor(Date.now() / 1000);
+    const [counterLocked, mainLocked] = await Promise.all([
+      this.store.byStatus("counter_locked"),
+      this.store.byStatus("main_locked"),
+    ]);
+    return {
+      forwardCounter: counterLocked.filter(
+        (o) => o.direction === "evm-to-canton" && o.counterMode !== "loop" && !!o.htlcCid && now >= o.solverTimelock,
+      ),
+      reverseMain: [...mainLocked, ...counterLocked].filter(
+        (o) => o.direction === "canton-to-evm" && !!o.htlcCid && now >= o.userTimelock,
+      ),
+      staleForwardMain: mainLocked.filter(
+        (o) => o.direction === "evm-to-canton" && now >= o.userTimelock,
+      ),
+    };
+  }
+
+  /** Bookkeeping: mark a dead order refunded (no on-ledger action — used when the
+   *  only locked funds are the USER's EVM-side WBTC, which they retake themselves). */
+  async markRefunded(id: string): Promise<SwapOrder> {
+    const o = await this.must(id);
+    if (o.status !== "main_locked") throw new Error(`not stale (${o.status})`);
+    o.status = "refunded"; await this.store.put(o); return o;
   }
 
   private async must(id: string): Promise<SwapOrder> {

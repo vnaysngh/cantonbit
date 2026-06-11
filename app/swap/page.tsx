@@ -582,9 +582,11 @@ export default function SwapPage() {
     if (!evm.account || !destinationParty || !SOLVER_CANTON) return;
     const fail = (message: string) => setStage({ kind: "error", message });
     try {
-      // Reverse quote is local: 1:1 minus the same 20bps bridge fee.
+      // RFQ quote from the server: live WBTC/BTC price applied directionally
+      // (cbtc ÷ P), 20bps fee, 60s TTL, de-peg breaker (503 → error message).
       const cbtcSats = parseWbtc(amount); // 8dp parse works for cBTC too
-      const wbtcUnits = (cbtcSats * 9980n) / 10000n;
+      const q = await htlcApi.quoteReverse(evm.account, cbtcSats.toString(), destinationParty);
+      const wbtcUnits = BigInt(q.wbtcAmount);
       const cbtcAmount = (Number(cbtcSats) / 1e8).toFixed(8);
       const { secret, hashLock } = generateSecret();
       const id = hashLock;

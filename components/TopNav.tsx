@@ -24,6 +24,7 @@ import { useRouter } from "next/navigation";
 //               per-user orders feed). Re-add once swap history is persisted.
 const NAV_LINKS = [
   { href: "/swap", label: "Swap" },
+  { href: "/orders", label: "Orders" },
   { href: "/how-it-works", label: "How it works" },
 ] as const;
 

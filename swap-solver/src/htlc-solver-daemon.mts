@@ -139,12 +139,27 @@ async function main() {
                 continue;
               }
               // Lock is gone → the user claimed. Find the Claimed event → preimage.
-              const logs = await pub.getContractEvents({
-                address: ESCROW, abi: HTLC_ESCROW_ABI, eventName: "Claimed",
-                args: { hashValue: o.hashLock }, fromBlock: "earliest", toBlock: "latest",
-              });
-              const ev = logs[logs.length - 1] as { args?: { preImage?: Hex } } | undefined;
-              preimage = ev?.args?.preImage;
+              // Public RPC caps eth_getLogs at 2000 blocks → scan in chunks from the
+              // counter-lock tx's block (the claim can only be after the lock).
+              let fromBlock = (await pub.getBlockNumber()) - 49_999n;
+              if (o.counterLockTx && o.counterLockTx.startsWith("0x")) {
+                try {
+                  const rcpt = await pub.getTransactionReceipt({ hash: o.counterLockTx as Hex });
+                  fromBlock = rcpt.blockNumber;
+                } catch { /* fall back to the recent window */ }
+              }
+              if (fromBlock < 0n) fromBlock = 0n;
+              const tip = await pub.getBlockNumber();
+              let found: { args?: { preImage?: Hex } } | undefined;
+              for (let from = fromBlock; from <= tip && !found; from += 1990n) {
+                const to = from + 1989n > tip ? tip : from + 1989n;
+                const logs = await pub.getContractEvents({
+                  address: ESCROW, abi: HTLC_ESCROW_ABI, eventName: "Claimed",
+                  args: { hashValue: o.hashLock }, fromBlock: from, toBlock: to,
+                });
+                if (logs.length) found = logs[logs.length - 1] as { args?: { preImage?: Hex } };
+              }
+              preimage = found?.args?.preImage;
               if (!preimage) { console.log(`[solver] ${o.id.slice(0,12)} rev: lock gone but no Claimed event found yet`); continue; }
             }
             console.log(`[solver] ${o.id.slice(0,12)} rev: preimage public → claiming cBTC on Canton…`);

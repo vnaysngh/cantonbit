@@ -55,6 +55,9 @@ async function jget(url: string) {
 
 export const htlcApi = {
   createOrder: (o: HtlcOrderInput) => jpost("/api/htlc", o),
+  // RFQ quote (both directions, live WBTC/BTC price, 60s TTL, de-peg breaker).
+  quoteReverse: (user: string, cbtcUnits: string, cantonParty: string): Promise<{ wbtcAmount: string; wbtcPriceRaw: string; expires: number }> =>
+    jpost("/api/htlc/quote", { user, cbtcAmount: cbtcUnits, cantonParty, direction: "canton-to-evm" }),
   getOrder: (id: string) => jget(`/api/htlc/${id}`),
   accept: (id: string) => jpost(`/api/htlc/${id}/accept`),
   recordMainLock: (id: string, mainLockTx: string) => jpost(`/api/htlc/${id}/main-lock`, { mainLockTx }),

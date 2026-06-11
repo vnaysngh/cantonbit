@@ -85,6 +85,21 @@ EXACTLY this — transfer-to-venue, venue runs the HTLC, custody-during-swap. We
       Reverse refunds are manual in v1 (UI button + refund-main route); auto-refund
       sweep doesn't cover reverse yet.
 - [ ] Order history / tracking view from Supabase (htlc_orders).
+- [x] **Auto-refund BOTH directions** — /api/htlc/auto-refund (daemon calls every 60s)
+      now sweeps: forward solver-cBTC refunds, REVERSE user-cBTC refunds (refund-main,
+      CanActAs — fully automated), and stale forward main_locked bookkeeping.
+- [x] **Order history** — /orders page (nav link added) + GET /api/htlc/history
+      (email session → warpx party; Loop → ?party=). Status chips + explorer links.
+- [x] **RFQ quote engine, both directions** — lib/htlc-quote.ts + quote route: LIVE
+      WBTC/BTC price (CoinGecko, 30s cache, ≤10min stale, else refuse), applied
+      directionally (×P forward, ÷P reverse — cBTC is 1:1 BTC, WBTC is NOT), 20bps fee
+      on output, 60s quote TTL, 2% de-peg breaker → 503. Reverse UI now server-quotes.
+- [x] **Hygiene sweep** (swap-solver/src/hygiene-sweep.mts) — chunked Locked-event scan
+      (RPC 2000-block cap; also fixed the daemon watchtower the same way), retakes
+      expired solver-sent locks, then auto-refund + cleanup-allocations via API.
+      Ran 2026-06-12: recovered 0.00611 WBTC (8 old probe locks). PENDING: re-run
+      after ~2h for 0x0c9def/0x7c91 (timelocks not yet expired) + the API steps
+      (dev server was down mid-run).
 - [ ] Cleanup: delete the DEAD legacy Loop on-ledger claim path (app/api/htlc/[id]/
       claim-prepare route, prepareClaim in service + client, prepareClaimCommand usage
       for Loop) — superseded by claim-counter; UI no longer references it.

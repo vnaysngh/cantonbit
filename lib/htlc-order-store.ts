@@ -74,6 +74,8 @@ export interface SwapStore {
   put(o: SwapOrder): Promise<void>;
   byStatus(s: SwapStatus): Promise<SwapOrder[]>;
   active(): Promise<SwapOrder[]>;
+  /** Order history for one user party, newest first. */
+  byParty(party: string, limit?: number): Promise<SwapOrder[]>;
 }
 
 export class SupabaseSwapStore implements SwapStore {
@@ -92,6 +94,15 @@ export class SupabaseSwapStore implements SwapStore {
     const sb = await createSupabaseServiceClient();
     const { data, error } = await sb.from(TABLE).select("*").eq("status", s);
     if (error) throw new Error(`htlc_orders byStatus: ${error.message}`);
+    return (data ?? []).map(rowToOrder);
+  }
+  async byParty(party: string, limit = 50): Promise<SwapOrder[]> {
+    const sb = await createSupabaseServiceClient();
+    const { data, error } = await sb.from(TABLE).select("*")
+      .eq("user_canton_party", party)
+      .order("created_at", { ascending: false })
+      .limit(limit);
+    if (error) throw new Error(`htlc_orders byParty: ${error.message}`);
     return (data ?? []).map(rowToOrder);
   }
   async active(): Promise<SwapOrder[]> {
