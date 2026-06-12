@@ -148,13 +148,23 @@ function rawErrorMessage(e: unknown): string {
   // viem/provider errors expose a concise `shortMessage`; prefer it (CoW does).
   const short = (e as { shortMessage?: string }).shortMessage;
   if (typeof short === "string" && short) return short;
-  if (e instanceof Error) return e.message;
+  if (e instanceof Error) {
+    if (e.message && e.message !== "[object Object]") return e.message;
+    const cause = (e as { cause?: unknown }).cause;
+    if (cause) return rawErrorMessage(cause);
+  }
   // Raw provider/RPC errors are plain objects — dig out a message rather than
   // String(e) (which renders "[object Object]").
   const o = e as { message?: string; reason?: string; data?: { message?: string }; error?: { message?: string } };
   const nested = o?.message || o?.reason || o?.data?.message || o?.error?.message;
-  if (typeof nested === "string" && nested) return nested;
-  try { return JSON.stringify(e); } catch { return String(e); }
+  if (typeof nested === "string" && nested && nested !== "[object Object]") return nested;
+  try {
+    const json = JSON.stringify(e);
+    return json && json !== "{}" ? json : "";
+  } catch {
+    const fallback = String(e);
+    return fallback === "[object Object]" ? "" : fallback;
+  }
 }
 
 /** True if the error is a user-rejected wallet prompt (CoW: isRejectRequestProviderError). */

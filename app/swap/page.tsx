@@ -587,6 +587,7 @@ export default function SwapPage() {
     if (!evm.account || !destinationParty || !SOLVER_CANTON) return;
     const fail = (message: string) => setStage({ kind: "error", message });
     try {
+      setStage({ kind: "quoting" });
       // RFQ quote from the server: live WBTC/BTC price applied directionally
       // (cbtc ÷ P), 20bps fee, 60s TTL, de-peg breaker (503 → error message).
       const cbtcSats = parseWbtc(amount); // 8dp parse works for cBTC too
@@ -772,6 +773,8 @@ export default function SwapPage() {
     stage.kind === "idle" ||
     stage.kind === "quoting" ||
     stage.kind === "error" ||
+    stage.kind === "htlc-locking" ||
+    stage.kind === "rev-locking" ||
     reviewing;
   // "You receive" estimate BEFORE quoting — an APPROXIMATION (shown with "≈").
   // It applies the fee but NOT the live WBTC/BTC price (the browser doesn't have
@@ -817,9 +820,31 @@ export default function SwapPage() {
     label: string;
     onClick: () => void;
     disabled?: boolean;
+    busy?: boolean;
   } | null = null;
   if (showForm) {
-    if (!evm.account) {
+    if (stage.kind === "htlc-locking") {
+      primary = {
+        label: "Waiting for solver…",
+        onClick: () => {},
+        disabled: true,
+        busy: true,
+      };
+    } else if (stage.kind === "rev-locking") {
+      primary = {
+        label: "Locking cBTC on-ledger…",
+        onClick: () => {},
+        disabled: true,
+        busy: true,
+      };
+    } else if (stage.kind === "quoting") {
+      primary = {
+        label: "Getting quote…",
+        onClick: () => {},
+        disabled: true,
+        busy: true,
+      };
+    } else if (!evm.account) {
       primary = {
         label: evm.available ? "Connect EVM wallet" : "No EVM wallet found",
         onClick: evm.connect,
@@ -858,9 +883,9 @@ export default function SwapPage() {
       // Session ready + amount valid. Review checks auto-accept (no signature)
       // then quotes; if auto-accept is OFF it opens the enable popup.
       primary = {
-        label: stage.kind === "quoting" ? "Getting quote…" : "Review swap",
+        label: "Review swap",
         onClick: handleQuote,
-        disabled: stage.kind === "quoting" || reviewing
+        disabled: reviewing
       };
     }
   }
@@ -975,9 +1000,15 @@ export default function SwapPage() {
             {primary && (
               <button
                 onClick={primary.onClick}
-                disabled={primary.disabled}
-                className="mt-1 w-full rounded-2xl bg-primary py-4 text-base font-semibold text-on-primary transition-all hover:opacity-90 active:scale-[0.99] disabled:opacity-50"
+                disabled={primary.disabled || primary.busy}
+                className={cn(
+                  "mt-1 flex w-full items-center justify-center gap-2 rounded-2xl bg-primary py-4 text-base font-semibold text-on-primary transition-all hover:opacity-90 active:scale-[0.99]",
+                  primary.busy ? "disabled:opacity-90" : "disabled:opacity-50",
+                )}
               >
+                {primary.busy && (
+                  <span className="inline-block size-4 animate-spin rounded-full border-2 border-on-primary/40 border-t-on-primary" />
+                )}
                 {primary.label}
               </button>
             )}
@@ -992,27 +1023,6 @@ export default function SwapPage() {
               onReset={reset}
               onRefund={handleRefundOrder}
             />
-          </div>
-        )}
-
-        {stage.kind === "htlc-locking" && (
-          <div className="px-1 pb-1 pt-4 text-center">
-            <div className="mx-auto mb-3 h-10 w-10 animate-spin rounded-full border-2 border-foreground/20 border-t-foreground/70" />
-            <h3 className="text-lg font-semibold">WBTC locked — waiting for the solver</h3>
-            <p className="mt-1 text-sm text-foreground/60">
-              Your WBTC is locked on-chain. The solver is verifying it and locking the cBTC
-              counter. You’ll claim your cBTC next.
-            </p>
-            <p className="mt-2 break-all text-xs text-foreground/40">lock tx {stage.lockTx.slice(0, 18)}…</p>
-            {/* ESCAPE HATCH: if the solver never locks the counter, the user can
-                always retake their WBTC after the EVM timelock (the contract enforces
-                TooEarly before then). Surfaced here so a stuck swap is self-serve. */}
-            <button
-              onClick={() => handleRetake(stage.swapId)}
-              className="mt-4 w-full rounded-2xl border border-foreground/15 px-4 py-2.5 text-sm hover:bg-foreground/5"
-            >
-              Solver not responding? Retake my WBTC (after timelock)
-            </button>
           </div>
         )}
 
@@ -1082,17 +1092,6 @@ export default function SwapPage() {
         )}
 
         {/* ===== REVERSE (canton-to-evm) stages ===== */}
-        {stage.kind === "rev-locking" && (
-          <div className="px-1 pb-1 pt-4 text-center">
-            <div className="mx-auto mb-3 h-10 w-10 animate-spin rounded-full border-2 border-foreground/20 border-t-foreground/70" />
-            <h3 className="text-lg font-semibold">Locking your cBTC on-ledger…</h3>
-            <p className="mt-1 text-sm text-foreground/60">
-              Your cBTC is being locked in the on-ledger HTLC (hash-gated, refundable
-              after the timelock). The solver then locks your WBTC on {SWAP_CHAIN.name}.
-            </p>
-          </div>
-        )}
-
         {(stage.kind === "rev-claimable" || stage.kind === "rev-claiming") && (
           <div className="px-1 pb-1 pt-4 text-center">
             <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/15 text-2xl">🔓</div>

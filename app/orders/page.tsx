@@ -15,6 +15,7 @@ import { useWallet } from "@/hooks/useWallet";
 import { useEvmWallet } from "@/hooks/useEvmWallet";
 import { claimSwap, evmRetake, htlcApi } from "@/lib/htlc-client";
 import { recallSecret, forgetSecret } from "@/lib/secret-vault";
+import { getSwapErrorMessage } from "@/lib/swap-api";
 import { SWAP_CHAIN } from "@/lib/swap-evm";
 import { cn } from "@/lib/utils";
 
@@ -71,6 +72,7 @@ function recoveryAction(o: HistoryOrder): "retake-wbtc" | "refund-cbtc" | null {
 
 const STATUS_STYLE: Record<string, string> = {
   main_claimed: "bg-green-500/12 text-green-600 ring-green-500/20",
+  both_claimed: "bg-green-500/12 text-green-600 ring-green-500/20",
   counter_claimed: "bg-amber-500/12 text-amber-600 ring-amber-500/20",
   counter_locked: "bg-blue-500/12 text-blue-600 ring-blue-500/20",
   main_locked: "bg-blue-500/12 text-blue-600 ring-blue-500/20",
@@ -83,7 +85,7 @@ const STATUS_STYLE: Record<string, string> = {
 const STATUS_LABEL: Record<string, string> = {
   open: "Open", accepted: "Pending", main_locked: "In progress",
   counter_locked: "Claimable", counter_claimed: "Settling",
-  main_claimed: "Completed", refunded: "Refunded",
+  main_claimed: "Completed", both_claimed: "Completed", refunded: "Refunded",
   cancelled: "Cancelled", failed: "Failed",
 };
 
@@ -135,6 +137,7 @@ export default function OrdersPage() {
   const [orders, setOrders] = useState<HistoryOrder[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [optimisticStatus, setOptimisticStatus] = useState<Record<string, string>>({});
   const [reload, setReload] = useState(0);
   const [openId, setOpenId] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
@@ -148,8 +151,26 @@ export default function OrdersPage() {
     const qs = wallet.partyId ? `?party=${encodeURIComponent(wallet.partyId)}` : "";
     fetch(`/api/htlc/history${qs}`)
       .then((r) => r.json())
-      .then((d) => { if (alive) d.error ? setError(d.error) : setOrders(d.orders ?? []); })
-      .catch((e) => { if (alive) setError(String(e)); });
+      .then((d) => {
+        if (!alive) return;
+        if (d.error) {
+          setError(getSwapErrorMessage(d.error));
+          return;
+        }
+        const nextOrders = (d.orders ?? []) as HistoryOrder[];
+        setOrders(nextOrders);
+        setOptimisticStatus((prev) => {
+          const next = { ...prev };
+          for (const order of nextOrders) {
+            if (!next[order.id]) continue;
+            if (["main_claimed", "both_claimed", "refunded", "cancelled", "failed"].includes(order.status)) {
+              delete next[order.id];
+            }
+          }
+          return next;
+        });
+      })
+      .catch((e) => { if (alive) setError(getSwapErrorMessage(e)); });
     return () => { alive = false; };
   }, [wallet.isLoading, wallet.partyId, reload]);
 
@@ -171,10 +192,11 @@ export default function OrdersPage() {
       } else {
         await htlcApi.refundMain(o.id);
       }
+      setOptimisticStatus((prev) => ({ ...prev, [o.id]: "refunded" }));
       setReload((n) => n + 1);
       setOpenId(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(getSwapErrorMessage(e));
     } finally {
       setBusy(null);
     }
@@ -195,10 +217,11 @@ export default function OrdersPage() {
         loop: wallet.provider as unknown as { party_id?: string; submitAndWaitForTransaction: (p: unknown, o?: unknown) => Promise<unknown> } | null,
       });
       forgetSecret(o.id);
+      setOptimisticStatus((prev) => ({ ...prev, [o.id]: "main_claimed" }));
       setReload((n) => n + 1);
       setOpenId(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(getSwapErrorMessage(e));
     } finally {
       setBusy(null);
     }
@@ -211,7 +234,8 @@ export default function OrdersPage() {
   }, []);
 
   const explorer = SWAP_CHAIN.blockExplorerUrls?.[0] ?? "";
-  const active = openId && orders ? orders.find((x) => x.id === openId) ?? null : null;
+  const activeBase = openId && orders ? orders.find((x) => x.id === openId) ?? null : null;
+  const active = activeBase && optimisticStatus[activeBase.id] ? { ...activeBase, status: optimisticStatus[activeBase.id] } : activeBase;
 
   return (
     <div className="mx-auto w-full max-w-[920px] px-4 py-6 sm:py-10">
@@ -255,15 +279,16 @@ export default function OrdersPage() {
             </thead>
             <tbody>
               {orders.map((o) => {
-                const reverse = o.direction === "canton-to-evm";
-                const pay = reverse ? `${fmtCbtc(o.cbtcAmount)} CBTC` : `${fmtWbtc(o.wbtcAmount)} WBTC`;
-                const recv = reverse ? `${fmtWbtc(o.wbtcAmount)} WBTC` : `${fmtCbtc(o.cbtcAmount)} CBTC`;
-                const action = recoveryAction(o);
-                const claimable = canClaim(o);
+                const displayOrder = optimisticStatus[o.id] ? { ...o, status: optimisticStatus[o.id] } : o;
+                const reverse = displayOrder.direction === "canton-to-evm";
+                const pay = reverse ? `${fmtCbtc(displayOrder.cbtcAmount)} CBTC` : `${fmtWbtc(displayOrder.wbtcAmount)} WBTC`;
+                const recv = reverse ? `${fmtWbtc(displayOrder.wbtcAmount)} WBTC` : `${fmtCbtc(displayOrder.cbtcAmount)} CBTC`;
+                const action = recoveryAction(displayOrder);
+                const claimable = canClaim(displayOrder);
                 return (
                   <tr
-                    key={o.id}
-                    onClick={() => setOpenId(o.id)}
+                    key={displayOrder.id}
+                    onClick={() => setOpenId(displayOrder.id)}
                     className="cursor-pointer border-b border-foreground/5 transition-colors last:border-0 hover:bg-foreground/[0.025]"
                   >
                     <td className="px-4 py-3.5">
@@ -275,36 +300,36 @@ export default function OrdersPage() {
                       {/* mobile: route + date inline under the amounts */}
                       <div className="mt-1 flex items-center gap-2 sm:hidden">
                         <Route reverse={reverse} />
-                        <span className="text-xs text-foreground/40">· {fmtDateShort(o.createdAt)}</span>
+                        <span className="text-xs text-foreground/40">· {fmtDateShort(displayOrder.createdAt)}</span>
                       </div>
                     </td>
                     <td className="hidden px-4 py-3.5 sm:table-cell"><Route reverse={reverse} /></td>
                     <td className="hidden px-4 py-3.5 text-xs text-foreground/60 md:table-cell">
-                      {o.counterMode === "loop" ? "Loop wallet" : "Account"}
+                      {displayOrder.counterMode === "loop" ? "Loop wallet" : "Account"}
                     </td>
                     <td className="hidden whitespace-nowrap px-4 py-3.5 text-xs text-foreground/55 md:table-cell">
-                      {fmtDateShort(o.createdAt)}
+                      {fmtDateShort(displayOrder.createdAt)}
                     </td>
                     <td className="px-4 py-3.5">
                       <div className="flex items-center justify-end gap-2">
                         {claimable ? (
                           <button
                             onClick={(e) => { e.stopPropagation(); doClaim(o); }}
-                            disabled={busy === o.id}
+                            disabled={busy === displayOrder.id}
                             className="rounded-lg bg-[#b04a2a] px-3 py-1 text-xs font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
                           >
-                            {busy === o.id ? "…" : "Claim"}
+                            {busy === displayOrder.id ? "Claiming…" : "Claim"}
                           </button>
                         ) : action && (
                           <button
-                            onClick={(e) => { e.stopPropagation(); doRecover(o, action); }}
-                            disabled={busy === o.id}
+                            onClick={(e) => { e.stopPropagation(); doRecover(displayOrder, action); }}
+                            disabled={busy === displayOrder.id}
                             className="rounded-lg border border-foreground/15 px-2.5 py-1 text-xs font-medium text-foreground/80 transition-colors hover:bg-foreground/5 disabled:opacity-50"
                           >
-                            {busy === o.id ? "…" : action === "retake-wbtc" ? "Retake" : "Refund"}
+                            {busy === displayOrder.id ? "Submitting…" : action === "retake-wbtc" ? "Retake" : "Refund"}
                           </button>
                         )}
-                        <StatusPill status={o.status} />
+                        <StatusPill status={displayOrder.status} />
                       </div>
                     </td>
                   </tr>
