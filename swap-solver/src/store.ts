@@ -10,14 +10,14 @@
  *
  * The status machine (and the dangerous state to monitor):
  *   seen        — Open event observed, WBTC locked on origin chain
- *   delivering  — cBTC delivery to Canton in flight
- *   delivered   — cBTC delivery final on Canton (fill timestamp recorded)
+ *   delivering  — CBTC delivery to Canton in flight
+ *   delivered   — CBTC delivery final on Canton (fill timestamp recorded)
  *   attested    — fill attested on our oracle
  *   finalised   — WBTC released to the solver (terminal, success)
  *   refunded    — user refunded after expiry (terminal)
  *   failed      — unrecoverable; needs manual attention
  *
- * `delivered` but not `finalised` is the DANGEROUS state (cBTC out, WBTC not yet
+ * `delivered` but not `finalised` is the DANGEROUS state (CBTC out, WBTC not yet
  * claimed) — the monitor watches it.
  *
  * Two implementations behind one interface:
@@ -54,25 +54,25 @@ export interface OrderRecord {
    * verified to match the committed hash before delivery. Undefined until matched.
    */
   cantonParty?: string;
-  /** Canton ledger record-time of the cBTC delivery (unix seconds), once known. */
+  /** Canton ledger record-time of the CBTC delivery (unix seconds), once known. */
   fillTimestamp?: number;
   /** Canton delivery reference (e.g. update id), once known. */
   cantonDeliveryRef?: string;
   /**
    * The Allocation contract id, when delivering via the Splice Allocation
-   * primitive (USE_ALLOCATION mode). Recorded the moment the cBTC is locked, so a
+   * primitive (USE_ALLOCATION mode). Recorded the moment the CBTC is locked, so a
    * crash/timeout before execute can `withdrawAllocation` to reclaim the float.
    */
   allocationCid?: string;
   /**
-   * True once the user has ACCEPTED the cBTC on Canton — even if the accept was
+   * True once the user has ACCEPTED the CBTC on Canton — even if the accept was
    * too late to finalise on-chain. SECURITY (HIGH-1): a refund must NEVER be
-   * issued for an order with this set, or the user would keep both the cBTC and
+   * issued for an order with this set, or the user would keep both the CBTC and
    * the refunded WBTC.
    */
   cbtcAccepted?: boolean;
   /**
-   * The solver-float holding cids spent on the cBTC delivery offer. Stored so a
+   * The solver-float holding cids spent on the CBTC delivery offer. Stored so a
    * `delivering` order can be tracked for ACCEPTANCE from the SOLVER's own ACS.
    */
   inputHoldingCids?: string[];
@@ -119,13 +119,20 @@ export interface OrderStore {
   get(orderId: Hex): Promise<OrderRecord | undefined>;
   byStatus(status: OrderStatus): Promise<OrderRecord[]>;
   byUser(user: string, statuses: OrderStatus[]): Promise<OrderRecord[]>;
-  insertSeen(orderId: Hex, openBlock: number, order: SerializedOrder): Promise<OrderRecord>;
-  update(orderId: Hex, patch: Partial<Omit<OrderRecord, "orderId" | "createdAt">>): Promise<OrderRecord>;
+  insertSeen(
+    orderId: Hex,
+    openBlock: number,
+    order: SerializedOrder
+  ): Promise<OrderRecord>;
+  update(
+    orderId: Hex,
+    patch: Partial<Omit<OrderRecord, "orderId" | "createdAt">>
+  ): Promise<OrderRecord>;
   claimStatus(
     orderId: Hex,
     expected: OrderStatus,
     next: OrderStatus,
-    patch?: Partial<Omit<OrderRecord, "orderId" | "createdAt" | "status">>,
+    patch?: Partial<Omit<OrderRecord, "orderId" | "createdAt" | "status">>
   ): Promise<boolean>;
   rememberParty(orderId: Hex, cantonParty: string): Promise<void>;
   recallParty(orderId: Hex): Promise<string | undefined>;
@@ -160,7 +167,8 @@ function rowToRecord(r: SolverOrderRow): OrderRecord {
     openBlock: Number(r.open_block),
     order: r.order_json,
     cantonParty: r.canton_party ?? undefined,
-    fillTimestamp: r.fill_timestamp != null ? Number(r.fill_timestamp) : undefined,
+    fillTimestamp:
+      r.fill_timestamp != null ? Number(r.fill_timestamp) : undefined,
     cantonDeliveryRef: r.canton_delivery_ref ?? undefined,
     allocationCid: r.allocation_cid ?? undefined,
     cbtcAccepted: r.cbtc_accepted ?? undefined,
@@ -169,24 +177,29 @@ function rowToRecord(r: SolverOrderRow): OrderRecord {
     finaliseTxHash: (r.finalise_tx_hash as Hex | null) ?? undefined,
     note: r.note ?? undefined,
     createdAt: r.created_at,
-    updatedAt: r.updated_at,
+    updatedAt: r.updated_at
   };
 }
 
 /** Map a partial OrderRecord patch to snake_case columns (only set keys). */
-function patchToColumns(patch: Partial<Omit<OrderRecord, "orderId" | "createdAt">>): Record<string, unknown> {
+function patchToColumns(
+  patch: Partial<Omit<OrderRecord, "orderId" | "createdAt">>
+): Record<string, unknown> {
   const c: Record<string, unknown> = {};
   if (patch.status !== undefined) c.status = patch.status;
   if (patch.openBlock !== undefined) c.open_block = patch.openBlock;
   if (patch.order !== undefined) c.order_json = patch.order;
   if (patch.cantonParty !== undefined) c.canton_party = patch.cantonParty;
   if (patch.fillTimestamp !== undefined) c.fill_timestamp = patch.fillTimestamp;
-  if (patch.cantonDeliveryRef !== undefined) c.canton_delivery_ref = patch.cantonDeliveryRef;
+  if (patch.cantonDeliveryRef !== undefined)
+    c.canton_delivery_ref = patch.cantonDeliveryRef;
   if (patch.allocationCid !== undefined) c.allocation_cid = patch.allocationCid;
   if (patch.cbtcAccepted !== undefined) c.cbtc_accepted = patch.cbtcAccepted;
-  if (patch.inputHoldingCids !== undefined) c.input_holding_cids = patch.inputHoldingCids;
+  if (patch.inputHoldingCids !== undefined)
+    c.input_holding_cids = patch.inputHoldingCids;
   if (patch.attestTxHash !== undefined) c.attest_tx_hash = patch.attestTxHash;
-  if (patch.finaliseTxHash !== undefined) c.finalise_tx_hash = patch.finaliseTxHash;
+  if (patch.finaliseTxHash !== undefined)
+    c.finalise_tx_hash = patch.finaliseTxHash;
   if (patch.note !== undefined) c.note = patch.note;
   c.updated_at = new Date().toISOString();
   return c;
@@ -206,11 +219,12 @@ export class SupabaseOrderStore implements OrderStore {
 
   /** Build from env (NEXT_PUBLIC_SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY). */
   static fromEnv(): SupabaseOrderStore {
-    const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL;
+    const url =
+      process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL;
     const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
     if (!url || !key) {
       throw new Error(
-        "Supabase store needs NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY",
+        "Supabase store needs NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY"
       );
     }
     const db = createClient(url, key, { auth: { persistSession: false } });
@@ -281,21 +295,34 @@ export class SupabaseOrderStore implements OrderStore {
       .filter((o) => o.order.user.toLowerCase() === u);
   }
 
-  async insertSeen(orderId: Hex, openBlock: number, order: SerializedOrder): Promise<OrderRecord> {
+  async insertSeen(
+    orderId: Hex,
+    openBlock: number,
+    order: SerializedOrder
+  ): Promise<OrderRecord> {
     // First-write-wins: insert; on conflict do nothing, then read back the row
     // (existing or just-inserted). Idempotent — never clobbers enrichment.
     const { error } = await this.db
       .from("solver_orders")
-      .insert({ order_id: orderId, status: "seen", open_block: openBlock, order_json: order })
+      .insert({
+        order_id: orderId,
+        status: "seen",
+        open_block: openBlock,
+        order_json: order
+      })
       .select("order_id");
     // 23505 = unique_violation (already exists) → fine, fall through to read-back.
     if (error && error.code !== "23505") throw error;
     const rec = await this.get(orderId);
-    if (!rec) throw new Error(`insertSeen: order ${orderId} not found after upsert`);
+    if (!rec)
+      throw new Error(`insertSeen: order ${orderId} not found after upsert`);
     return rec;
   }
 
-  async update(orderId: Hex, patch: Partial<Omit<OrderRecord, "orderId" | "createdAt">>): Promise<OrderRecord> {
+  async update(
+    orderId: Hex,
+    patch: Partial<Omit<OrderRecord, "orderId" | "createdAt">>
+  ): Promise<OrderRecord> {
     const { data, error } = await this.db
       .from("solver_orders")
       .update(patchToColumns(patch))
@@ -311,7 +338,7 @@ export class SupabaseOrderStore implements OrderStore {
     orderId: Hex,
     expected: OrderStatus,
     next: OrderStatus,
-    patch: Partial<Omit<OrderRecord, "orderId" | "createdAt" | "status">> = {},
+    patch: Partial<Omit<OrderRecord, "orderId" | "createdAt" | "status">> = {}
   ): Promise<boolean> {
     // Atomic CAS via the claim_solver_order RPC: a single conditional UPDATE that
     // returns the id iff status was `expected`. Two callers can't both win.
@@ -319,7 +346,7 @@ export class SupabaseOrderStore implements OrderStore {
       p_order_id: orderId,
       p_expected: expected,
       p_next: next,
-      p_note: patch.note ?? null,
+      p_note: patch.note ?? null
     });
     if (error) throw error;
     const won = data != null && data !== "";
@@ -340,7 +367,10 @@ export class SupabaseOrderStore implements OrderStore {
     // the write-ahead sequence sets it). Idempotent.
     const { error } = await this.db
       .from("solver_orders")
-      .update({ canton_party: cantonParty, updated_at: new Date().toISOString() })
+      .update({
+        canton_party: cantonParty,
+        updated_at: new Date().toISOString()
+      })
       .eq("order_id", orderId)
       .is("canton_party", null); // only set if not already set — avoid churn/clobber
     if (error) throw error;
@@ -386,7 +416,9 @@ export class InMemoryOrderStore implements OrderStore {
     return r ? { ...r } : undefined;
   }
   async byStatus(status: OrderStatus): Promise<OrderRecord[]> {
-    return [...this.orders.values()].filter((o) => o.status === status).map((o) => ({ ...o }));
+    return [...this.orders.values()]
+      .filter((o) => o.status === status)
+      .map((o) => ({ ...o }));
   }
   async byUser(user: string, statuses: OrderStatus[]): Promise<OrderRecord[]> {
     const u = user.toLowerCase();
@@ -395,15 +427,29 @@ export class InMemoryOrderStore implements OrderStore {
       .filter((o) => set.has(o.status) && o.order.user.toLowerCase() === u)
       .map((o) => ({ ...o }));
   }
-  async insertSeen(orderId: Hex, openBlock: number, order: SerializedOrder): Promise<OrderRecord> {
+  async insertSeen(
+    orderId: Hex,
+    openBlock: number,
+    order: SerializedOrder
+  ): Promise<OrderRecord> {
     const existing = this.orders.get(orderId);
     if (existing) return { ...existing }; // first-write-wins
     const now = new Date().toISOString();
-    const rec: OrderRecord = { orderId, status: "seen", openBlock, order, createdAt: now, updatedAt: now };
+    const rec: OrderRecord = {
+      orderId,
+      status: "seen",
+      openBlock,
+      order,
+      createdAt: now,
+      updatedAt: now
+    };
     this.orders.set(orderId, rec);
     return { ...rec };
   }
-  async update(orderId: Hex, patch: Partial<Omit<OrderRecord, "orderId" | "createdAt">>): Promise<OrderRecord> {
+  async update(
+    orderId: Hex,
+    patch: Partial<Omit<OrderRecord, "orderId" | "createdAt">>
+  ): Promise<OrderRecord> {
     const rec = this.orders.get(orderId);
     if (!rec) throw new Error(`order ${orderId} not found`);
     Object.assign(rec, patch, { updatedAt: new Date().toISOString() });
@@ -413,11 +459,14 @@ export class InMemoryOrderStore implements OrderStore {
     orderId: Hex,
     expected: OrderStatus,
     next: OrderStatus,
-    patch: Partial<Omit<OrderRecord, "orderId" | "createdAt" | "status">> = {},
+    patch: Partial<Omit<OrderRecord, "orderId" | "createdAt" | "status">> = {}
   ): Promise<boolean> {
     const rec = this.orders.get(orderId);
     if (!rec || rec.status !== expected) return false;
-    Object.assign(rec, patch, { status: next, updatedAt: new Date().toISOString() });
+    Object.assign(rec, patch, {
+      status: next,
+      updatedAt: new Date().toISOString()
+    });
     return true;
   }
   async rememberParty(orderId: Hex, cantonParty: string): Promise<void> {

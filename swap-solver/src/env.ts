@@ -6,7 +6,7 @@
  *
  * SECURITY NOTES
  *  - The agent EVM key can attest a fill → release the ENTIRE escrow. It is
- *    treasury-grade. The Canton client secret can act on the cBTC float. Treat
+ *    treasury-grade. The Canton client secret can act on the CBTC float. Treat
  *    both like a hot treasury wallet: dedicated signer, server-only, never logged.
  *  - This module NEVER logs a secret. `describeEnv()` returns a masked summary.
  *  - NEXT_PUBLIC_* is rejected for any secret name — that prefix would bundle a
@@ -63,10 +63,13 @@ export interface SolverEnv {
 function req(name: string): string {
   // Reject NEXT_PUBLIC_* secret leakage vector outright.
   if (name.startsWith("NEXT_PUBLIC_")) {
-    throw new Error(`Refusing to read a NEXT_PUBLIC_ variable for a secret: ${name}`);
+    throw new Error(
+      `Refusing to read a NEXT_PUBLIC_ variable for a secret: ${name}`
+    );
   }
   const v = process.env[name];
-  if (v == null || v === "") throw new Error(`Missing required env var: ${name}`);
+  if (v == null || v === "")
+    throw new Error(`Missing required env var: ${name}`);
   return v;
 }
 
@@ -82,11 +85,13 @@ function opt(name: string, fallback: string): string {
 export function loadEnv(): SolverEnv {
   const network = opt("SWAP_NETWORK", "testnet") as NetworkName;
   if (!["devnet", "testnet", "mainnet"].includes(network)) {
-    throw new Error(`SWAP_NETWORK must be devnet|testnet|mainnet, got '${network}'`);
+    throw new Error(
+      `SWAP_NETWORK must be devnet|testnet|mainnet, got '${network}'`
+    );
   }
   if (network === "mainnet" && process.env.ALLOW_MAINNET !== "true") {
     throw new Error(
-      "Refusing to start on mainnet. Set ALLOW_MAINNET=true explicitly to run against real funds.",
+      "Refusing to start on mainnet. Set ALLOW_MAINNET=true explicitly to run against real funds."
     );
   }
 
@@ -95,18 +100,26 @@ export function loadEnv(): SolverEnv {
   // name). Tolerate a missing 0x prefix (MetaMask exports a bare 64-hex key).
   const rawKeyValue = process.env.AGENT_PRIVATE_KEY ?? process.env.PRIVATE_KEY;
   if (!rawKeyValue) {
-    throw new Error("Missing required env var: AGENT_PRIVATE_KEY (or PRIVATE_KEY)");
+    throw new Error(
+      "Missing required env var: AGENT_PRIVATE_KEY (or PRIVATE_KEY)"
+    );
   }
-  const normalizedKey = (rawKeyValue.startsWith("0x") ? rawKeyValue : `0x${rawKeyValue}`) as Hex;
+  const normalizedKey = (
+    rawKeyValue.startsWith("0x") ? rawKeyValue : `0x${rawKeyValue}`
+  ) as Hex;
   if (!isHex(normalizedKey) || normalizedKey.length !== 66) {
-    throw new Error("AGENT_PRIVATE_KEY/PRIVATE_KEY must be a 32-byte hex string (64 hex chars, 0x optional)");
+    throw new Error(
+      "AGENT_PRIVATE_KEY/PRIVATE_KEY must be a 32-byte hex string (64 hex chars, 0x optional)"
+    );
   }
   const agentAccount = privateKeyToAccount(normalizedKey);
 
   // Payout (treasury) address for collected WBTC. Optional; defaults to the
   // agent. Validated + checksummed so a typo can't silently send funds astray.
   const rawPayout = process.env.PAYOUT_ADDRESS;
-  const payoutAddress = rawPayout ? getAddress(rawPayout) : agentAccount.address;
+  const payoutAddress = rawPayout
+    ? getAddress(rawPayout)
+    : agentAccount.address;
 
   return {
     network,
@@ -121,7 +134,10 @@ export function loadEnv(): SolverEnv {
       ledgerHost: req("CANTON_LEDGER_HOST"),
       registryUrl: req("CANTON_REGISTRY_URL"),
       decentralizedPartyId: req("CANTON_ADMIN_PARTY"),
-      instrumentId: { admin: req("CANTON_ADMIN_PARTY"), id: opt("CANTON_INSTRUMENT_ID", "CBTC") },
+      instrumentId: {
+        admin: req("CANTON_ADMIN_PARTY"),
+        id: opt("CANTON_INSTRUMENT_ID", "CBTC")
+      },
       solverParty: req("SOLVER_CANTON_PARTY"),
       auth: {
         tokenUrl: req("KEYCLOAK_TOKEN_URL"),
@@ -133,12 +149,12 @@ export function loadEnv(): SolverEnv {
           network === "devnet" && process.env.KEYCLOAK_CLIENT_SECRET_DEVNET
             ? process.env.KEYCLOAK_CLIENT_SECRET_DEVNET
             : req("KEYCLOAK_CLIENT_SECRET"),
-        scope: opt("KEYCLOAK_SCOPE", "daml_ledger_api"),
-      },
+        scope: opt("KEYCLOAK_SCOPE", "daml_ledger_api")
+      }
     },
 
     startBlock: BigInt(opt("ESCROW_START_BLOCK", "0")),
-    pollIntervalMs: Number(opt("POLL_INTERVAL_MS", "15000")),
+    pollIntervalMs: Number(opt("POLL_INTERVAL_MS", "15000"))
   };
 }
 
@@ -153,13 +169,15 @@ export function describeEnv(env: SolverEnv): Record<string, string> {
     agentAddress: env.agentAccount.address,
     agentKey: "***redacted***",
     payoutAddress: env.payoutAddress,
-    payoutSeparateFromAgent: String(env.payoutAddress.toLowerCase() !== env.agentAccount.address.toLowerCase()),
+    payoutSeparateFromAgent: String(
+      env.payoutAddress.toLowerCase() !== env.agentAccount.address.toLowerCase()
+    ),
     cantonLedgerHost: env.canton.ledgerHost,
     solverParty: maskParty(env.canton.solverParty),
     keycloakClientId: env.canton.auth.clientId,
     keycloakClientSecret: "***redacted***",
     startBlock: env.startBlock.toString(),
-    pollIntervalMs: String(env.pollIntervalMs),
+    pollIntervalMs: String(env.pollIntervalMs)
   };
 }
 

@@ -10,7 +10,7 @@ interface BalanceState {
   total: string;
   /** Locked portion of the balance (CBTC tied up in pending transfers). */
   locked: string;
-  /** Number of cBTC holdings (Loop aggregates per-instrument, so 0 or 1). */
+  /** Number of CBTC holdings (Loop aggregates per-instrument, so 0 or 1). */
   utxoCount: number;
   isLoading: boolean;
   error: string | null;
@@ -29,12 +29,12 @@ const ZERO: Fetched = { total: "0", locked: "0", utxoCount: 0 };
 const POLL_INTERVAL_MS = 30_000;
 
 /**
- * Fetch the user's cBTC balance.
+ * Fetch the user's CBTC balance.
  *  - LOOP user: read their OWN holdings via provider.getHolding() (the m2m JWT
  *    can't read a Loop party hosted on another participant).
  *  - PARTICIPANT-MANAGED (email) user: no Loop provider, so read the session
  *    party's on-ledger holdings server-side via /api/parties/balance (the m2m JWT
- *    CAN read warpx-hosted parties). This is why a managed user's real cBTC used
+ *    CAN read warpx-hosted parties). This is why a managed user's real CBTC used
  *    to show 0.
  */
 export function useBalance(): BalanceState {
@@ -52,10 +52,14 @@ export function useBalance(): BalanceState {
       const r = await fetch("/api/parties/balance");
       if (!r.ok) return ZERO;
       const j = (await r.json()) as { total?: string; utxoCount?: number };
-      return { total: j.total ?? "0", locked: "0", utxoCount: j.utxoCount ?? 0 };
+      return {
+        total: j.total ?? "0",
+        locked: "0",
+        utxoCount: j.utxoCount ?? 0
+      };
     },
     refetchInterval: POLL_INTERVAL_MS,
-    refetchIntervalInBackground: false,
+    refetchIntervalInBackground: false
   });
 
   const view = data ?? ZERO;
@@ -66,6 +70,6 @@ export function useBalance(): BalanceState {
     utxoCount: view.utxoCount,
     isLoading,
     error: error instanceof Error ? error.message : null,
-    refetch: () => void refetch(),
+    refetch: () => void refetch()
   };
 }

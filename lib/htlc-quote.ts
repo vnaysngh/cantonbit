@@ -4,7 +4,7 @@
  * Model (what 0x RFQ / 1inch Fusion / Cancore-style venues do, minimal version):
  *   quote = mid price × (1 − fee), with a short TTL and a de-peg circuit breaker.
  *
- * Assets: cBTC is 1:1 BTC by construction (DLC-backed). WBTC is NOT exactly 1:1 —
+ * Assets: CBTC is 1:1 BTC by construction (DLC-backed). WBTC is NOT exactly 1:1 —
  * it trades at a small premium/discount. So the live WBTC/BTC rate P matters, and
  * it must be applied DIRECTIONALLY:
  *   wbtc → cbtc : cbtcOut = wbtcIn × P × (1 − fee)     (P = BTC per 1 WBTC)
@@ -34,38 +34,47 @@ export class DepegError extends Error {}
 /** Live WBTC/BTC price, 8dp-scaled bigint. Throws QuoteUnavailableError/DepegError. */
 export async function getWbtcBtcPrice8(): Promise<bigint> {
   const now = Date.now();
-  if (cached && now - cached.at < CACHE_FRESH_MS) return checkPeg(cached.price8);
+  if (cached && now - cached.at < CACHE_FRESH_MS)
+    return checkPeg(cached.price8);
   try {
-    const r = await fetch(PRICE_URL, { cache: "no-store", signal: AbortSignal.timeout(5000) });
+    const r = await fetch(PRICE_URL, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(5000)
+    });
     if (!r.ok) throw new Error(`price source ${r.status}`);
     const j = (await r.json()) as { "wrapped-bitcoin"?: { btc?: number } };
     const p = j["wrapped-bitcoin"]?.btc;
-    if (!p || !Number.isFinite(p) || p <= 0) throw new Error("bad price payload");
+    if (!p || !Number.isFinite(p) || p <= 0)
+      throw new Error("bad price payload");
     cached = { price8: BigInt(Math.round(p * 1e8)), at: now };
     return checkPeg(cached.price8);
   } catch (e) {
     // Serve stale within bounds; otherwise refuse — never silently assume 1.0.
-    if (cached && now - cached.at < CACHE_MAX_STALE_MS) return checkPeg(cached.price8);
+    if (cached && now - cached.at < CACHE_MAX_STALE_MS)
+      return checkPeg(cached.price8);
     throw new QuoteUnavailableError(
-      `WBTC/BTC price unavailable (${e instanceof Error ? e.message : e}) — refusing to quote`,
+      `WBTC/BTC price unavailable (${e instanceof Error ? e.message : e}) — refusing to quote`
     );
   }
 }
 
 function checkPeg(price8: bigint): bigint {
-  const dev = price8 > 100_000_000n ? price8 - 100_000_000n : 100_000_000n - price8;
+  const dev =
+    price8 > 100_000_000n ? price8 - 100_000_000n : 100_000_000n - price8;
   if (dev * 10000n > BigInt(DEPEG_LIMIT_BPS) * 100_000_000n) {
-    throw new DepegError(`WBTC/BTC at ${Number(price8) / 1e8} — outside the ${DEPEG_LIMIT_BPS}bps peg band, quoting paused`);
+    throw new DepegError(
+      `WBTC/BTC at ${Number(price8) / 1e8} — outside the ${DEPEG_LIMIT_BPS}bps peg band, quoting paused`
+    );
   }
   return price8;
 }
 
 export interface QuoteResult {
-  inUnits: bigint;       // input, 8dp base units
-  outUnits: bigint;      // output after price + fee, 8dp base units
-  price8: bigint;        // WBTC/BTC used, 8dp
+  inUnits: bigint; // input, 8dp base units
+  outUnits: bigint; // output after price + fee, 8dp base units
+  price8: bigint; // WBTC/BTC used, 8dp
   feeBps: number;
-  expiresAt: number;     // unix seconds — quote validity (TTL), not the order window
+  expiresAt: number; // unix seconds — quote validity (TTL), not the order window
 }
 
 /** wbtc → cbtc : out = in × P × (1 − fee). */
@@ -85,8 +94,11 @@ export async function quoteCbtcToWbtc(cbtcUnits: bigint): Promise<QuoteResult> {
 function finish(inUnits: bigint, gross: bigint, price8: bigint): QuoteResult {
   const outUnits = gross - (gross * BigInt(BRIDGE_FEE_BPS)) / 10000n;
   return {
-    inUnits, outUnits, price8, feeBps: BRIDGE_FEE_BPS,
-    expiresAt: Math.floor(Date.now() / 1000) + QUOTE_TTL_SECONDS,
+    inUnits,
+    outUnits,
+    price8,
+    feeBps: BRIDGE_FEE_BPS,
+    expiresAt: Math.floor(Date.now() / 1000) + QUOTE_TTL_SECONDS
   };
 }
 
@@ -107,18 +119,25 @@ const ORDER_AMOUNT_TOLERANCE_BPS = 100;
 export async function assertOrderAmounts(
   direction: "evm-to-canton" | "canton-to-evm",
   wbtcUnits: bigint,
-  cbtcUnits: bigint,
+  cbtcUnits: bigint
 ): Promise<void> {
   // out = what the solver pays the user; in = what the user locks.
   const reverse = direction === "canton-to-evm";
   const inUnits = reverse ? cbtcUnits : wbtcUnits;
   const claimedOut = reverse ? wbtcUnits : cbtcUnits;
-  if (inUnits <= 0n || claimedOut <= 0n) throw new Error("order amounts must be > 0");
-  const fresh = reverse ? await quoteCbtcToWbtc(inUnits) : await quoteWbtcToCbtc(inUnits);
+  if (inUnits <= 0n || claimedOut <= 0n)
+    throw new Error("order amounts must be > 0");
+  const fresh = reverse
+    ? await quoteCbtcToWbtc(inUnits)
+    : await quoteWbtcToCbtc(inUnits);
   // Allow the solver to be GENEROUS (claimedOut <= fresh is always fine); only
   // reject when the user demands MORE than a fresh quote + tolerance.
-  const maxOut = fresh.outUnits + (fresh.outUnits * BigInt(ORDER_AMOUNT_TOLERANCE_BPS)) / 10000n;
+  const maxOut =
+    fresh.outUnits +
+    (fresh.outUnits * BigInt(ORDER_AMOUNT_TOLERANCE_BPS)) / 10000n;
   if (claimedOut > maxOut) {
-    throw new Error(`order output ${claimedOut} exceeds a fresh quote ${fresh.outUnits} (+${ORDER_AMOUNT_TOLERANCE_BPS}bps) — re-quote and retry`);
+    throw new Error(
+      `order output ${claimedOut} exceeds a fresh quote ${fresh.outUnits} (+${ORDER_AMOUNT_TOLERANCE_BPS}bps) — re-quote and retry`
+    );
   }
 }

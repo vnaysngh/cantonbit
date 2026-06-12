@@ -9,14 +9,14 @@
 
 - [x] EVM HTLC `HTLCEscrow.sol` — keccak, lock/claim/retake, hardened. 13/13 tests.
       Deployed Base Sepolia `0x1b19a764…8cf1`.
-- [x] On-ledger cBTC HTLC DAR `CbtcHtlc.daml` (HtlcLock) — on-ledger keccak gate +
+- [x] On-ledger CBTC HTLC DAR `CbtcHtlc.daml` (HtlcLock) — on-ledger keccak gate +
       Allocation, with amount/instrument binding. Hardened package
       `cbtc-htlc-hardened` v0.1.0 (`1b2397fd…`) built and tested; upload this
       DAR and set `CBTC_HTLC_PKG_ID`.
 - [x] keccak256 parity EVM↔Daml proven (`0x9427…9903`).
-- [x] On-ledger LOCK: allocate cBTC + create HtlcLock (lib/htlc-onledger.ts).
+- [x] On-ledger LOCK: allocate CBTC + create HtlcLock (lib/htlc-onledger.ts).
 - [x] **On-ledger CLAIM PROVEN on node**: receiver exercised HtlcLock.Claim → ledger
-      verified keccak == hashLock → Allocation_ExecuteTransfer → cBTC delivered
+      verified keccak == hashLock → Allocation_ExecuteTransfer → CBTC delivered
       (updateId `12203ce0…`). Required: DAR observer=receiver + m2m CanActAs over the
       hosted receiver + disclose the Allocation to the receiver.
 - [x] Order lifecycle service + `/api/htlc/*` (create/accept/lock/claim-prepare/
@@ -34,11 +34,11 @@
 
 - [x] **R2. Participant-managed onboarding** — allocate party on warpx + grant backend
       CanActAs (lib/party-onboarding.ts, /api/parties/provision). Proven: fresh party →
-      swap → cBTC delivered. (No EnableCC needed — backend co-signs as receiver.)
-- [x] **R3. Solver daemon end-to-end** — user locks WBTC → daemon locks cBTC (HtlcLock)
-      → backend claims cBTC (claim-managed, CanActAs) → daemon claims WBTC. PROVEN LIVE
-      (htlc-e2e-managed.mts: real WBTC + real cBTC moved, user signed ONE thing).
-- [x] **R4. Refund / Retake both legs** — cBTC HtlcLock.Refund → Allocation_Withdraw
+      swap → CBTC delivered. (No EnableCC needed — backend co-signs as receiver.)
+- [x] **R3. Solver daemon end-to-end** — user locks WBTC → daemon locks CBTC (HtlcLock)
+      → backend claims CBTC (claim-managed, CanActAs) → daemon claims WBTC. PROVEN LIVE
+      (htlc-e2e-managed.mts: real WBTC + real CBTC moved, user signed ONE thing).
+- [x] **R4. Refund / Retake both legs** — CBTC HtlcLock.Refund → Allocation_Withdraw
       (timelock-gated, PROVEN), EVM retake(hashLock) button, auto-refund sweep in the
       daemon, orphan-allocation cleanup. Fixed allocateBefore ≤ settleBefore bug.
 - [x] **R5. Orders persisted to Supabase** (htlc_orders, migration 007 applied) +
@@ -63,7 +63,7 @@ EXACTLY this — transfer-to-venue, venue runs the HTLC, custody-during-swap. We
       (derived server-side from the receiver's namespace). Custody ordering: user clicks
       Claim → REVEAL secret first → backend verifies preimage + the real on-chain WBTC
       lock (verifyEvmLock) → flips counter_claimed (solver can now claim WBTC) → delivers
-      cBTC via a STANDARD TransferFactory_Transfer. With the mandatory cBTC auto-accept
+      CBTC via a STANDARD TransferFactory_Transfer. With the mandatory CBTC auto-accept
       (preapproval) ON, the transfer SELF-COMPLETES — no wallet popup (delivered=true).
       Fallback: standard TransferInstruction_Accept the user signs. NO custom DAR touches
       the Loop user. **Trust: trust-minimized on the Canton leg (atomicity = EVM HTLC +
@@ -93,28 +93,30 @@ PROVEN CORRECT: keccak parity EVM↔Daml (verified empirically), both HTLC primi
 assignment both directions, quote math.
 
 FIXED (this session):
+
 - [x] CRITICAL: server-side timelock-ladder validation (assertValidTimelocks in
       createOrder) — was trusting client timelocks → inverted-ladder robbery. CLOSED.
 - [x] CRITICAL: daemon forward branch now checks WBTC lock remaining-time
-      (CLAIM_MARGIN) before locking cBTC — was robbable via near-expiry WBTC lock.
+      (CLAIM_MARGIN) before locking CBTC — was robbable via near-expiry WBTC lock.
 - [x] HIGH: refund-vs-claim race — refundMainCanton + the sweep now skip any order
       with revealedPreimage (both modes), so a settled swap can't also refund.
 - [x] HIGH (M3): reverse watchtower no longer records "already-locked" (blinded the
       claim-event scan → both-legs loss); recovers the real Locked tx via findLockTx.
-- [x] M1: solver SOLVENCY gate — accept() refuses forward orders if cBTC float short
+- [x] M1: solver SOLVENCY gate — accept() refuses forward orders if CBTC float short
       (before the user locks); daemon refuses reverse lock if WBTC balance short.
 - [x] MED: direction guards on recordCounterClaimed (reject forward-managed) +
       recordMainRetake (forward-only, non-terminal).
 
 TIER 2 FIXES (applied 2026-06-12):
+
 - [x] Server-side quote re-validation: createOrder now re-quotes (assertOrderAmounts)
       and rejects an output more favorable than a fresh quote +100bps. De-peg/price-
-      unavailable → 503. Verified: inflated 9.99 cBTC output rejected.
+      unavailable → 503. Verified: inflated 9.99 CBTC output rejected.
 - [x] Auto-refund as a cron (N4): /api/htlc/auto-refund now has a GET handler gated by
       CRON_SECRET (Bearer) + vercel.json cron every 5min — refunds survive daemon
       death. Daemon's POST path unchanged. Verified both.
 - [x] UI recovery (M4/N3): Retake button on the stuck htlc-locking stage; /orders is
-      now ACTIONABLE — per-order "Retake WBTC" (user EVM key) / "Refund cBTC" (backend)
+      now ACTIONABLE — per-order "Retake WBTC" (user EVM key) / "Refund CBTC" (backend)
       for live orders past their user timelock (unrevealed only). recoveryAction() gates
       which shows.
 - [x] /orders DETAIL + chain labels: each row shows the EVM↔Canton route + mode (Loop/
@@ -125,11 +127,12 @@ TIER 2 FIXES (applied 2026-06-12):
       state×direction cases pass.
 
 - [x] Observability (M2): lib/alert.ts (+ inline in the daemon) → ALERT_WEBHOOK_URL
-      (Slack/Discord; logs to console when unset). Fires on: solver cBTC/WBTC
+      (Slack/Discord; logs to console when unset). Fires on: solver CBTC/WBTC
       insolvency, forward WBTC-claim failure after reveal (critical), and auto-refund
       sweep per-order failures. Documented in README §8.
 
 REMAINING (tracked, not blockers for the proven happy/failure paths):
+
 - [ ] DAR amount-binding: assertBoundTo binds parties+timelock but not amount/
       instrumentId (MED, not a theft vector — backend always wraps the alloc it just
       made; needs DAR rebuild+re-upload+new pkg id, so deferred to avoid risking the
@@ -137,13 +140,13 @@ REMAINING (tracked, not blockers for the proven happy/failure paths):
 
 ## 🔵 NEXT (real, not blocked)
 
-- [x] cBTC balance for the SESSION party in /swap — /api/parties/balance + useBalance
+- [x] CBTC balance for the SESSION party in /swap — /api/parties/balance + useBalance
       branch (Loop provider → Loop wallet; else session party server-read). DONE.
 - [x] **Canton → EVM (reverse) — BUILT (email users, fully trustless), needs browser
       test.** Cancore-mirrored design (docs/canton-to-evm-design.md): backend locks the
-      USER's cBTC on-ledger (Allocation sender=user + HtlcLock locker=user via CanActAs,
+      USER's CBTC on-ledger (Allocation sender=user + HtlcLock locker=user via CanActAs,
       LONG timelock) → daemon locks WBTC on EVM (SHORT, receiver=user) → user claims
-      WBTC in MetaMask (= the reveal) → daemon claims cBTC via the on-ledger keccak gate.
+      WBTC in MetaMask (= the reveal) → daemon claims CBTC via the on-ledger keccak gate.
       Daemon has its own EVM Claimed-event watchtower (never trusts only the browser) +
       WBTC retake after solverTimelock. UI: direction toggle on /swap (managed users
       only; Loop sellers = phase 2). Migration 009 (counter_lock_tx) — NEEDS APPLYING.
@@ -151,13 +154,13 @@ REMAINING (tracked, not blockers for the proven happy/failure paths):
       sweep doesn't cover reverse yet.
 - [ ] Order history / tracking view from Supabase (htlc_orders).
 - [x] **Auto-refund BOTH directions** — /api/htlc/auto-refund (daemon calls every 60s)
-      now sweeps: forward solver-cBTC refunds, REVERSE user-cBTC refunds (refund-main,
+      now sweeps: forward solver-CBTC refunds, REVERSE user-CBTC refunds (refund-main,
       CanActAs — fully automated), and stale forward main_locked bookkeeping.
 - [x] **Order history** — /orders page (nav link added) + GET /api/htlc/history
       (email session → warpx party; Loop → ?party=). Status chips + explorer links.
 - [x] **RFQ quote engine, both directions** — lib/htlc-quote.ts + quote route: LIVE
       WBTC/BTC price (CoinGecko, 30s cache, ≤10min stale, else refuse), applied
-      directionally (×P forward, ÷P reverse — cBTC is 1:1 BTC, WBTC is NOT), 20bps fee
+      directionally (×P forward, ÷P reverse — CBTC is 1:1 BTC, WBTC is NOT), 20bps fee
       on output, 60s quote TTL, 2% de-peg breaker → 503. Reverse UI now server-quotes.
 - [x] **Hygiene sweep** (swap-solver/src/hygiene-sweep.mts) — chunked Locked-event scan
       (RPC 2000-block cap; also fixed the daemon watchtower the same way), retakes
@@ -169,27 +172,27 @@ REMAINING (tracked, not blockers for the proven happy/failure paths):
       needs browser re-test.** HISTORY (settled 2026-06-12, never revisit): Variant B
       (AllocationFactory_Allocate escrow) was built + browser-tested first. The Loop
       wallet DID sign the allocate (proven!) and the lock landed — but settlement is
-      IMPOSSIBLE: the cBTC DvpLegAllocation's ExecuteTransfer demands sender+receiver+
+      IMPOSSIBLE: the CBTC DvpLegAllocation's ExecuteTransfer demands sender+receiver+
       executor (ALL THREE) live at execute time, no pre-delegation (proven on-node in
       BOTH directions: buyer probe missing receiver; seller execute missing sender).
       A bare cross-participant allocation locks but settles for NO ONE. Our HtlcLock
       settles only because the CONTRACT aggregates authorities — email-only. Cancore's
       transfer-to-venue custody is FORCED by Canton's authority model, not laziness.
-      VARIANT A FLOW: user signs ONE standard TransferFactory_Transfer (their cBTC →
+      VARIANT A FLOW: user signs ONE standard TransferFactory_Transfer (their CBTC →
       venue); backend finds + ACCEPTS the offer as the venue (custody, main_locked);
       daemon locks WBTC (short timelock); user MetaMask-claims (reveal); claim-main
-      just records (cBTC already custodied). Refunds FULLY AUTOMATED on our side
-      (sweep + button → we send the custodied cBTC straight back; guarded on
+      just records (CBTC already custodied). Refunds FULLY AUTOMATED on our side
+      (sweep + button → we send the custodied CBTC straight back; guarded on
       preimage-not-revealed). recordMainClaim now hard-rejects reverse orders (the
       stale-daemon false-main_claimed bug). Legacy: test order 0xa817… marked failed;
-      its 0.001 cBTC sits in the user-withdrawable allocation (prepare-withdraw-loop
+      its 0.001 CBTC sits in the user-withdrawable allocation (prepare-withdraw-loop
       route kept for recovery).
 - [ ] Cleanup: delete the DEAD legacy Loop on-ledger claim path (app/api/htlc/[id]/
       claim-prepare route, prepareClaim in service + client, prepareClaimCommand usage
       for Loop) — superseded by claim-counter; UI no longer references it.
 - [ ] (PARKED — analysed 2026-06-11, NOT a real trust upgrade for EVM→Canton) Allocation
       escrow for external-wallet buyers: a standard Allocation has NO hash gate, so either
-      the user can execute it (→ takes cBTC without revealing the secret → SOLVER ROBBED)
+      the user can execute it (→ takes CBTC without revealing the secret → SOLVER ROBBED)
       or only the solver executes (→ user still trusts the solver, ≈ today; solver also
       keeps sender-alone Allocation_Withdraw). Real benefits shrink to solvency-proof +
       audit trail — transparency, not trust. Keep parked.
@@ -204,7 +207,7 @@ REMAINING (tracked, not blockers for the proven happy/failure paths):
 
 - [ ] Fee model: 1% per side in the sent token (optional but Cancore-standard).
 - [ ] External audit of both HTLC contracts (HTLCEscrow.sol + CbtcHtlc.daml).
-- [ ] Mainnet deploy: deploy EVM HTLC on a real chain, real WBTC, mainnet cBTC DAR;
+- [ ] Mainnet deploy: deploy EVM HTLC on a real chain, real WBTC, mainnet CBTC DAR;
       monitoring + alerting; admin/key rotation. **Rotate the devnet creds shared in chat.**
 - [ ] Delete the old OranjAttestorOracle path at cutover (the new path is proven).
 - [ ] (Optional) Dutch auction + partial fills (Merkle-tree-of-secrets).
@@ -213,7 +216,7 @@ REMAINING (tracked, not blockers for the proven happy/failure paths):
 
 ## Key facts to not re-litigate (settled, on-node evidence)
 
-- cBTC has NO native on-ledger hashlock → we wrap an Allocation in our custom HtlcLock
+- CBTC has NO native on-ledger hashlock → we wrap an Allocation in our custom HtlcLock
   DAR. The hash IS enforced on the Daml ledger via that DAR. PROVEN.
 - The on-ledger claim works for **local (participant-managed) receivers** where the DAR
   is vetted + the backend has CanActAs. Cross-participant (external Loop) receivers

@@ -33,13 +33,13 @@ create table if not exists public.solver_orders (
   -- before delivery. This IS the recovery map — durable before openFor.
   canton_party text,
 
-  -- Canton ledger record-time of the cBTC delivery (unix seconds), once known.
+  -- Canton ledger record-time of the CBTC delivery (unix seconds), once known.
   fill_timestamp bigint,
   -- Canton delivery reference (e.g. update id), once known.
   canton_delivery_ref text,
   -- Allocation contract id (USE_ALLOCATION mode), if used.
   allocation_cid text,
-  -- True once the user ACCEPTED the cBTC on Canton (HIGH-1: blocks refund).
+  -- True once the user ACCEPTED the CBTC on Canton (HIGH-1: blocks refund).
   cbtc_accepted boolean not null default false,
   -- Solver-float holding cids spent on the delivery offer (accept-watch tracking).
   input_holding_cids jsonb,
@@ -55,7 +55,7 @@ create table if not exists public.solver_orders (
 
 -- byStatus() iterates orders in a given status (e.g. all 'seen' to deliver).
 create index if not exists solver_orders_status_idx on public.solver_orders (status);
--- byUser() sums a user's in-flight cBTC (per-user overdraft cap). The user is in
+-- byUser() sums a user's in-flight CBTC (per-user overdraft cap). The user is in
 -- the order JSON; index its lowercased value for the case-insensitive lookup.
 create index if not exists solver_orders_user_idx
   on public.solver_orders ((lower(order_json->>'user')));

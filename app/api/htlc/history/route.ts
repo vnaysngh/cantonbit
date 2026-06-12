@@ -7,12 +7,15 @@
  */
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
+import { filterHistoryOrders } from "@/lib/htlc-order-logic";
 import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
 import { requirePartyOwner } from "@/lib/htlc-auth";
 
 export async function GET(req: Request) {
   try {
-    let party = new URL(req.url).searchParams.get("party") ?? "";
+    const url = new URL(req.url);
+    let party = url.searchParams.get("party") ?? "";
+    const userEvm = url.searchParams.get("evm")?.trim() || null;
     if (party) {
       const auth = await requirePartyOwner(party);
       if (auth.error) return auth.error;
@@ -28,7 +31,9 @@ export async function GET(req: Request) {
       }
     }
     if (!party) return NextResponse.json({ orders: [] });
-    const orders = await htlcService().historyForParty(party);
+    const orders = filterHistoryOrders(await htlcService().historyForParty(party), {
+      userEvmAddress: userEvm,
+    });
     return NextResponse.json({ orders });
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 });

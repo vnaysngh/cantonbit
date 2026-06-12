@@ -2,7 +2,7 @@
   "name": "oranj-swap-solver",
   "version": "0.0.1",
   "private": true,
-  "description": "Single-solver WBTC(Base) → cBTC(Canton) swap solver. Watches the OIF InputSettlerEscrow on Base, delivers cBTC on Canton via the Oranj app's existing flow, attests the fill to a custom oracle, and finalises to release the locked WBTC.",
+  "description": "Single-solver WBTC(Base) → CBTC(Canton) swap solver. Watches the OIF InputSettlerEscrow on Base, delivers CBTC on Canton via the Oranj app's existing flow, attests the fill to a custom oracle, and finalises to release the locked WBTC.",
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",

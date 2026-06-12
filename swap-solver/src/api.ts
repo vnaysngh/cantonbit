@@ -25,12 +25,23 @@
  * storing (rejects a mismatch).
  */
 
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse
+} from "node:http";
 import { randomBytes } from "node:crypto";
 import {
-  createWalletClient, createPublicClient, http as viemHttp, getContract,
-  recoverTypedDataAddress, getAddress, parseAbi,
-  type Account, type Address, type Hex,
+  createWalletClient,
+  createPublicClient,
+  http as viemHttp,
+  getContract,
+  recoverTypedDataAddress,
+  getAddress,
+  parseAbi,
+  type Account,
+  type Address,
+  type Hex
 } from "viem";
 
 import { makeNetworkConfig, type SwapNetworkConfig } from "./config.js";
@@ -57,7 +68,7 @@ export interface ApiDeps {
   /**
    * Solver fee in basis points (1 bps = 0.01%). The quote is:
    *   cbtcOut = wbtcAmount × (WBTC/BTC price) × (10000 − feeBps) / 10000.
-   * cBTC is redeemable 1:1 for BTC, so the rate is the live WBTC/BTC price (NOT a
+   * CBTC is redeemable 1:1 for BTC, so the rate is the live WBTC/BTC price (NOT a
    * flat 1:1 — WBTC trades slightly off par). When no de-peg feed is configured,
    * price falls back to par (1.0). The fee is the solver's cut for fronting
    * liquidity + bearing settlement risk; floor division → never overpays the user.
@@ -92,7 +103,7 @@ function send(res: ServerResponse, status: number, body: unknown): void {
     "content-type": "application/json",
     "access-control-allow-origin": CORS_ORIGIN,
     "access-control-allow-headers": "content-type",
-    "access-control-allow-methods": "GET,POST,OPTIONS",
+    "access-control-allow-methods": "GET,POST,OPTIONS"
   });
   res.end(payload);
 }
@@ -136,11 +147,16 @@ function readBody(req: IncomingMessage): Promise<unknown> {
     let raw = "";
     req.on("data", (c) => {
       raw += c;
-      if (raw.length > MAX_BODY_BYTES) reject(new ApiError(413, "request body too large"));
+      if (raw.length > MAX_BODY_BYTES)
+        reject(new ApiError(413, "request body too large"));
     });
     req.on("end", () => {
       if (!raw) return resolve({});
-      try { resolve(JSON.parse(raw)); } catch { reject(new Error("invalid JSON body")); }
+      try {
+        resolve(JSON.parse(raw));
+      } catch {
+        reject(new Error("invalid JSON body"));
+      }
     });
     req.on("error", reject);
   });
@@ -150,17 +166,25 @@ function readBody(req: IncomingMessage): Promise<unknown> {
 function parseAmount(v: unknown, field: string): bigint {
   if (typeof v === "string" && /^\d+$/.test(v)) return BigInt(v);
   if (typeof v === "number" && Number.isInteger(v) && v >= 0) return BigInt(v);
-  throw new ApiError(400, `${field} must be a non-negative integer (base units), got ${JSON.stringify(v)}`);
+  throw new ApiError(
+    400,
+    `${field} must be a non-negative integer (base units), got ${JSON.stringify(v)}`
+  );
 }
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) { super(message); }
+  constructor(
+    public status: number,
+    message: string
+  ) {
+    super(message);
+  }
 }
 
 /** Minimal ERC-20 reads for the pre-flight balance/allowance gates. */
 const ERC20_ABI = parseAbi([
   "function balanceOf(address) view returns (uint256)",
-  "function allowance(address,address) view returns (uint256)",
+  "function allowance(address,address) view returns (uint256)"
 ]);
 
 /** uint256 ceiling — amounts that meet/exceed this would truncate on-chain. */
@@ -180,15 +204,22 @@ const MAX_UINT256 = 2n ** 256n - 1n;
 export function validateOrderIntake(
   order: { user: string; inputs: readonly (readonly [bigint, bigint])[] },
   out0: { token: string; amount: string },
-  cfg: { wbtc: string; cbtcToken: string; bannedUsers?: Set<string> },
+  cfg: { wbtc: string; cbtcToken: string; bannedUsers?: Set<string> }
 ): bigint {
-  // GATE A — token identity. Must trade EXACTLY the configured WBTC→cBTC pair.
+  // GATE A — token identity. Must trade EXACTLY the configured WBTC→CBTC pair.
   const inputToken = order.inputs[0]?.[0];
-  if (inputToken === undefined || getAddress(`0x${inputToken.toString(16).padStart(40, "0")}`) !== getAddress(cfg.wbtc)) {
+  if (
+    inputToken === undefined ||
+    getAddress(`0x${inputToken.toString(16).padStart(40, "0")}`) !==
+      getAddress(cfg.wbtc)
+  ) {
     throw new ApiError(400, "order input token is not the configured WBTC");
   }
   if (out0.token.toLowerCase() !== cfg.cbtcToken.toLowerCase()) {
-    throw new ApiError(400, "order output token is not the configured cBTC instrument");
+    throw new ApiError(
+      400,
+      "order output token is not the configured CBTC instrument"
+    );
   }
 
   // GATE B — banned user.
@@ -199,14 +230,29 @@ export function validateOrderIntake(
   // GATE C — uint256 range. Amounts must be positive and fit in uint256; anything
   // ABOVE uint256-max would truncate on-chain. (uint256-max itself is legal.)
   const wbtcAmount = order.inputs[0]?.[1] ?? 0n;
-  if (wbtcAmount <= 0n || wbtcAmount > MAX_UINT256 || BigInt(out0.amount) > MAX_UINT256) {
+  if (
+    wbtcAmount <= 0n ||
+    wbtcAmount > MAX_UINT256 ||
+    BigInt(out0.amount) > MAX_UINT256
+  ) {
     throw new ApiError(400, "order amount out of range");
   }
   return wbtcAmount;
 }
 
 export function createApi(deps: ApiDeps) {
-  const { cfg, store, canton, rpcUrl, agentAccount, chain, cbtcToken, feeBps, depegGuard, bannedUsers } = deps;
+  const {
+    cfg,
+    store,
+    canton,
+    rpcUrl,
+    agentAccount,
+    chain,
+    cbtcToken,
+    feeBps,
+    depegGuard,
+    bannedUsers
+  } = deps;
   if (!Number.isInteger(feeBps) || feeBps < 0 || feeBps >= 10000) {
     throw new Error(`feeBps must be an integer in [0, 10000), got ${feeBps}`);
   }
@@ -218,15 +264,18 @@ export function createApi(deps: ApiDeps) {
   // submitted order's fillDeadline must leave at least this margin (so we can
   // actually deliver+settle), and not exceed the max lock window. Derived from
   // the configured windows so they stay consistent with what /quote builds.
-  const minFillDeadlineMargin = Math.max(60, Math.floor(cfg.fillDeadlineSeconds / 3));
+  const minFillDeadlineMargin = Math.max(
+    60,
+    Math.floor(cfg.fillDeadlineSeconds / 3)
+  );
   const maxOrderValiditySeconds = cfg.expiresSeconds + 5 * 60; // a little slack over the quote window
 
   async function handleQuote(body: Record<string, unknown>) {
     // DE-PEG CIRCUIT BREAKER + LIVE PRICE: read the WBTC/BTC feed once. It (a)
     // pauses swaps on a de-peg (fail-closed), and (b) gives the live WBTC price in
     // BTC, which we use to PRICE the quote — WBTC trades slightly off 1 BTC
-    // (e.g. 0.9978), so we must NOT quote a flat 1:1. cBTC is redeemable 1:1 BTC,
-    // so the WBTC→cBTC rate = WBTC/BTC price.
+    // (e.g. 0.9978), so we must NOT quote a flat 1:1. CBTC is redeemable 1:1 BTC,
+    // so the WBTC→CBTC rate = WBTC/BTC price.
     //   priceRaw / 10^priceDecimals = WBTC in BTC (e.g. 99775000 / 1e8 = 0.99775).
     // Default to par (1.0) only when the de-peg guard is disabled (no feed).
     let priceRaw = 100_000_000n; // 1.0 scaled to 8dp (par fallback when no feed)
@@ -245,28 +294,38 @@ export function createApi(deps: ApiDeps) {
     }
     const cantonParty = body.cantonParty;
     if (typeof cantonParty !== "string" || !cantonParty.includes("::")) {
-      throw new ApiError(400, "cantonParty must be a full Canton party id (contains '::')");
+      throw new ApiError(
+        400,
+        "cantonParty must be a full Canton party id (contains '::')"
+      );
     }
     const wbtcAmount = parseAmount(body.wbtcAmount, "wbtcAmount");
     if (wbtcAmount === 0n) throw new ApiError(400, "wbtcAmount must be > 0");
     // QUOTE = wbtcAmount × (WBTC/BTC price) × (1 − feeBps). All BigInt, floor
     // division at each step → the user NEVER gets more than the true value
-    // (no overpay) and the fee is exact. cBTC = 1 BTC (redeemable), so the only
+    // (no overpay) and the fee is exact. CBTC = 1 BTC (redeemable), so the only
     // price adjustment is WBTC's deviation from 1 BTC.
     const priceScale = 10n ** BigInt(priceDecimals);
-    const cbtcAtPrice = (wbtcAmount * priceRaw) / priceScale; // WBTC value in BTC = cBTC before fee
+    const cbtcAtPrice = (wbtcAmount * priceRaw) / priceScale; // WBTC value in BTC = CBTC before fee
     const cbtcAmount = (cbtcAtPrice * BigInt(10000 - feeBps)) / 10000n;
     if (cbtcAmount === 0n) {
-      throw new ApiError(400, `amount too small after price + ${feeBps}bps fee (cBTC out rounds to 0)`);
+      throw new ApiError(
+        400,
+        `amount too small after price + ${feeBps}bps fee (CBTC out rounds to 0)`
+      );
     }
 
     const req: SwapRequest = {
-      user, wbtcAmount, cbtcAmount, cantonParty, cbtcToken,
+      user,
+      wbtcAmount,
+      cbtcAmount,
+      cantonParty,
+      cbtcToken,
       // Unique random nonce (256-bit). CoW differentiates otherwise-identical
       // orders with a unique appData/quoteId; we use a cryptographically random
       // nonce so the orderId hash is unique per quote. (The old `nowSeconds()`
       // nonce collided for two quotes in the SAME second → same orderId.)
-      nonce: randomNonce(),
+      nonce: randomNonce()
     };
     const built = buildOrder(cfg, req, nowSeconds());
 
@@ -276,7 +335,11 @@ export function createApi(deps: ApiDeps) {
     // instead written in /orders (handleCreateOrder) as part of the write-ahead,
     // BEFORE the irreversible openFor — so the crash-recovery guarantee is
     // preserved, but only ONE entry is ever written per real on-chain order.
-    const typed = buildOpenForTypedData({ order: built.order, escrow: cfg.escrow, chainId: cfg.originChainId });
+    const typed = buildOpenForTypedData({
+      order: built.order,
+      escrow: cfg.escrow,
+      chainId: cfg.originChainId
+    });
 
     return {
       orderId: built.orderId,
@@ -293,12 +356,12 @@ export function createApi(deps: ApiDeps) {
         domain: typed.domain,
         types: typed.types,
         primaryType: typed.primaryType,
-        message: typed.message,
+        message: typed.message
       },
       escrow: cfg.escrow,
       wbtc: cfg.wbtc,
       expires: built.order.expires,
-      fillDeadline: built.order.fillDeadline,
+      fillDeadline: built.order.fillDeadline
     };
   }
 
@@ -314,14 +377,19 @@ export function createApi(deps: ApiDeps) {
     // 0x00 here. If a client already prefixed it (66 bytes), leave it untouched.
     const sigHexLen = rawSig.length - 2; // strip "0x"
     const sig: Hex =
-      sigHexLen === 130 ? (`0x00${rawSig.slice(2)}` as Hex) // raw 65-byte sig → add Permit2 type byte
-      : rawSig;                                              // already typed (e.g. CLI) — leave as-is
+      sigHexLen === 130
+        ? (`0x00${rawSig.slice(2)}` as Hex) // raw 65-byte sig → add Permit2 type byte
+        : rawSig; // already typed (e.g. CLI) — leave as-is
     const cantonParty = body.cantonParty;
     if (typeof cantonParty !== "string" || !cantonParty.includes("::")) {
       throw new ApiError(400, "cantonParty is required");
     }
     const sorder = body.order as SerializedOrder | undefined;
-    if (!sorder || !Array.isArray(sorder.outputs) || sorder.outputs.length === 0) {
+    if (
+      !sorder ||
+      !Array.isArray(sorder.outputs) ||
+      sorder.outputs.length === 0
+    ) {
       throw new ApiError(400, "order (serialized StandardOrder) is required");
     }
     const order = deserializeOrder(sorder);
@@ -331,7 +399,10 @@ export function createApi(deps: ApiDeps) {
     const out0 = sorder.outputs[0];
     if (!out0) throw new ApiError(400, "order has no output");
     if (!verifyCantonParty(cantonParty, out0.recipient)) {
-      throw new ApiError(400, "cantonParty does not match the order's recipient commitment");
+      throw new ApiError(
+        400,
+        "cantonParty does not match the order's recipient commitment"
+      );
     }
 
     // INTAKE VALIDATION — benchmarked against CoW's OrderValidPeriodConfiguration
@@ -350,7 +421,7 @@ export function createApi(deps: ApiDeps) {
       if (fillDeadline - now < minFillDeadlineMargin) {
         throw new ApiError(
           400,
-          `order fillDeadline too soon: ${fillDeadline - now}s left, need ≥ ${minFillDeadlineMargin}s`,
+          `order fillDeadline too soon: ${fillDeadline - now}s left, need ≥ ${minFillDeadlineMargin}s`
         );
       }
       // CoW: too-far → Excessive. Cap the lock window so a bad client can't lock
@@ -358,13 +429,16 @@ export function createApi(deps: ApiDeps) {
       if (fillDeadline - now > maxOrderValiditySeconds) {
         throw new ApiError(
           400,
-          `order fillDeadline too far: ${fillDeadline - now}s, max ${maxOrderValiditySeconds}s`,
+          `order fillDeadline too far: ${fillDeadline - now}s, max ${maxOrderValiditySeconds}s`
         );
       }
       // The escrow invariant the whole settlement relies on: expires > fillDeadline
       // (the user's refund window must open only after the fill window closes).
       if (!(fillDeadline < expires)) {
-        throw new ApiError(400, "order invariant violated: fillDeadline must be < expires");
+        throw new ApiError(
+          400,
+          "order invariant violated: fillDeadline must be < expires"
+        );
       }
     }
 
@@ -380,7 +454,7 @@ export function createApi(deps: ApiDeps) {
     const wbtcAmount = validateOrderIntake(order, out0, {
       wbtc: cfg.wbtc,
       cbtcToken,
-      bannedUsers,
+      bannedUsers
     });
 
     // GATE D — ECDSA signature recovery (CoW verify_owner(), order_validation.rs:751).
@@ -388,9 +462,14 @@ export function createApi(deps: ApiDeps) {
     // IS order.user. Catches a forged/mismatched signature BEFORE openFor (which
     // would otherwise revert on-chain after we already paid gas to submit it).
     {
-      const typed = buildOpenForTypedData({ order, escrow: cfg.escrow, chainId: cfg.originChainId });
+      const typed = buildOpenForTypedData({
+        order,
+        escrow: cfg.escrow,
+        chainId: cfg.originChainId
+      });
       // openFor prepends a 0x00 Permit2 type byte; recovery uses the RAW 65-byte ECDSA sig.
-      const rawEcdsa: Hex = sig.length - 2 === 132 ? (`0x${sig.slice(4)}` as Hex) : sig;
+      const rawEcdsa: Hex =
+        sig.length - 2 === 132 ? (`0x${sig.slice(4)}` as Hex) : sig;
       let recovered: Address;
       try {
         recovered = await recoverTypedDataAddress({
@@ -398,10 +477,13 @@ export function createApi(deps: ApiDeps) {
           types: typed.types,
           primaryType: typed.primaryType,
           message: typed.message,
-          signature: rawEcdsa,
+          signature: rawEcdsa
         });
       } catch (e) {
-        throw new ApiError(400, `signature could not be recovered: ${e instanceof Error ? e.message : e}`);
+        throw new ApiError(
+          400,
+          `signature could not be recovered: ${e instanceof Error ? e.message : e}`
+        );
       }
       if (getAddress(recovered) !== getAddress(order.user)) {
         throw new ApiError(400, "signature does not match order.user");
@@ -414,23 +496,45 @@ export function createApi(deps: ApiDeps) {
     // poor UX). eth_call both before committing.
     try {
       const [balance, allowance] = await Promise.all([
-        pub.readContract({ address: cfg.wbtc as Address, abi: ERC20_ABI, functionName: "balanceOf", args: [order.user] }) as Promise<bigint>,
-        pub.readContract({ address: cfg.wbtc as Address, abi: ERC20_ABI, functionName: "allowance", args: [order.user, PERMIT2_ADDRESS] }) as Promise<bigint>,
+        pub.readContract({
+          address: cfg.wbtc as Address,
+          abi: ERC20_ABI,
+          functionName: "balanceOf",
+          args: [order.user]
+        }) as Promise<bigint>,
+        pub.readContract({
+          address: cfg.wbtc as Address,
+          abi: ERC20_ABI,
+          functionName: "allowance",
+          args: [order.user, PERMIT2_ADDRESS]
+        }) as Promise<bigint>
       ]);
       if (balance < wbtcAmount) {
-        throw new ApiError(400, `insufficient WBTC balance: have ${balance}, need ${wbtcAmount}`);
+        throw new ApiError(
+          400,
+          `insufficient WBTC balance: have ${balance}, need ${wbtcAmount}`
+        );
       }
       if (allowance < wbtcAmount) {
-        throw new ApiError(400, "insufficient Permit2 allowance for WBTC — approve Permit2 first");
+        throw new ApiError(
+          400,
+          "insufficient Permit2 allowance for WBTC — approve Permit2 first"
+        );
       }
     } catch (e) {
       if (e instanceof ApiError) throw e;
       // A failed RPC read shouldn't hard-fail the order (openFor still revert-guards
       // it); log and continue, matching CoW's "simulation unavailable" tolerance.
-      console.warn(`[api] balance/allowance pre-flight read failed (continuing): ${e instanceof Error ? e.message : e}`);
+      console.warn(
+        `[api] balance/allowance pre-flight read failed (continuing): ${e instanceof Error ? e.message : e}`
+      );
     }
 
-    const escrowC = getContract({ address: cfg.escrow, abi: ESCROW_ABI, client: wallet });
+    const escrowC = getContract({
+      address: cfg.escrow,
+      abi: ESCROW_ABI,
+      client: wallet
+    });
     const orderId = (await escrowC.read.orderIdentifier([order])) as Hex;
 
     const existing = await store.get(orderId);
@@ -450,7 +554,10 @@ export function createApi(deps: ApiDeps) {
     // its true on-chain status (Deposited) on the next tick and proceeds. The
     // openBlock is backfilled below once openFor mines.
     await store.insertSeen(orderId, 0, sorder);
-    await store.update(orderId, { cantonParty, note: "registered; submitting openFor" });
+    await store.update(orderId, {
+      cantonParty,
+      note: "registered; submitting openFor"
+    });
     // Recovery map (MED-1): one entry per REAL order, written here (not at /quote)
     // so the unauthenticated /quote can't flood it. Lets the delivery path recover
     // the party if the record is ever lost (e.g. watcher-discovered order).
@@ -460,7 +567,10 @@ export function createApi(deps: ApiDeps) {
     // WBTC pull; the agent only pays gas to submit (permissionless).
     let openTx: Hex;
     try {
-      openTx = await escrowC.write.openFor([order, order.user, sig], { account, chain: null });
+      openTx = await escrowC.write.openFor([order, order.user, sig], {
+        account,
+        chain: null
+      });
       await pub.waitForTransactionReceipt({ hash: openTx });
     } catch (e) {
       // openFor failed (reverted, or we lost the receipt). The record stays so the
@@ -468,15 +578,25 @@ export function createApi(deps: ApiDeps) {
       // deliver against a lock that may not exist. If openFor actually reverted, no
       // WBTC was locked; if the receipt was merely lost, the next reconcile tick
       // reads the real on-chain status. Surface the error to the UI either way.
-      await store.update(orderId, { note: `openFor submit error: ${e instanceof Error ? e.message : e}` });
-      throw new ApiError(502, `openFor submission failed: ${e instanceof Error ? e.message : e}`);
+      await store.update(orderId, {
+        note: `openFor submit error: ${e instanceof Error ? e.message : e}`
+      });
+      throw new ApiError(
+        502,
+        `openFor submission failed: ${e instanceof Error ? e.message : e}`
+      );
     }
 
     // openFor mined — record the block (best-effort) and keep status `seen`.
     const blockNumber = await pub.getBlockNumber().catch(() => 0n);
-    await store.update(orderId, { openBlock: Number(blockNumber), note: `openFor ${openTx}` });
+    await store.update(orderId, {
+      openBlock: Number(blockNumber),
+      note: `openFor ${openTx}`
+    });
 
-    console.log(`[api] order ${orderId.slice(0, 12)}… registered + openFor ${openTx.slice(0, 12)}… (WBTC locked)`);
+    console.log(
+      `[api] order ${orderId.slice(0, 12)}… registered + openFor ${openTx.slice(0, 12)}… (WBTC locked)`
+    );
     return { orderId, status: "seen", openTx };
   }
 
@@ -488,7 +608,7 @@ export function createApi(deps: ApiDeps) {
    */
   /**
    * POST /orders/:orderId/accepted — ADVISORY hint that the user's app saw the
-   * cBTC delivery resolve. This endpoint is UNAUTHENTICATED, so its body is NOT
+   * CBTC delivery resolve. This endpoint is UNAUTHENTICATED, so its body is NOT
    * trusted to change order state (SECURITY: HIGH-2/HIGH-3). It only triggers an
    * immediate AUTHORITATIVE re-check via `resolveDelivery` — the exact same
    * on-ledger verification the watch loop runs — which advances `delivering →
@@ -506,21 +626,32 @@ export function createApi(deps: ApiDeps) {
     await store.reload();
     const rec = await store.get(orderId);
     if (!rec) throw new ApiError(404, "order not found");
-    if (rec.status === "finalised" || rec.status === "refunded" || rec.status === "failed") {
+    if (
+      rec.status === "finalised" ||
+      rec.status === "refunded" ||
+      rec.status === "failed"
+    ) {
       return { orderId, status: rec.status, alreadyTerminal: true };
     }
     // Authoritative re-check (ignores the request body entirely). Only advances
     // the order if the solver's own ledger view confirms the accept.
-    await resolveDelivery(store, canton, orderId, { now: nowSeconds(), fromOffset: 0 }).catch(
-      () => undefined,
-    );
+    await resolveDelivery(store, canton, orderId, {
+      now: nowSeconds(),
+      fromOffset: 0
+    }).catch(() => undefined);
     const updated = await store.get(orderId);
     return { orderId, status: updated?.status ?? rec.status };
   }
 
   // Shared refund deps — the same logic the watch loop's auto-refund sweep uses,
   // so on-demand and automatic refunds behave identically.
-  const refundDeps: RefundDeps = { store, escrow: cfg.escrow, wallet, account, pub };
+  const refundDeps: RefundDeps = {
+    store,
+    escrow: cfg.escrow,
+    wallet,
+    account,
+    pub
+  };
 
   async function handleRefund(orderId: Hex) {
     await store.reload();
@@ -536,7 +667,10 @@ export function createApi(deps: ApiDeps) {
       case "alreadyFinalised":
         throw new ApiError(409, "order already finalised — nothing to refund");
       case "notYet":
-        throw new ApiError(425, `not yet refundable — expires in ${outcome.secondsLeft}s`);
+        throw new ApiError(
+          425,
+          `not yet refundable — expires in ${outcome.secondsLeft}s`
+        );
       case "error":
         throw new ApiError(502, `refund submission failed: ${outcome.message}`);
     }
@@ -551,12 +685,26 @@ export function createApi(deps: ApiDeps) {
       floatError = e instanceof Error ? e.message : String(e);
     }
     // De-peg status — so ops/UI can see if swaps are paused and why.
-    let depeg: { paused: boolean; priceBtc?: number; deviationBps?: number; reason?: string } | null = null;
+    let depeg: {
+      paused: boolean;
+      priceBtc?: number;
+      deviationBps?: number;
+      reason?: string;
+    } | null = null;
     if (depegGuard) {
       const peg = await depegGuard.check(nowSeconds());
       depeg = peg.ok
-        ? { paused: false, priceBtc: peg.priceBtc, deviationBps: peg.deviationBps }
-        : { paused: true, priceBtc: peg.priceBtc, deviationBps: peg.deviationBps, reason: peg.reason };
+        ? {
+            paused: false,
+            priceBtc: peg.priceBtc,
+            deviationBps: peg.deviationBps
+          }
+        : {
+            paused: true,
+            priceBtc: peg.priceBtc,
+            deviationBps: peg.deviationBps,
+            reason: peg.reason
+          };
     }
     return {
       ok: true,
@@ -569,14 +717,17 @@ export function createApi(deps: ApiDeps) {
       feeBps,
       floatSats,
       floatError,
-      depeg,
+      depeg
     };
   }
 
   const server = createServer((req, res) => {
     void route(req, res).catch((e) => {
-      if (e instanceof ApiError) return send(res, e.status, { error: e.message });
-      send(res, 500, { error: e instanceof Error ? e.message : "internal error" });
+      if (e instanceof ApiError)
+        return send(res, e.status, { error: e.message });
+      send(res, 500, {
+        error: e instanceof Error ? e.message : "internal error"
+      });
     });
   });
 
@@ -598,7 +749,8 @@ export function createApi(deps: ApiDeps) {
     const logReq = method !== "GET";
     if (logReq) console.log(`[api] ${method} ${path}`);
 
-    if (method === "GET" && path === "/health") return send(res, 200, await handleHealth());
+    if (method === "GET" && path === "/health")
+      return send(res, 200, await handleHealth());
 
     if (method === "POST" && path === "/quote") {
       const body = (await readBody(req)) as Record<string, unknown>;
@@ -631,7 +783,7 @@ export function createApi(deps: ApiDeps) {
       return send(res, 200, await handleRefund(r[1] as Hex));
     }
 
-    // The user's app reports the cBTC delivery outcome (from their Loop history).
+    // The user's app reports the CBTC delivery outcome (from their Loop history).
     const ac = path.match(/^\/orders\/(0x[0-9a-fA-F]{64})\/accepted$/);
     if (method === "POST" && ac) {
       const body = (await readBody(req)) as Record<string, unknown>;
@@ -664,7 +816,7 @@ function publicOrder(rec: OrderRecord) {
     finaliseTxHash: rec.finaliseTxHash,
     note: rec.note,
     createdAt: rec.createdAt,
-    updatedAt: rec.updatedAt,
+    updatedAt: rec.updatedAt
   };
 }
 

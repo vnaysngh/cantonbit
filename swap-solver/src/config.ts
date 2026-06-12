@@ -39,7 +39,7 @@ export interface SwapNetworkConfig {
 
   /**
    * `output.settler` identifier — the "application" slot in the proof tuple.
-   * A fixed sentinel representing the Canton cBTC settlement. Chosen by us.
+   * A fixed sentinel representing the Canton CBTC settlement. Chosen by us.
    */
   readonly cantonSettlerId: Hex; // bytes32
 
@@ -57,10 +57,10 @@ const CANTON_CHAIN_BASE = 1_000_000_000_000_000n; // 1e15
 const CANTON_CHAIN_OFFSET: Record<NetworkName, bigint> = {
   devnet: 1n,
   testnet: 2n,
-  mainnet: 3n,
+  mainnet: 3n
 };
 
-/** A fixed, human-recognizable sentinel for the Canton cBTC settler id. */
+/** A fixed, human-recognizable sentinel for the Canton CBTC settler id. */
 const CANTON_SETTLER_SENTINEL: Hex = pad("0xcB7c5e771e", { size: 32 });
 
 /**
@@ -92,12 +92,12 @@ export function makeNetworkConfig(params: {
     // (DELIVERY_MARGIN_SECONDS in index.ts), or every order is born already too
     // close to its deadline to ever be delivered (the bug that stalled live
     // swaps: 10m fill window vs 30m delivery margin → unfillable). Budget:
-    //   deliver cBTC (secs) + accept (secs–mins) + attest + finalise (~1–2m).
+    //   deliver CBTC (secs) + accept (secs–mins) + attest + finalise (~1–2m).
     // So: 30m to fill (margin is 10m → 20m of real slack), 45m to expiry (when
     // the user's refund unlocks + the watch loop auto-refunds). fillDeadline MUST
     // be < expires. Overridable via env/CLI. Keep fill > 3× the delivery margin.
     fillDeadlineSeconds: params.fillDeadlineSeconds ?? 30 * 60,
-    expiresSeconds: params.expiresSeconds ?? 45 * 60,
+    expiresSeconds: params.expiresSeconds ?? 45 * 60
   };
 }
 

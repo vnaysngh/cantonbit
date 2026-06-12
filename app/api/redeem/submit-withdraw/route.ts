@@ -37,8 +37,8 @@ export async function POST(req: NextRequest) {
       withdrawAccountTemplateId,
       withdrawAccountCreatedEventBlob,
       holdingCids,
-      amount,
-    } = await req.json() as {
+      amount
+    } = (await req.json()) as {
       partyId?: string;
       withdrawAccountContractId?: string;
       withdrawAccountTemplateId?: string;
@@ -59,8 +59,10 @@ export async function POST(req: NextRequest) {
     if (!withdrawAccountContractId || !holdingCids?.length || !amount) {
       console.error(`${TAG} missing required fields`);
       return NextResponse.json(
-        { error: "withdrawAccountContractId, holdingCids, and amount required" },
-        { status: 400 },
+        {
+          error: "withdrawAccountContractId, holdingCids, and amount required"
+        },
+        { status: 400 }
       );
     }
 
@@ -72,19 +74,30 @@ export async function POST(req: NextRequest) {
     // wrong (credential-demanding) package's Withdraw choice. So we now REQUIRE
     // it and fail loudly rather than guess.
     if (!withdrawAccountTemplateId) {
-      console.error(`${TAG} missing withdrawAccountTemplateId — refusing to guess the package`);
+      console.error(
+        `${TAG} missing withdrawAccountTemplateId — refusing to guess the package`
+      );
       return NextResponse.json(
-        { error: "withdrawAccountTemplateId is required (must match the account's createdEventBlob package)" },
-        { status: 400 },
+        {
+          error:
+            "withdrawAccountTemplateId is required (must match the account's createdEventBlob package)"
+        },
+        { status: 400 }
       );
     }
     const withdrawAccountTpl = withdrawAccountTemplateId;
 
     console.log(`${TAG} partyId=${partyId.slice(0, 30)}...`);
-    console.log(`${TAG} withdrawAccountContractId=${withdrawAccountContractId}`);
-    console.log(`${TAG} holdingCids count=${holdingCids.length} ids=${holdingCids.map(c => c.slice(0, 15)).join(",")}`);
+    console.log(
+      `${TAG} withdrawAccountContractId=${withdrawAccountContractId}`
+    );
+    console.log(
+      `${TAG} holdingCids count=${holdingCids.length} ids=${holdingCids.map((c) => c.slice(0, 15)).join(",")}`
+    );
     console.log(`${TAG} amount=${amount}`);
-    console.log(`${TAG} network=${NETWORK.name} ledgerHost=${NETWORK.ledgerHost}`);
+    console.log(
+      `${TAG} network=${NETWORK.name} ledgerHost=${NETWORK.ledgerHost}`
+    );
 
     console.log(`${TAG} fetching JWT from Authentik...`);
     let jwt = await getLedgerJwt();
@@ -103,7 +116,7 @@ export async function POST(req: NextRequest) {
         applicationId: APPLICATION_ID,
         workflowId: `cbtc-withdraw-${commandId}`,
         commandId,
-        // Burn is submitted as the HOLDING OWNER (the user party). cBTC holdings
+        // Burn is submitted as the HOLDING OWNER (the user party). CBTC holdings
         // are signed by [cbtc-network, the user party]; warpx is not a signatory.
         // Our m2m JWT has authority over cbtc-user-* parties.
         actAs: [partyId],
@@ -116,19 +129,19 @@ export async function POST(req: NextRequest) {
               choice: WITHDRAW_CHOICE,
               choiceArgument: {
                 tokens: holdingCids,
-                amount,
-              },
-            },
-          },
+                amount
+              }
+            }
+          }
         ],
         disclosedContracts: [
           {
             templateId: withdrawAccountTpl,
             contractId: withdrawAccountContractId,
             createdEventBlob: withdrawAccountCreatedEventBlob ?? "",
-            synchronizerId: "",
-          },
-        ],
+            synchronizerId: ""
+          }
+        ]
       };
     };
 
@@ -148,9 +161,15 @@ export async function POST(req: NextRequest) {
     console.log(`${TAG} choice=${WITHDRAW_CHOICE}`);
     console.log(`${TAG} withdrawAccount.templateId=${withdrawAccountTpl}`);
     console.log(`${TAG} withdrawAccount.package=${tplPkg}`);
-    console.log(`${TAG} withdrawAccount.contractId=${withdrawAccountContractId}`);
-    console.log(`${TAG} withdrawAccount.createdEventBlob.length=${(withdrawAccountCreatedEventBlob ?? "").length}`);
-    console.log(`${TAG} withdrawAccount.createdEventBlob.head=${(withdrawAccountCreatedEventBlob ?? "").slice(0, 40)}`);
+    console.log(
+      `${TAG} withdrawAccount.contractId=${withdrawAccountContractId}`
+    );
+    console.log(
+      `${TAG} withdrawAccount.createdEventBlob.length=${(withdrawAccountCreatedEventBlob ?? "").length}`
+    );
+    console.log(
+      `${TAG} withdrawAccount.createdEventBlob.head=${(withdrawAccountCreatedEventBlob ?? "").slice(0, 40)}`
+    );
     console.log(`${TAG} choiceArgument.amount=${amount}`);
     console.log(`${TAG} choiceArgument.tokens=${JSON.stringify(holdingCids)}`);
     console.log(`${TAG} ledgerHost=${NETWORK.ledgerHost}`);
@@ -164,24 +183,32 @@ export async function POST(req: NextRequest) {
 
     let res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${jwt}`
+      },
       body: JSON.stringify(buildBody(commandId)),
-      cache: "no-store",
+      cache: "no-store"
     });
 
     console.log(`${TAG} ledger response status=${res.status}`);
 
     if (res.status === 401) {
-      console.warn(`${TAG} 401 from ledger — invalidating JWT cache and retrying...`);
+      console.warn(
+        `${TAG} 401 from ledger — invalidating JWT cache and retrying...`
+      );
       invalidateLedgerJwtCache();
       jwt = await getLedgerJwt();
       commandId = randomUUID();
       console.log(`${TAG} retrying with fresh JWT, commandId=${commandId}`);
       res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${jwt}`
+        },
         body: JSON.stringify(buildBody(commandId)),
-        cache: "no-store",
+        cache: "no-store"
       });
       console.log(`${TAG} retry response status=${res.status}`);
     }
@@ -191,9 +218,12 @@ export async function POST(req: NextRequest) {
       commandId = randomUUID();
       res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${jwt}`
+        },
         body: JSON.stringify(buildBody(commandId)),
-        cache: "no-store",
+        cache: "no-store"
       });
       console.log(`${TAG} conflict retry response status=${res.status}`);
     }
@@ -203,11 +233,17 @@ export async function POST(req: NextRequest) {
       console.error(`${TAG} ledger error status=${res.status} body=${text}`);
       if (res.status === 404 && text.includes("unknown template")) {
         return NextResponse.json(
-          { error: "Node configuration required: cBTC DARs not uploaded to node. Contact support." },
-          { status: 502 },
+          {
+            error:
+              "Node configuration required: CBTC DARs not uploaded to node. Contact support."
+          },
+          { status: 502 }
         );
       }
-      return NextResponse.json({ error: `Ledger error (${res.status}): ${text}` }, { status: 502 });
+      return NextResponse.json(
+        { error: `Ledger error (${res.status}): ${text}` },
+        { status: 502 }
+      );
     }
 
     // Parse the burn's updateId — returned to the client and used as the stable
@@ -227,10 +263,9 @@ export async function POST(req: NextRequest) {
     }
 
     console.log(
-      `${TAG} success! burn submitted for amount=${amount} updateId=${burnUpdateId ?? "(unknown)"}`,
+      `${TAG} success! burn submitted for amount=${amount} updateId=${burnUpdateId ?? "(unknown)"}`
     );
     return NextResponse.json({ ok: true, burnUpdateId });
-
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`${TAG} unexpected error:`, err);

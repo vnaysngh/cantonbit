@@ -2,7 +2,7 @@ import "server-only";
 
 import { NextResponse } from "next/server";
 
-import { NETWORK } from "@/lib/constants";
+import { createSupabaseServiceClient } from "@/lib/supabase/server";
 import { resolveSessionParty } from "@/lib/session-party";
 import { getJwtSession, loopApiBase } from "@/lib/swap-session";
 import { htlcService, type SwapOrder } from "@/lib/htlc-service-singleton";
@@ -33,10 +33,17 @@ export function requireDaemon(req: Request): GuardOk | GuardErr {
   return unauthorized("Daemon authorization required");
 }
 
-export function isWarpxHostedParty(party: string): boolean {
-  const warpxNs = NETWORK.warpxPartyId.split("::")[1] ?? "";
-  const partyNs = party.split("::")[1] ?? "";
-  return !!warpxNs && partyNs === warpxNs;
+/** Email/participant-managed party hosted on our warpx node (backend CanActAs). */
+export async function isParticipantManagedParty(party: string): Promise<boolean> {
+  if (!party.includes("::")) return false;
+  const sb = await createSupabaseServiceClient();
+  const { data } = await sb
+    .from("party_mappings")
+    .select("party_hint")
+    .eq("canton_party_id", party)
+    .eq("party_hint", "participant-managed")
+    .maybeSingle();
+  return !!data;
 }
 
 export function loopProfileParty(profile: unknown): string | null {
@@ -73,7 +80,7 @@ async function resolveLoopSessionParty(): Promise<string | null> {
 export async function requirePartyOwner(party: string): Promise<GuardOk<{ partyId: string }> | GuardErr> {
   if (!party || !party.includes("::")) return unauthorized("Invalid Canton party", 400);
 
-  if (isWarpxHostedParty(party)) {
+  if (await isParticipantManagedParty(party)) {
     const session = await resolveSessionParty(party);
     if (session.error) return { error: session.error };
     return { partyId: session.partyId, error: null };

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 import { ChainIcon } from "@/components/ChainIcon";
@@ -51,7 +52,7 @@ import {
   htlcApi,
   evmApproveAndLock,
   evmClaim,
-  evmRetake,
+  evmRetake
 } from "@/lib/htlc-client";
 import { listLoopCbtcHoldingCids } from "@/lib/loop-holdings";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
@@ -64,18 +65,22 @@ import {
   readActiveHtlcSwap,
   vaultExpiryFromTimelock,
   vaultMetaFromOrder,
-  type SecretVaultMeta,
+  type SecretVaultMeta
 } from "@/lib/secret-vault";
 import {
   timelocksFromExpiration,
   EXPIRATION_OPTIONS,
-  DEFAULT_EXPIRATION_SECONDS,
+  DEFAULT_EXPIRATION_SECONDS
 } from "@/lib/htlc-timelock";
 
 // HTLC EVM leg config (Base Sepolia). The new trustless escrow (replaces the old
 // oracle InputSettlerEscrow for swaps).
-const HTLC_ESCROW = process.env.NEXT_PUBLIC_HTLC_ESCROW ?? "0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1";
-const SOLVER_EVM = process.env.NEXT_PUBLIC_SOLVER_EVM ?? "0x0B95ec21579aee6Ef7b712976bD86689D68b5A08";
+const HTLC_ESCROW =
+  process.env.NEXT_PUBLIC_HTLC_ESCROW ??
+  "0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1";
+const SOLVER_EVM =
+  process.env.NEXT_PUBLIC_SOLVER_EVM ??
+  "0x0B95ec21579aee6Ef7b712976bD86689D68b5A08";
 const SOLVER_CANTON = process.env.NEXT_PUBLIC_SOLVER_CANTON ?? "";
 
 type Stage =
@@ -87,27 +92,61 @@ type Stage =
   | { kind: "signing"; quote: QuoteResponse }
   | { kind: "submitting"; quote: QuoteResponse }
   | { kind: "tracking"; orderId: string; order: OrderView | null }
-  // HTLC: waiting for the independent solver to lock the cBTC counter.
-  | { kind: "htlc-locking"; quote: QuoteResponse; swapId: string; secret: string; lockTx: string }
+  // HTLC: waiting for the independent solver to lock the CBTC counter.
+  | {
+      kind: "htlc-locking";
+      quote: QuoteResponse;
+      swapId: string;
+      secret: string;
+      lockTx: string;
+    }
   // HTLC: both legs locked — the USER can now claim (press to reveal).
-  | { kind: "htlc-claimable"; swapId: string; secret: string; lockTx: string; claimError?: string }
+  | {
+      kind: "htlc-claimable";
+      swapId: string;
+      secret: string;
+      lockTx: string;
+      claimError?: string;
+    }
   // HTLC: refresh detected a claimable swap — user must unlock vault before claim.
-  | { kind: "htlc-resume"; swapId: string; lockTx: string; unlockError?: string }
+  | {
+      kind: "htlc-resume";
+      swapId: string;
+      lockTx: string;
+      unlockError?: string;
+    }
   // HTLC: the user's claim (reveal) is in flight.
   | { kind: "htlc-claiming"; swapId: string; secret: string; lockTx: string }
   // HTLC swap completed. swapId = hashLock.
-  | { kind: "htlc-done"; swapId: string; lockTx: string }
+  | {
+      kind: "htlc-done";
+      swapId: string;
+      lockTx: string;
+      wbtcAmount?: string;
+      cbtcAmount?: string;
+    }
   // HTLC: the user retook (refunded) their WBTC after a stuck swap.
   | { kind: "htlc-refunded"; swapId: string; retakeTx: string }
-  // ===== REVERSE (canton-to-evm): sell cBTC, receive WBTC =====
-  // rev-locking: backend locks the user's cBTC on-ledger, then waits for the
+  // ===== REVERSE (canton-to-evm): sell CBTC, receive WBTC =====
+  // rev-locking: backend locks the user's CBTC on-ledger, then waits for the
   // solver's WBTC counter-lock. rev-claimable: user claims WBTC in MetaMask
-  // (= the secret reveal). rev-done: WBTC claimed; the solver claims the cBTC.
+  // (= the secret reveal). rev-done: WBTC claimed; the solver claims the CBTC.
   | { kind: "rev-locking"; swapId: string; secret: string }
-  | { kind: "rev-claimable"; swapId: string; secret: string; claimError?: string }
+  | {
+      kind: "rev-claimable";
+      swapId: string;
+      secret: string;
+      claimError?: string;
+    }
   | { kind: "rev-resume"; swapId: string; unlockError?: string }
   | { kind: "rev-claiming"; swapId: string; secret: string }
-  | { kind: "rev-done"; swapId: string; claimTx: string }
+  | {
+      kind: "rev-done";
+      swapId: string;
+      claimTx: string;
+      wbtcAmount?: string;
+      cbtcAmount?: string;
+    }
   | { kind: "error"; message: string };
 
 // NOTE: pending-order persistence + multi-order tracking now lives in
@@ -122,7 +161,7 @@ export default function SwapPage() {
   const evm = useEvmWallet();
   const wallet = useWallet();
 
-  // PARTICIPANT-MANAGED (default): the cBTC recipient is the logged-in user's party
+  // PARTICIPANT-MANAGED (default): the CBTC recipient is the logged-in user's party
   // hosted on OUR warpx node (fetched from /api/parties/me). The backend signs the
   // on-ledger claim for them (CanActAs) — no Loop wallet needed. We fall back to the
   // connected Loop party only if there's no session (the legacy/Loop path).
@@ -134,18 +173,31 @@ export default function SwapPage() {
     let alive = true;
     fetch("/api/parties/me")
       .then((r) => r.json())
-      .then((d) => { if (alive) { setSessionParty(d?.partyId ?? null); setSessionReadyAuth(!!d?.authed); } })
+      .then((d) => {
+        if (alive) {
+          setSessionParty(d?.partyId ?? null);
+          setSessionReadyAuth(!!d?.authed);
+        }
+      })
       .catch(() => {})
-      .finally(() => { if (alive) setIdentityProbed(true); });
-    return () => { alive = false; };
+      .finally(() => {
+        if (alive) setIdentityProbed(true);
+      });
+    return () => {
+      alive = false;
+    };
   }, []);
   useEffect(() => {
     let alive = true;
     void createSupabaseBrowserClient()
       .auth.getUser()
-      .then(({ data }) => { if (alive) setSessionUserId(data.user?.id ?? null); })
+      .then(({ data }) => {
+        if (alive) setSessionUserId(data.user?.id ?? null);
+      })
       .catch(() => {});
-    return () => { alive = false; };
+    return () => {
+      alive = false;
+    };
   }, []);
 
   const destinationParty =
@@ -162,20 +214,24 @@ export default function SwapPage() {
     if (!destinationParty) router.replace("/login");
   }, [identityProbed, wallet.isLoading, destinationParty, router]);
   // Is this a participant-managed swap (backend signs the claim) vs Loop (user signs)?
-  const isParticipantManaged = !!sessionParty && destinationParty === sessionParty;
+  const isParticipantManaged =
+    !!sessionParty && destinationParty === sessionParty;
 
   const vaultRecallContext = useVaultContext({
     loopProvider: wallet.provider,
     evmAddress: evm.account,
     sessionUserId,
-    sessionPartyId: sessionParty,
+    sessionPartyId: sessionParty
   });
 
   const persistSwapSecret = useCallback(
     async (
       swapId: string,
       secret: string,
-      meta: Omit<SecretVaultMeta, "expiresAt"> & { userTimelock: number; solverTimelock?: number },
+      meta: Omit<SecretVaultMeta, "expiresAt"> & {
+        userTimelock: number;
+        solverTimelock?: number;
+      }
     ) => {
       const ok = await rememberSecret(
         swapId,
@@ -184,30 +240,34 @@ export default function SwapPage() {
           ...meta,
           expiresAt: vaultExpiryFromTimelock(meta.userTimelock, {
             direction: meta.direction,
-            solverTimelock: meta.solverTimelock,
-          }),
+            solverTimelock: meta.solverTimelock
+          })
         },
-        await vaultRecallContext(),
+        await vaultRecallContext()
       );
       if (!ok) {
         throw new Error(
-          "Could not save the swap secret on this device. Reconnect your wallet/account and try again before locking funds.",
+          "Could not save the swap secret on this device. Reconnect your wallet/account and try again before locking funds."
         );
       }
     },
-    [vaultRecallContext],
+    [vaultRecallContext]
   );
 
   // Amount starts EMPTY (CoW-style) — no default value. The input shows its "0.0"
   // placeholder and the button reads "Enter an amount" until the user types. All
   // downstream logic (receiveEstimate, amountState) already treats "" as not-set.
   const [amount, setAmount] = useState("");
-  // Swap direction. canton-to-evm (sell cBTC) is EMAIL/participant-managed only in
+  // Swap direction. canton-to-evm (sell CBTC) is EMAIL/participant-managed only in
   // v1 (Loop sellers = phase 2, see docs/canton-to-evm-design.md).
-  const [direction, setDirection] = useState<"evm-to-canton" | "canton-to-evm">("evm-to-canton");
+  const [direction, setDirection] = useState<"evm-to-canton" | "canton-to-evm">(
+    "evm-to-canton"
+  );
   const isReverse = direction === "canton-to-evm";
   // Order expiration (Cancore §8) → drives the staggered HTLC timelocks.
-  const [expirationSeconds, setExpirationSeconds] = useState<number>(DEFAULT_EXPIRATION_SECONDS);
+  const [expirationSeconds, setExpirationSeconds] = useState<number>(
+    DEFAULT_EXPIRATION_SECONDS
+  );
   const [stage, setStage] = useState<Stage>({ kind: "idle" });
   const [wbtcBalance, setWbtcBalance] = useState<bigint | null>(null);
 
@@ -253,7 +313,9 @@ export default function SwapPage() {
       }
       await refreshBalance(SWAP_CHAIN.wbtc);
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [evm.account, wrongChain, refreshBalance]);
 
   // --- CBTC auto-accept (preapproval) gate. With it ON, the delivered CBTC
@@ -329,7 +391,9 @@ export default function SwapPage() {
   }, [wallet.provider]);
 
   /** Loop forward path only — managed (email) swaps use on-ledger HtlcLock, not Loop preapproval. */
-  const probeCbtcAutoAccept = useCallback(async (): Promise<"ok" | "off" | "no-session" | "skipped"> => {
+  const probeCbtcAutoAccept = useCallback(async (): Promise<
+    "ok" | "off" | "no-session" | "skipped"
+  > => {
     if (isParticipantManaged || !wallet.provider) return "skipped";
     const ok = await hasCbtcAutoAccept(wallet.provider);
     setAutoAccept(ok);
@@ -339,9 +403,15 @@ export default function SwapPage() {
   }, [isParticipantManaged, wallet.provider]);
 
   // Loop forward: warn as soon as the JWT session is ready (not only on Review click).
-  // Participant-managed users skip — their cBTC leg doesn't use Loop preapproval.
+  // Participant-managed users skip — their CBTC leg doesn't use Loop preapproval.
   useEffect(() => {
-    if (isParticipantManaged || isReverse || !wallet.provider || sessionReady !== true) return;
+    if (
+      isParticipantManaged ||
+      isReverse ||
+      !wallet.provider ||
+      sessionReady !== true
+    )
+      return;
     let cancelled = false;
     void (async () => {
       const gate = await probeCbtcAutoAccept();
@@ -349,8 +419,16 @@ export default function SwapPage() {
       setEnableVisited(false);
       setShowEnablePopup(true);
     })();
-    return () => { cancelled = true; };
-  }, [isParticipantManaged, isReverse, wallet.provider, sessionReady, probeCbtcAutoAccept]);
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    isParticipantManaged,
+    isReverse,
+    wallet.provider,
+    sessionReady,
+    probeCbtcAutoAccept
+  ]);
 
   const fail = (message: string) => setStage({ kind: "error", message });
 
@@ -398,8 +476,8 @@ export default function SwapPage() {
       return;
     }
 
-    // GATE (Loop forward only): cBTC auto-accept must be ON or the solver could
-    // take WBTC before the user holds cBTC. Managed users skip — on-ledger path.
+    // GATE (Loop forward only): CBTC auto-accept must be ON or the solver could
+    // take WBTC before the user holds CBTC. Managed users skip — on-ledger path.
     if (!isParticipantManaged && wallet.provider) {
       setStage({ kind: "quoting" }); // brief "Checking…" during the read
       const gate = await probeCbtcAutoAccept();
@@ -430,13 +508,22 @@ export default function SwapPage() {
       // than a raw error, so the user understands it's temporary + protective.
       if (e instanceof ApiError && e.status === 503) {
         fail(
-          "Swaps are paused — the WBTC/BTC price is temporarily unstable. This protects your funds; please try again shortly.",
+          "Swaps are paused — the WBTC/BTC price is temporarily unstable. This protects your funds; please try again shortly."
         );
         return;
       }
       fail(getSwapErrorMessage(e));
     }
-  }, [evm.account, destinationParty, amount, refreshBalance, wallet.provider, sessionReady, isParticipantManaged, probeCbtcAutoAccept]);
+  }, [
+    evm.account,
+    destinationParty,
+    amount,
+    refreshBalance,
+    wallet.provider,
+    sessionReady,
+    isParticipantManaged,
+    probeCbtcAutoAccept
+  ]);
 
   // --- ENABLE-AUTO-ACCEPT popup actions ---
   // CTA 1: open Loop settings in a new tab and flip the CTA to "confirm".
@@ -469,10 +556,13 @@ export default function SwapPage() {
   // pending-orders list (which polls it independently and survives refresh/tabs)
   // and focus the detailed stage view on it. The list — not this function — owns
   // polling + persistence + pruning now, so nothing is orphaned by a later swap.
-  const startTracking = useCallback((orderId: string) => {
-    addOrder(orderId);
-    setStage({ kind: "tracking", orderId, order: null });
-  }, [addOrder]);
+  const startTracking = useCallback(
+    (orderId: string) => {
+      addOrder(orderId);
+      setStage({ kind: "tracking", orderId, order: null });
+    },
+    [addOrder]
+  );
 
   // --- 2. approve (if needed) + 3. sign + 4. submit ---
   // Recoverable failures (rejected approve/sign, transient submit) return to the
@@ -486,21 +576,26 @@ export default function SwapPage() {
         return;
       }
       if (!SOLVER_CANTON) {
-        retry("Solver Canton party not configured (NEXT_PUBLIC_SOLVER_CANTON).");
+        retry(
+          "Solver Canton party not configured (NEXT_PUBLIC_SOLVER_CANTON)."
+        );
         return;
       }
       const wbtcUnits = BigInt(quote.order.inputs[0][1]);
       const cbtcUnits = BigInt(quote.order.outputs[0].amount);
-      const cbtcAmount = (Number(cbtcUnits) / 1e8).toFixed(8); // cBTC decimal string
+      const cbtcAmount = (Number(cbtcUnits) / 1e8).toFixed(8); // CBTC decimal string
 
-      // ===== HTLC FLOW (trustless EVM leg + Cancore-style reveal on cBTC) =====
+      // ===== HTLC FLOW (trustless EVM leg + Cancore-style reveal on CBTC) =====
       // 1. generate the secret (stays in the browser until the reveal) + create order
       const { secret, hashLock } = generateSecret();
       const id = hashLock; // swapId = hashLock
       const now = Math.floor(Date.now() / 1000);
       // Derive the staggered timelocks from the chosen order expiration (Cancore §8):
       // userTimelock (EVM, = now + expiration) > solverTimelock (Canton, − gap).
-      const { userTimelock, solverTimelock } = timelocksFromExpiration(now, expirationSeconds);
+      const { userTimelock, solverTimelock } = timelocksFromExpiration(
+        now,
+        expirationSeconds
+      );
       try {
         setStage({ kind: "submitting", quote });
         await htlcApi.createOrder({
@@ -516,7 +611,7 @@ export default function SwapPage() {
           cbtcAmount,
           solverTimelock,
           // managed (email) → on-ledger HtlcLock; loop → standard transfer + accept.
-          counterMode: isParticipantManaged ? "managed" : "loop",
+          counterMode: isParticipantManaged ? "managed" : "loop"
         });
         await htlcApi.accept(id); // (the independent solver also accepts; idempotent)
         await persistSwapSecret(id, secret, {
@@ -525,7 +620,7 @@ export default function SwapPage() {
           userCantonParty: quote.cantonParty,
           userEvmAddress: evm.account,
           userTimelock,
-          solverTimelock,
+          solverTimelock
         });
       } catch (e) {
         retry(`Could not create the swap order: ${getSwapErrorMessage(e)}`);
@@ -537,14 +632,19 @@ export default function SwapPage() {
       try {
         setStage({ kind: "approving", quote });
         const wbtcToken = SWAP_CHAIN.wbtc || quote.wbtc;
-        lockTx = await evmApproveAndLock(evm.sendTransaction, evm.call, evm.account, {
-          wbtc: wbtcToken,
-          escrow: HTLC_ESCROW,
-          amount: wbtcUnits,
-          hashLock,
-          unlockTime: userTimelock,
-          receiver: SOLVER_EVM,
-        });
+        lockTx = await evmApproveAndLock(
+          evm.sendTransaction,
+          evm.call,
+          evm.account,
+          {
+            wbtc: wbtcToken,
+            escrow: HTLC_ESCROW,
+            amount: wbtcUnits,
+            hashLock,
+            unlockTime: userTimelock,
+            receiver: SOLVER_EVM
+          }
+        );
         await htlcApi.recordMainLock(id, lockTx);
       } catch (e) {
         retry(
@@ -555,7 +655,7 @@ export default function SwapPage() {
         return;
       }
 
-      // 4. WAIT for the INDEPENDENT SOLVER to lock the cBTC counter (htlc_active).
+      // 4. WAIT for the INDEPENDENT SOLVER to lock the CBTC counter (htlc_active).
       // The solver daemon verifies our on-chain WBTC lock first, then locks. We do
       // NOT lock or claim here — the user claims as a separate, deliberate step.
       try {
@@ -565,19 +665,28 @@ export default function SwapPage() {
           await sleep(3000);
           const { order } = await htlcApi.getOrder(id);
           // LOOP orders skip the Canton counter-lock entirely (custody ordering: the
-          // cBTC is delivered at reveal time) — claimable as soon as the WBTC lock
+          // CBTC is delivered at reveal time) — claimable as soon as the WBTC lock
           // is recorded. Managed orders wait for the on-ledger HtlcLock as before.
-          if (order?.counterMode === "loop" && order?.status === "main_locked") {
+          if (
+            order?.counterMode === "loop" &&
+            order?.status === "main_locked"
+          ) {
             counterLocked = true;
             break;
           }
-          if (order?.status === "counter_locked" || order?.status === "counter_claimed" || order?.status === "main_claimed") {
+          if (
+            order?.status === "counter_locked" ||
+            order?.status === "counter_claimed" ||
+            order?.status === "main_claimed"
+          ) {
             counterLocked = true;
             break;
           }
         }
         if (!counterLocked) {
-          retry("The solver hasn't locked the cBTC counter yet. Is the solver running? Try again or refund after the timelock.");
+          retry(
+            "The solver hasn't locked the CBTC counter yet. Is the solver running? Try again or refund after the timelock."
+          );
           return;
         }
         // htlc_active — both legs locked. Now the USER claims.
@@ -592,7 +701,7 @@ export default function SwapPage() {
   // THE USER's CLAIM (the real reveal) — signed by the USER's Loop wallet.
   // HtlcLock.Claim is controller=receiver, so it MUST be submitted by the user's
   // own wallet (their participant supplies the receiver authority; Preapproval
-  // auto-accepts the cBTC delivery). The backend only PREPARES the command. Then
+  // auto-accepts the CBTC delivery). The backend only PREPARES the command. Then
   // the solver daemon reads the now-public preimage and claims the WBTC on EVM.
   const handleClaim = useCallback(
     async (swapId: string, secret: string, lockTx: string) => {
@@ -604,8 +713,12 @@ export default function SwapPage() {
         // the receiver party's namespace) — NOT the UI's isParticipantManaged, which
         // can be a stale closure from before the session probe resolved.
         const { order: claimOrder } = await htlcApi.getOrder(swapId);
-        const mode = (claimOrder as { counterMode?: string } | undefined)?.counterMode
-          ?? (isParticipantManaged ? "managed" : "loop");
+        const doneAmounts = claimOrder as
+          | { wbtcAmount?: string; cbtcAmount?: string }
+          | undefined;
+        const mode =
+          (claimOrder as { counterMode?: string } | undefined)?.counterMode ??
+          (isParticipantManaged ? "managed" : "loop");
 
         if (mode === "managed") {
           // PARTICIPANT-MANAGED: the backend signs HtlcLock.Claim AS the hosted
@@ -613,30 +726,47 @@ export default function SwapPage() {
           // the WBTC from the revealed preimage.
           await htlcApi.claimManaged(swapId, preimage);
           forgetSecret(swapId);
-          setStage({ kind: "htlc-done", swapId, lockTx });
+          setStage({
+            kind: "htlc-done",
+            swapId,
+            lockTx,
+            wbtcAmount: doneAmounts?.wbtcAmount,
+            cbtcAmount: doneAmounts?.cbtcAmount
+          });
           return;
         }
 
         // LOOP path (Loop's Option 1, custody ordering like Cancore's venue flow):
         // 1. REVEAL FIRST — send the secret to our node. The backend verifies the
-        //    preimage AND the real on-chain WBTC lock, then delivers the cBTC via a
+        //    preimage AND the real on-chain WBTC lock, then delivers the CBTC via a
         //    standard transfer. (Secret-before-delivery = the solver can always claim
         //    the WBTC; delivery-before-secret would let a user rob the solver.)
         // 2. The user signs a STANDARD TransferInstruction_Accept in their wallet —
         //    a built-in Splice choice on Loop's node (NO custom DAR).
         const provider = wallet.provider;
-        if (!provider) throw new Error("Connect your Loop wallet to accept your cBTC.");
+        if (!provider)
+          throw new Error("Connect your Loop wallet to accept your CBTC.");
         const reveal = await htlcApi.claimCounter(swapId, preimage); // reveal → verify → deliver
         if (reveal.delivered) {
-          // Preapproval auto-accepted the transfer — the cBTC is ALREADY in the
+          // Preapproval auto-accepted the transfer — the CBTC is ALREADY in the
           // user's Loop wallet. Nothing to sign; record and finish.
-          await htlcApi.recordClaim(swapId, preimage, reveal.updateId).catch(() => {});
+          await htlcApi
+            .recordClaim(swapId, preimage, reveal.updateId)
+            .catch(() => {});
           forgetSecret(swapId);
-          setStage({ kind: "htlc-done", swapId, lockTx });
+          setStage({
+            kind: "htlc-done",
+            swapId,
+            lockTx,
+            wbtcAmount: doneAmounts?.wbtcAmount,
+            cbtcAmount: doneAmounts?.cbtcAmount
+          });
           return;
         }
-        const { command, disclosedContracts, synchronizerId } = await htlcApi.prepareAccept(swapId);
-        const userParty = (provider as { party_id?: string }).party_id ?? wallet.partyId ?? "";
+        const { command, disclosedContracts, synchronizerId } =
+          await htlcApi.prepareAccept(swapId);
+        const userParty =
+          (provider as { party_id?: string }).party_id ?? wallet.partyId ?? "";
         const result = (await provider.submitAndWaitForTransaction(
           {
             commands: [command],
@@ -644,27 +774,40 @@ export default function SwapPage() {
             packageIdSelectionPreference: [],
             actAs: [userParty],
             readAs: [userParty],
-            synchronizerId,
+            synchronizerId
           },
           undefined
         )) as { updateId?: string; transactionTree?: { updateId?: string } };
-        const updateId = result?.updateId ?? result?.transactionTree?.updateId ?? "submitted";
+        const updateId =
+          result?.updateId ?? result?.transactionTree?.updateId ?? "submitted";
         // Reveal the preimage to our node so the solver claims the WBTC (the user's
         // standard accept above is their only Canton action).
         await htlcApi.recordClaim(swapId, preimage, updateId);
         forgetSecret(swapId);
-        setStage({ kind: "htlc-done", swapId, lockTx });
+        setStage({
+          kind: "htlc-done",
+          swapId,
+          lockTx,
+          wbtcAmount: doneAmounts?.wbtcAmount,
+          cbtcAmount: doneAmounts?.cbtcAmount
+        });
       } catch (e) {
-        setStage({ kind: "htlc-claimable", swapId, secret, lockTx, claimError: getSwapErrorMessage(e) });
+        setStage({
+          kind: "htlc-claimable",
+          swapId,
+          secret,
+          lockTx,
+          claimError: getSwapErrorMessage(e)
+        });
       }
     },
     [wallet, isParticipantManaged]
   );
 
-  // ===== REVERSE (canton-to-evm): sell cBTC, receive WBTC. Email users only. =====
-  // Flow (docs/canton-to-evm-design.md): backend locks the USER's cBTC on-ledger
+  // ===== REVERSE (canton-to-evm): sell CBTC, receive WBTC. Email users only. =====
+  // Flow (docs/canton-to-evm-design.md): backend locks the USER's CBTC on-ledger
   // (CanActAs, LONG timelock) → solver daemon locks WBTC on EVM (SHORT) → user
-  // claims the WBTC in MetaMask (= the secret reveal) → solver claims the cBTC
+  // claims the WBTC in MetaMask (= the secret reveal) → solver claims the CBTC
   // via the on-ledger keccak gate. Fully trustless both legs.
   const handleSwapReverse = useCallback(async () => {
     if (!evm.account || !destinationParty || !SOLVER_CANTON) return;
@@ -673,8 +816,12 @@ export default function SwapPage() {
       setStage({ kind: "quoting" });
       // RFQ quote from the server: live WBTC/BTC price applied directionally
       // (cbtc ÷ P), 20bps fee, 60s TTL, de-peg breaker (503 → error message).
-      const cbtcSats = parseWbtc(amount); // 8dp parse works for cBTC too
-      const q = await htlcApi.quoteReverse(evm.account, cbtcSats.toString(), destinationParty);
+      const cbtcSats = parseWbtc(amount); // 8dp parse works for CBTC too
+      const q = await htlcApi.quoteReverse(
+        evm.account,
+        cbtcSats.toString(),
+        destinationParty
+      );
       const wbtcUnits = BigInt(q.wbtcAmount);
       const cbtcAmount = (Number(cbtcSats) / 1e8).toFixed(8);
       const { secret, hashLock } = generateSecret();
@@ -682,18 +829,23 @@ export default function SwapPage() {
       const now = Math.floor(Date.now() / 1000);
       // Ladder FLIPPED: userTimelock (LONG) = Canton HtlcLock; solverTimelock
       // (SHORT) = the solver's EVM lock.
-      const { userTimelock, solverTimelock } = timelocksFromExpiration(now, expirationSeconds);
+      const { userTimelock, solverTimelock } = timelocksFromExpiration(
+        now,
+        expirationSeconds
+      );
       setStage({ kind: "rev-locking", swapId: id, secret });
       await htlcApi.createOrder({
-        id, direction: "canton-to-evm", hashLock,
-        userEvmAddress: evm.account,        // receives the WBTC
-        solverEvmAddress: SOLVER_EVM,       // pays the WBTC
+        id,
+        direction: "canton-to-evm",
+        hashLock,
+        userEvmAddress: evm.account, // receives the WBTC
+        solverEvmAddress: SOLVER_EVM, // pays the WBTC
         wbtcAmount: wbtcUnits.toString(),
         userTimelock,
-        userCantonParty: destinationParty,  // the session party selling cBTC
+        userCantonParty: destinationParty, // the session party selling CBTC
         solverCantonParty: SOLVER_CANTON,
         cbtcAmount,
-        solverTimelock,
+        solverTimelock
       });
       await htlcApi.accept(id);
       await persistSwapSecret(id, secret, {
@@ -702,23 +854,32 @@ export default function SwapPage() {
         userCantonParty: destinationParty,
         userEvmAddress: evm.account,
         userTimelock,
-        solverTimelock,
+        solverTimelock
       });
       if (isParticipantManaged) {
-        // EMAIL: backend locks the user's cBTC on-ledger (the "auto-locks" step).
+        // EMAIL: backend locks the user's CBTC on-ledger (the "auto-locks" step).
         await htlcApi.lockMain(id);
       } else {
         // LOOP SELLER: the user locks via the STANDARD AllocationFactory_Allocate
         // signed in THEIR wallet (escrow with a unilateral Allocation_Withdraw
         // exit — no custom contract ever touches the Loop party).
         const provider = wallet.provider;
-        if (!provider) throw new Error("Connect your Loop wallet to lock your cBTC.");
+        if (!provider)
+          throw new Error("Connect your Loop wallet to lock your CBTC.");
         const holdingCids = await listLoopCbtcHoldingCids(
-          provider as unknown as { getActiveContracts: (p?: { interfaceId?: string }) => Promise<unknown[]> },
+          provider as unknown as {
+            getActiveContracts: (p?: {
+              interfaceId?: string;
+            }) => Promise<unknown[]>;
+          }
         );
-        if (!holdingCids.length) throw new Error("No unlocked cBTC holdings found in your Loop wallet.");
+        if (!holdingCids.length)
+          throw new Error(
+            "No unlocked CBTC holdings found in your Loop wallet."
+          );
         const prep = await htlcApi.prepareLockLoop(id, holdingCids);
-        const userParty = (provider as { party_id?: string }).party_id ?? wallet.partyId ?? "";
+        const userParty =
+          (provider as { party_id?: string }).party_id ?? wallet.partyId ?? "";
         await provider.submitAndWaitForTransaction(
           {
             commands: [prep.command],
@@ -726,17 +887,27 @@ export default function SwapPage() {
             packageIdSelectionPreference: [],
             actAs: [userParty],
             readAs: [userParty],
-            synchronizerId: prep.synchronizerId,
+            synchronizerId: prep.synchronizerId
           },
-          undefined,
+          undefined
         );
         // Backend verifies the allocation from ITS OWN ledger view (never the browser).
         let confirmed = false;
         for (let i = 0; i < 10; i++) {
-          try { await htlcApi.confirmLockLoop(id); confirmed = true; break; }
-          catch { await sleep(2000); }
+          try {
+            await htlcApi.confirmLockLoop(id);
+            confirmed = true;
+            break;
+          } catch {
+            await sleep(2000);
+          }
         }
-        if (!confirmed) { fail("Your cBTC allocation was signed but not yet visible on-ledger — reopen this swap from Orders in a moment."); return; }
+        if (!confirmed) {
+          fail(
+            "Your CBTC allocation was signed but not yet visible on-ledger — reopen this swap from Orders in a moment."
+          );
+          return;
+        }
       }
       // Wait for the solver daemon to lock the WBTC counter on EVM.
       let counterLocked = false;
@@ -744,18 +915,37 @@ export default function SwapPage() {
         await sleep(3000);
         const { order } = await htlcApi.getOrder(id);
         const st = (order as { status?: string } | undefined)?.status;
-        if (st === "counter_locked" || st === "counter_claimed") { counterLocked = true; break; }
-        if (st === "refunded" || st === "cancelled" || st === "failed") { fail(`Swap ${st} while waiting for the solver.`); return; }
+        if (st === "counter_locked" || st === "counter_claimed") {
+          counterLocked = true;
+          break;
+        }
+        if (st === "refunded" || st === "cancelled" || st === "failed") {
+          fail(`Swap ${st} while waiting for the solver.`);
+          return;
+        }
       }
-      if (!counterLocked) { fail("The solver hasn't locked the WBTC yet. Is the daemon running? Your cBTC auto-refunds after the timelock."); return; }
+      if (!counterLocked) {
+        fail(
+          "The solver hasn't locked the WBTC yet. Is the daemon running? Your CBTC auto-refunds after the timelock."
+        );
+        return;
+      }
       setStage({ kind: "rev-claimable", swapId: id, secret });
     } catch (e) {
       fail(getSwapErrorMessage(e));
     }
-  }, [evm.account, destinationParty, amount, expirationSeconds, isParticipantManaged, wallet, persistSwapSecret]);
+  }, [
+    evm.account,
+    destinationParty,
+    amount,
+    expirationSeconds,
+    isParticipantManaged,
+    wallet,
+    persistSwapSecret
+  ]);
 
   // REVERSE claim — the user claims the WBTC in MetaMask. This on-chain
-  // claim(preimage) IS the secret reveal; the daemon then claims the cBTC.
+  // claim(preimage) IS the secret reveal; the daemon then claims the CBTC.
   const handleClaimReverse = useCallback(
     async (swapId: string, secret: string) => {
       setStage({ kind: "rev-claiming", swapId, secret });
@@ -764,10 +954,27 @@ export default function SwapPage() {
         const tx = await evmClaim(evm.sendTransaction, HTLC_ESCROW, preimage);
         // Report the reveal (the daemon's EVM watchtower also catches it on its own).
         await htlcApi.recordClaim(swapId, preimage, tx).catch(() => {});
+        const { order } = await htlcApi.getOrder(swapId).catch(() => ({
+          order: null
+        }));
+        const doneAmounts = order as
+          | { wbtcAmount?: string; cbtcAmount?: string }
+          | null;
         forgetSecret(swapId);
-        setStage({ kind: "rev-done", swapId, claimTx: tx });
+        setStage({
+          kind: "rev-done",
+          swapId,
+          claimTx: tx,
+          wbtcAmount: doneAmounts?.wbtcAmount,
+          cbtcAmount: doneAmounts?.cbtcAmount
+        });
       } catch (e) {
-        setStage({ kind: "rev-claimable", swapId, secret, claimError: getSwapErrorMessage(e) });
+        setStage({
+          kind: "rev-claimable",
+          swapId,
+          secret,
+          claimError: getSwapErrorMessage(e)
+        });
       }
     },
     [evm.sendTransaction]
@@ -787,11 +994,11 @@ export default function SwapPage() {
         setStage((s) =>
           s.kind === "htlc-claimable"
             ? { ...s, claimError: `Retake failed: ${getSwapErrorMessage(e)}` }
-            : s,
+            : s
         );
       }
     },
-    [evm],
+    [evm]
   );
 
   // On first load, if the pending-orders list restored any in-flight swap, focus
@@ -806,8 +1013,13 @@ export default function SwapPage() {
     const focus = (live.length ? live : pendingOrders).at(-1);
     if (focus) {
       const id = setTimeout(
-        () => setStage({ kind: "tracking", orderId: focus.orderId, order: focus.order }),
-        0,
+        () =>
+          setStage({
+            kind: "tracking",
+            orderId: focus.orderId,
+            order: focus.order
+          }),
+        0
       );
       return () => clearTimeout(id);
     }
@@ -815,7 +1027,8 @@ export default function SwapPage() {
 
   const focusedOrder =
     stage.kind === "tracking"
-      ? (pendingOrders.find((o) => o.orderId === stage.orderId)?.order ?? stage.order)
+      ? (pendingOrders.find((o) => o.orderId === stage.orderId)?.order ??
+        stage.order)
       : null;
 
   // Resume HTLC claim UI after refresh — detect claimable swap but do NOT auto-trigger
@@ -851,7 +1064,7 @@ export default function SwapPage() {
           status: o.status as SwapStatus,
           direction: o.direction ?? "evm-to-canton",
           counterMode: o.counterMode,
-          revealedPreimage: o.revealedPreimage as `0x${string}` | undefined,
+          revealedPreimage: o.revealedPreimage as `0x${string}` | undefined
         })
       ) {
         return;
@@ -863,11 +1076,17 @@ export default function SwapPage() {
         setStage({ kind: "htlc-resume", swapId, lockTx: o.mainLockTx ?? "" });
       }
     })().catch(() => {});
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [stage.kind]);
 
   const unlockResumeSecret = useCallback(
-    async (swapId: string, lockTx: string, direction: "evm-to-canton" | "canton-to-evm") => {
+    async (
+      swapId: string,
+      lockTx: string,
+      direction: "evm-to-canton" | "canton-to-evm"
+    ) => {
       const unlockFailMsg =
         "Could not unlock the saved secret. Connect the same wallet/account or paste it from Orders.";
       try {
@@ -881,30 +1100,45 @@ export default function SwapPage() {
           solverTimelock?: number;
           mainLockTx?: string;
         } | null;
-        const orderMeta = vaultMetaFromOrder({
-          direction: o?.direction ?? direction,
-          counterMode: o?.counterMode,
-          userCantonParty: o?.userCantonParty,
-          userEvmAddress: o?.userEvmAddress,
-          userTimelock: o?.userTimelock,
-          solverTimelock: o?.solverTimelock,
-        }) ?? undefined;
+        const orderMeta =
+          vaultMetaFromOrder({
+            direction: o?.direction ?? direction,
+            counterMode: o?.counterMode,
+            userCantonParty: o?.userCantonParty,
+            userEvmAddress: o?.userEvmAddress,
+            userTimelock: o?.userTimelock,
+            solverTimelock: o?.solverTimelock
+          }) ?? undefined;
         const secret = await recallSecret(swapId, {
           ...(await vaultRecallContext()),
-          orderMeta,
+          orderMeta
         });
         if (!secret) {
           if (direction === "canton-to-evm") {
-            setStage({ kind: "rev-resume", swapId, unlockError: unlockFailMsg });
+            setStage({
+              kind: "rev-resume",
+              swapId,
+              unlockError: unlockFailMsg
+            });
           } else {
-            setStage({ kind: "htlc-resume", swapId, lockTx, unlockError: unlockFailMsg });
+            setStage({
+              kind: "htlc-resume",
+              swapId,
+              lockTx,
+              unlockError: unlockFailMsg
+            });
           }
           return;
         }
         if (direction === "canton-to-evm") {
           setStage({ kind: "rev-claimable", swapId, secret });
         } else {
-          setStage({ kind: "htlc-claimable", swapId, secret, lockTx: lockTx || o?.mainLockTx || "" });
+          setStage({
+            kind: "htlc-claimable",
+            swapId,
+            secret,
+            lockTx: lockTx || o?.mainLockTx || ""
+          });
         }
       } catch (e) {
         const unlockError = getSwapErrorMessage(e);
@@ -915,7 +1149,7 @@ export default function SwapPage() {
         }
       }
     },
-    [vaultRecallContext],
+    [vaultRecallContext]
   );
 
   // --- refund an expired, stuck order (solver submits it; funds → user) ---
@@ -933,7 +1167,7 @@ export default function SwapPage() {
     []
   );
 
-  // NOTE: the cBTC accept is detected AUTOMATICALLY by the solver (accept-watch
+  // NOTE: the CBTC accept is detected AUTOMATICALLY by the solver (accept-watch
   // advances delivering→delivered on its own once the auto-accept lands), so the
   // UI no longer needs a manual "confirm delivery" step. The mandatory auto-accept
   // gate guarantees the accept fires without user action.
@@ -985,16 +1219,16 @@ export default function SwapPage() {
   //   invalid  → parse fails    → "Invalid amount"  (disabled)
   //   overBal  → > balance      → "Insufficient WBTC balance" (disabled)
   const amountState = ((): "ok" | "notSet" | "invalid" | "overBalance" => {
-    if (!amount || amount === "." ) return "notSet";
+    if (!amount || amount === ".") return "notSet";
     let parsed: bigint;
     try {
-      parsed = parseWbtc(amount); // 8dp — same precision for WBTC and cBTC
+      parsed = parseWbtc(amount); // 8dp — same precision for WBTC and CBTC
     } catch {
       return "invalid";
     }
     if (parsed <= 0n) return "notSet";
     if (isReverse) {
-      // Selling cBTC — validate against the session party's cBTC balance.
+      // Selling CBTC — validate against the session party's CBTC balance.
       const cbtcSats = BigInt(Math.round(parseFloat(cbtcBalance || "0") * 1e8));
       if (parsed > cbtcSats) return "overBalance";
       return "ok";
@@ -1016,21 +1250,21 @@ export default function SwapPage() {
         label: "Waiting for solver…",
         onClick: () => {},
         disabled: true,
-        busy: true,
+        busy: true
       };
     } else if (stage.kind === "rev-locking") {
       primary = {
-        label: "Locking cBTC on-ledger…",
+        label: "Locking CBTC",
         onClick: () => {},
         disabled: true,
-        busy: true,
+        busy: true
       };
     } else if (stage.kind === "quoting") {
       primary = {
         label: "Getting quote…",
         onClick: () => {},
         disabled: true,
-        busy: true,
+        busy: true
       };
     } else if (!evm.account) {
       primary = {
@@ -1062,11 +1296,18 @@ export default function SwapPage() {
     } else if (amountState === "invalid") {
       primary = { label: "Invalid amount", onClick: () => {}, disabled: true };
     } else if (amountState === "overBalance") {
-      primary = { label: `Insufficient ${isReverse ? "CBTC" : "WBTC"} balance`, onClick: () => {}, disabled: true };
+      primary = {
+        label: `Insufficient ${isReverse ? "CBTC" : "WBTC"} balance`,
+        onClick: () => {},
+        disabled: true
+      };
     } else if (isReverse) {
       // REVERSE: no server quote (1:1 minus the same fee, computed locally). The
-      // backend locks the cBTC via CanActAs — email users only (toggle is gated).
-      primary = { label: "Swap CBTC → WBTC", onClick: () => void handleSwapReverse() };
+      // backend locks the CBTC via CanActAs — email users only (toggle is gated).
+      primary = {
+        label: "Swap CBTC → WBTC",
+        onClick: () => void handleSwapReverse()
+      };
     } else {
       // Session ready + amount valid. Review checks auto-accept (no signature)
       // then quotes; if auto-accept is OFF it opens the enable popup.
@@ -1078,9 +1319,16 @@ export default function SwapPage() {
     }
   }
 
+  const showPageTitle =
+    stage.kind !== "htlc-done" && stage.kind !== "rev-done";
+
   return (
     <div className="mx-auto w-full max-w-[460px] px-4 py-6 sm:py-10">
-      <h1 className="mb-4 px-1 text-2xl font-semibold text-foreground">Swap</h1>
+      {showPageTitle && (
+        <h1 className="mb-4 px-1 text-2xl font-semibold text-foreground">
+          Swap
+        </h1>
+      )}
 
       <div className="rounded-3xl border border-foreground/10 bg-card p-4 shadow-sm sm:p-5">
         {showForm && (
@@ -1095,13 +1343,21 @@ export default function SwapPage() {
               onAmountChange={setAmount}
               balance={
                 isReverse
-                  ? (loopConnected ? cbtcBalance : undefined)
-                  : (wbtcBalance != null ? formatWbtc(wbtcBalance) : undefined)
+                  ? loopConnected
+                    ? cbtcBalance
+                    : undefined
+                  : wbtcBalance != null
+                    ? formatWbtc(wbtcBalance)
+                    : undefined
               }
               onMax={
                 isReverse
-                  ? (cbtcBalance && parseFloat(cbtcBalance) > 0 ? () => setAmount(cbtcBalance) : undefined)
-                  : (wbtcBalance != null ? () => setAmount(formatWbtc(wbtcBalance)) : undefined)
+                  ? cbtcBalance && parseFloat(cbtcBalance) > 0
+                    ? () => setAmount(cbtcBalance)
+                    : undefined
+                  : wbtcBalance != null
+                    ? () => setAmount(formatWbtc(wbtcBalance))
+                    : undefined
               }
             />
 
@@ -1134,8 +1390,12 @@ export default function SwapPage() {
               editable={false}
               balance={
                 isReverse
-                  ? (wbtcBalance != null ? formatWbtc(wbtcBalance) : undefined)
-                  : (loopConnected ? cbtcBalance : undefined)
+                  ? wbtcBalance != null
+                    ? formatWbtc(wbtcBalance)
+                    : undefined
+                  : loopConnected
+                    ? cbtcBalance
+                    : undefined
               }
             />
 
@@ -1145,7 +1405,9 @@ export default function SwapPage() {
                 label="Recipient"
                 value={
                   isReverse
-                    ? (evm.account ? `${evm.account.slice(0, 8)}…${evm.account.slice(-6)}` : "Connect EVM wallet")
+                    ? evm.account
+                      ? `${evm.account.slice(0, 8)}…${evm.account.slice(-6)}`
+                      : "Connect EVM wallet"
                     : loopConnected
                       ? truncatePartyId(destinationParty)
                       : "Connect Loop wallet"
@@ -1160,25 +1422,28 @@ export default function SwapPage() {
                   className="rounded-lg border border-foreground/15 bg-transparent px-2 py-1 text-foreground"
                 >
                   {EXPIRATION_OPTIONS.map((o) => (
-                    <option key={o.seconds} value={o.seconds}>{o.label}</option>
+                    <option key={o.seconds} value={o.seconds}>
+                      {o.label}
+                    </option>
                   ))}
                 </select>
               </div>
             </div>
 
-            {stage.kind === "error" && (
-              stage.message.startsWith("Swaps are paused") ? (
+            {stage.kind === "error" &&
+              (stage.message.startsWith("Swaps are paused") ? (
                 // De-peg circuit breaker — informational (amber), not an error (red).
                 <div className="mb-2 flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-foreground">
-                  <span className="material-symbols-outlined mt-0.5 text-[18px] text-amber-500">pause_circle</span>
+                  <span className="material-symbols-outlined mt-0.5 text-[18px] text-amber-500">
+                    pause_circle
+                  </span>
                   <span>{stage.message}</span>
                 </div>
               ) : (
                 <div className="mb-2 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
                   {stage.message}
                 </div>
-              )
-            )}
+              ))}
             {wallet.loopError && (
               <div className="mb-2 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
                 {wallet.loopError}
@@ -1191,7 +1456,7 @@ export default function SwapPage() {
                 disabled={primary.disabled || primary.busy}
                 className={cn(
                   "mt-1 flex w-full items-center justify-center gap-2 rounded-2xl bg-primary py-4 text-base font-semibold text-on-primary transition-all hover:opacity-90 active:scale-[0.99]",
-                  primary.busy ? "disabled:opacity-90" : "disabled:opacity-50",
+                  primary.busy ? "disabled:opacity-90" : "disabled:opacity-50"
                 )}
               >
                 {primary.busy && (
@@ -1214,18 +1479,29 @@ export default function SwapPage() {
           </div>
         )}
 
-        {(stage.kind === "htlc-resume") && (
+        {stage.kind === "htlc-resume" && (
           <div className="px-1 pb-1 pt-4 text-center">
-            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/15 text-2xl">🔓</div>
+            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/15 text-2xl">
+              🔓
+            </div>
             <h3 className="text-lg font-semibold">Swap ready to claim</h3>
             <p className="mt-1 text-sm text-foreground/60">
-              You have a claimable swap from a previous session. Unlock your saved secret to continue.
+              You have a claimable swap from a previous session. Unlock your
+              saved secret to continue.
             </p>
             {stage.unlockError && (
-              <p className="mt-2 text-sm text-red-500">⚠️ {stage.unlockError}</p>
+              <p className="mt-2 text-sm text-red-500">
+                ⚠️ {stage.unlockError}
+              </p>
             )}
             <button
-              onClick={() => void unlockResumeSecret(stage.swapId, stage.lockTx, "evm-to-canton")}
+              onClick={() =>
+                void unlockResumeSecret(
+                  stage.swapId,
+                  stage.lockTx,
+                  "evm-to-canton"
+                )
+              }
               className="mt-4 w-full rounded-2xl bg-[#b04a2a] px-4 py-3 font-semibold text-white hover:opacity-90"
             >
               Unlock saved secret
@@ -1233,26 +1509,36 @@ export default function SwapPage() {
           </div>
         )}
 
-        {(stage.kind === "htlc-claimable" || stage.kind === "htlc-claiming") && (
+        {(stage.kind === "htlc-claimable" ||
+          stage.kind === "htlc-claiming") && (
           <div className="px-1 pb-1 pt-4 text-center">
-            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/15 text-2xl">🔓</div>
-            <h3 className="text-lg font-semibold">Both legs locked — claim your cBTC</h3>
+            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/15 text-2xl">
+              🔓
+            </div>
+            <h3 className="text-lg font-semibold">
+              Both legs locked — claim your CBTC
+            </h3>
             <p className="mt-1 text-sm text-foreground/60">
-              Press Claim to reveal your secret and receive your cBTC. Revealing it lets the
-              solver claim the WBTC you locked — this is what makes the swap atomic.
+              Press Claim to reveal your secret and receive your CBTC. Revealing
+              it lets the solver claim the WBTC you locked — this is what makes
+              the swap atomic.
             </p>
             {stage.kind === "htlc-claimable" && stage.claimError && (
               <p className="mt-2 text-sm text-red-500">⚠️ {stage.claimError}</p>
             )}
             <button
-              onClick={() => handleClaim(stage.swapId, stage.secret, stage.lockTx)}
+              onClick={() =>
+                handleClaim(stage.swapId, stage.secret, stage.lockTx)
+              }
               disabled={stage.kind === "htlc-claiming"}
               className={cn(
                 "mt-4 w-full rounded-2xl px-4 py-3 font-semibold text-white",
-                stage.kind === "htlc-claiming" ? "bg-foreground/40" : "bg-[#b04a2a] hover:opacity-90"
+                stage.kind === "htlc-claiming"
+                  ? "bg-foreground/40"
+                  : "bg-[#b04a2a] hover:opacity-90"
               )}
             >
-              {stage.kind === "htlc-claiming" ? "Claiming…" : "Claim cBTC"}
+              {stage.kind === "htlc-claiming" ? "Claiming…" : "Claim CBTC"}
             </button>
             {/* Stuck-swap escape hatch: retake your WBTC (only works after the EVM
                 timelock — the contract enforces it). */}
@@ -1269,48 +1555,74 @@ export default function SwapPage() {
 
         {stage.kind === "htlc-refunded" && (
           <div className="px-1 pb-1 pt-4 text-center">
-            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-foreground/10 text-2xl">↩️</div>
+            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-foreground/10 text-2xl">
+              ↩️
+            </div>
             <h3 className="text-lg font-semibold">WBTC refunded</h3>
             <p className="mt-1 text-sm text-foreground/60">
               Your locked WBTC was returned to your wallet (retake).
             </p>
-            <p className="mt-2 break-all text-xs text-foreground/40">retake tx {stage.retakeTx.slice(0, 16)}…</p>
-            <button onClick={reset} className="mt-4 rounded-xl border border-foreground/15 px-4 py-2 text-sm hover:bg-foreground/5">
+            <p className="mt-2 break-all text-xs text-foreground/40">
+              retake tx {stage.retakeTx.slice(0, 16)}…
+            </p>
+            <button
+              onClick={reset}
+              className="mt-4 rounded-xl border border-foreground/15 px-4 py-2 text-sm hover:bg-foreground/5"
+            >
               New swap
             </button>
           </div>
         )}
 
         {stage.kind === "htlc-done" && (
-          <div className="px-1 pb-1 pt-4 text-center">
-            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-green-500/15 text-2xl">✅</div>
-            <h3 className="text-lg font-semibold">cBTC claimed</h3>
-            <p className="mt-1 text-sm text-foreground/60">
-              Your cBTC is delivered and the secret is revealed. Orders will show Settling until
-              the HTLC solver daemon claims your WBTC on EVM (<span className="font-mono text-xs">npm run solver:htlc</span>).
-            </p>
-            <p className="mt-2 break-all text-xs text-foreground/40">
-              swap {stage.swapId.slice(0, 14)}… · lock tx {stage.lockTx.slice(0, 14)}…
-            </p>
-            <button onClick={reset} className="mt-4 rounded-xl border border-foreground/15 px-4 py-2 text-sm hover:bg-foreground/5">
-              New swap
-            </button>
-          </div>
+          <SwapResultCard
+            title="CBTC claimed"
+            badge="Claim submitted"
+            description="Your CBTC has been delivered and the secret has been revealed. The order may show Settling until the solver completes the matching EVM claim."
+            rows={[
+              {
+                label: "You paid",
+                value: formatMaybeWbtcAmount(stage.wbtcAmount)
+              },
+              {
+                label: "You received",
+                value: formatMaybeCbtcAmount(stage.cbtcAmount)
+              },
+              {
+                label: "Swap ID",
+                value: shortHash(stage.swapId),
+                copy: stage.swapId
+              },
+              {
+                label: "Lock tx",
+                value: shortHash(stage.lockTx),
+                copy: stage.lockTx
+              }
+            ]}
+            onReset={reset}
+          />
         )}
 
         {/* ===== REVERSE (canton-to-evm) stages ===== */}
-        {(stage.kind === "rev-resume") && (
+        {stage.kind === "rev-resume" && (
           <div className="px-1 pb-1 pt-4 text-center">
-            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/15 text-2xl">🔓</div>
+            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/15 text-2xl">
+              🔓
+            </div>
             <h3 className="text-lg font-semibold">Swap ready to claim</h3>
             <p className="mt-1 text-sm text-foreground/60">
-              You have a claimable swap from a previous session. Unlock your saved secret to continue.
+              You have a claimable swap from a previous session. Unlock your
+              saved secret to continue.
             </p>
             {stage.unlockError && (
-              <p className="mt-2 text-sm text-red-500">⚠️ {stage.unlockError}</p>
+              <p className="mt-2 text-sm text-red-500">
+                ⚠️ {stage.unlockError}
+              </p>
             )}
             <button
-              onClick={() => void unlockResumeSecret(stage.swapId, "", "canton-to-evm")}
+              onClick={() =>
+                void unlockResumeSecret(stage.swapId, "", "canton-to-evm")
+              }
               className="mt-4 w-full rounded-2xl bg-[#b04a2a] px-4 py-3 font-semibold text-white hover:opacity-90"
             >
               Unlock saved secret
@@ -1320,11 +1632,16 @@ export default function SwapPage() {
 
         {(stage.kind === "rev-claimable" || stage.kind === "rev-claiming") && (
           <div className="px-1 pb-1 pt-4 text-center">
-            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/15 text-2xl">🔓</div>
-            <h3 className="text-lg font-semibold">Both legs locked — claim your WBTC</h3>
+            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/15 text-2xl">
+              🔓
+            </div>
+            <h3 className="text-lg font-semibold">
+              Both legs locked — claim your WBTC
+            </h3>
             <p className="mt-1 text-sm text-foreground/60">
-              Claim the WBTC in MetaMask. The on-chain claim reveals your secret, which
-              lets the solver claim the cBTC you locked — that&apos;s the atomic link.
+              Claim the WBTC in MetaMask. The on-chain claim reveals your
+              secret, which lets the solver claim the CBTC you locked —
+              that&apos;s the atomic link.
             </p>
             {stage.kind === "rev-claimable" && stage.claimError && (
               <p className="mt-2 text-sm text-red-500">⚠️ {stage.claimError}</p>
@@ -1334,48 +1651,66 @@ export default function SwapPage() {
               disabled={stage.kind === "rev-claiming"}
               className={cn(
                 "mt-4 w-full rounded-2xl px-4 py-3 font-semibold text-white",
-                stage.kind === "rev-claiming" ? "bg-foreground/40" : "bg-[#b04a2a] hover:opacity-90"
+                stage.kind === "rev-claiming"
+                  ? "bg-foreground/40"
+                  : "bg-[#b04a2a] hover:opacity-90"
               )}
             >
               {stage.kind === "rev-claiming" ? "Claiming…" : "Claim WBTC"}
             </button>
-            {/* Stuck-swap escape: refund the locked cBTC (after the Canton timelock).
+            {/* Stuck-swap escape: refund the locked CBTC (after the Canton timelock).
                 Email: backend HtlcLock.Refund. Loop seller: the user signs the
                 standard Allocation_Withdraw in their wallet (their unilateral exit). */}
             {stage.kind === "rev-claimable" && stage.claimError && (
               <button
-                onClick={() => void (async () => {
-                  try {
-                    // Both modes refund via the backend after the timelock:
-                    // email = HtlcLock.Refund (CanActAs); loop seller (Variant A
-                    // custody) = we send the custodied cBTC straight back.
-                    await htlcApi.refundMain(stage.swapId);
-                    reset();
-                  } catch { /* surfaced via the existing claimError state on retry */ }
-                })()}
+                onClick={() =>
+                  void (async () => {
+                    try {
+                      // Both modes refund via the backend after the timelock:
+                      // email = HtlcLock.Refund (CanActAs); loop seller (Variant A
+                      // custody) = we send the custodied CBTC straight back.
+                      await htlcApi.refundMain(stage.swapId);
+                      reset();
+                    } catch {
+                      /* surfaced via the existing claimError state on retry */
+                    }
+                  })()
+                }
                 className="mt-2 w-full rounded-2xl border border-foreground/15 px-4 py-2.5 text-sm hover:bg-foreground/5"
               >
-                Refund my cBTC (after timelock)
+                Refund my CBTC (after timelock)
               </button>
             )}
           </div>
         )}
 
         {stage.kind === "rev-done" && (
-          <div className="px-1 pb-1 pt-4 text-center">
-            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-green-500/15 text-2xl">✅</div>
-            <h3 className="text-lg font-semibold">Swap complete</h3>
-            <p className="mt-1 text-sm text-foreground/60">
-              You claimed your WBTC (revealing the secret on-chain). The solver claims
-              the cBTC you locked with that same secret — both legs settle.
-            </p>
-            <p className="mt-2 break-all text-xs text-foreground/40">
-              swap {stage.swapId.slice(0, 14)}… · claim tx {stage.claimTx.slice(0, 14)}…
-            </p>
-            <button onClick={reset} className="mt-4 rounded-xl border border-foreground/15 px-4 py-2 text-sm hover:bg-foreground/5">
-              New swap
-            </button>
-          </div>
+          <SwapResultCard
+            title="Swap complete"
+            badge="Claim confirmed"
+            description="You claimed your WBTC and revealed the secret on-chain. The solver can now use that same secret to claim the CBTC leg."
+            rows={[
+              {
+                label: "You paid",
+                value: formatMaybeCbtcAmount(stage.cbtcAmount)
+              },
+              {
+                label: "You received",
+                value: formatMaybeWbtcAmount(stage.wbtcAmount)
+              },
+              {
+                label: "Swap ID",
+                value: shortHash(stage.swapId),
+                copy: stage.swapId
+              },
+              {
+                label: "Claim tx",
+                value: shortHash(stage.claimTx),
+                copy: stage.claimTx
+              }
+            ]}
+            onReset={reset}
+          />
         )}
       </div>
 
@@ -1397,7 +1732,11 @@ export default function SwapPage() {
                   key={o.orderId}
                   tracked={o}
                   onView={() =>
-                    setStage({ kind: "tracking", orderId: o.orderId, order: o.order })
+                    setStage({
+                      kind: "tracking",
+                      orderId: o.orderId,
+                      order: o.order
+                    })
                   }
                   onDismiss={() => dismissOrder(o.orderId)}
                 />
@@ -1461,6 +1800,118 @@ export default function SwapPage() {
   );
 }
 
+function shortHash(value: string) {
+  if (!value) return "—";
+  return `${value.slice(0, 10)}…${value.slice(-6)}`;
+}
+
+function trimAmount(value: string) {
+  return value.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
+}
+
+function formatMaybeWbtcAmount(value?: string) {
+  if (!value) return "—";
+  try {
+    return `${formatWbtc(BigInt(value))} WBTC`;
+  } catch {
+    return `${trimAmount(value)} WBTC`;
+  }
+}
+
+function formatMaybeCbtcAmount(value?: string) {
+  if (!value) return "—";
+  if (value.includes(".")) return `${trimAmount(value)} CBTC`;
+  try {
+    return `${formatWbtc(BigInt(value))} CBTC`;
+  } catch {
+    return `${trimAmount(value)} CBTC`;
+  }
+}
+
+function SwapResultCard({
+  title,
+  badge,
+  description,
+  rows,
+  onReset
+}: {
+  title: string;
+  badge: string;
+  description: string;
+  rows: Array<{ label: string; value: string; copy?: string }>;
+  onReset: () => void;
+}) {
+  const copyValue = (value?: string) => {
+    if (!value) return;
+    void navigator.clipboard.writeText(value).catch(() => {});
+  };
+
+  return (
+    <div className="px-1 pb-1 pt-2 text-left">
+      <div className="mb-5 flex items-start justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div className="flex size-12 items-center justify-center rounded-2xl bg-emerald-500/15 text-emerald-600">
+            <span className="material-symbols-outlined text-[28px]">
+              check_circle
+            </span>
+          </div>
+          <div>
+            <h3 className="text-xl font-semibold text-foreground">{title}</h3>
+            <p className="mt-0.5 text-sm text-muted-foreground">
+              HTLC reveal complete
+            </p>
+          </div>
+        </div>
+        <span className="shrink-0 rounded-full bg-emerald-500/12 px-3 py-1 text-xs font-semibold text-emerald-600 ring-1 ring-emerald-500/20">
+          {badge}
+        </span>
+      </div>
+
+      <p className="text-sm leading-6 text-muted-foreground">{description}</p>
+
+      <div className="mt-5 overflow-hidden rounded-2xl bg-muted/40">
+        {rows.map((row) => (
+          <div
+            key={row.label}
+            className="flex items-center justify-between gap-3 border-b border-foreground/5 px-4 py-3 last:border-b-0"
+          >
+            <span className="text-sm text-muted-foreground">{row.label}</span>
+            {row.copy ? (
+              <button
+                type="button"
+                onClick={() => copyValue(row.copy)}
+                className="min-w-0 truncate rounded-lg px-2 py-1 font-mono text-xs text-foreground transition-colors hover:bg-muted"
+                title={row.copy}
+              >
+                {row.value}
+              </button>
+            ) : (
+              <span className="min-w-0 truncate text-sm font-semibold text-foreground">
+                {row.value}
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-5 grid gap-2 sm:grid-cols-2">
+        <button
+          onClick={onReset}
+          className="rounded-2xl bg-primary px-4 py-3 text-sm font-semibold text-on-primary transition-all hover:opacity-90 active:scale-[0.99]"
+        >
+          New swap
+        </button>
+        <Link
+          href="/orders"
+          className="rounded-2xl border border-foreground/15 px-4 py-3 text-center text-sm font-semibold text-foreground transition-colors hover:bg-foreground/5"
+        >
+          View orders
+        </Link>
+      </div>
+    </div>
+  );
+}
+
 /**
  * A Uniswap-style token panel: a big amount on the left, a token/network badge
  * on the right, and an optional balance + MAX row underneath.
@@ -1486,13 +1937,15 @@ function TokenPanel({
 }) {
   return (
     <div className="rounded-2xl bg-muted/40 p-4 ring-1 ring-transparent transition-colors focus-within:bg-muted/60 focus-within:ring-foreground/10">
-      <div className="mb-1.5 text-sm font-medium text-muted-foreground">{title}</div>
+      <div className="mb-1.5 text-sm font-medium text-muted-foreground">
+        {title}
+      </div>
       <div className="flex items-center justify-between gap-3">
         {editable ? (
           <input
             // CoW-style numeric input: text + inputMode=decimal (keeps trailing
             // dots), keystrokes filtered by the decimal regex, paste cleaned, and
-            // truncated to 8dp (WBTC/cBTC precision). Bad keystrokes are no-ops.
+            // truncated to 8dp (WBTC/CBTC precision). Bad keystrokes are no-ops.
             type="text"
             inputMode="decimal"
             autoComplete="off"
@@ -1501,11 +1954,19 @@ function TokenPanel({
             maxLength={79}
             value={amount}
             onChange={(e) =>
-              onAmountChange?.(truncateToDecimals(sanitizeAmountInput(e.target.value, amount), 8))
+              onAmountChange?.(
+                truncateToDecimals(
+                  sanitizeAmountInput(e.target.value, amount),
+                  8
+                )
+              )
             }
             onPaste={(e) => {
               e.preventDefault();
-              const cleaned = truncateToDecimals(cleanPastedAmount(e.clipboardData.getData("text")), 8);
+              const cleaned = truncateToDecimals(
+                cleanPastedAmount(e.clipboardData.getData("text")),
+                8
+              );
               onAmountChange?.(cleaned);
             }}
             placeholder="0.0"
@@ -1628,8 +2089,8 @@ function ReviewModal({
   const wbtc = formatWbtc(wbtcIn);
   const cbtc = formatWbtc(cbtcOut);
 
-  // The REAL rate = live WBTC/BTC price (cBTC is redeemable 1:1 BTC, so the
-  // WBTC→cBTC rate IS the WBTC price in BTC). Never hardcode 1:1 — WBTC trades
+  // The REAL rate = live WBTC/BTC price (CBTC is redeemable 1:1 BTC, so the
+  // WBTC→CBTC rate IS the WBTC price in BTC). Never hardcode 1:1 — WBTC trades
   // slightly off par (e.g. 0.9978). Falls back to deriving from the amounts.
   const priceScale = 10n ** BigInt(quote.wbtcPriceDecimals ?? 8);
   const priceRaw = quote.wbtcPriceRaw ? BigInt(quote.wbtcPriceRaw) : priceScale;
@@ -1647,7 +2108,10 @@ function ReviewModal({
       ? `${quote.feeBps / 100}% (−${formatWbtc(feeAmount)} CBTC)`
       : "Free";
   const refundAt = new Date(quote.expires * 1000).toLocaleString(undefined, {
-    month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
   });
 
   return (
@@ -1681,14 +2145,20 @@ function ReviewModal({
         {/* Headline amounts with token badges (Uniswap review style) */}
         <div className="flex flex-col">
           <div className="flex items-center justify-between gap-3">
-            <div className="text-3xl font-medium text-foreground">{wbtc} WBTC</div>
+            <div className="text-3xl font-medium text-foreground">
+              {wbtc} WBTC
+            </div>
             <TokenBadge token="WBTC" network={SWAP_CHAIN.name} />
           </div>
           <div className="my-2 pl-1 text-on-surface-variant">
-            <span className="material-symbols-outlined text-[22px]">arrow_downward</span>
+            <span className="material-symbols-outlined text-[22px]">
+              arrow_downward
+            </span>
           </div>
           <div className="flex items-center justify-between gap-3">
-            <div className="text-3xl font-medium text-foreground">{cbtc} CBTC</div>
+            <div className="text-3xl font-medium text-foreground">
+              {cbtc} CBTC
+            </div>
             <TokenBadge token="CBTC" network="Canton" />
           </div>
         </div>
@@ -1698,7 +2168,10 @@ function ReviewModal({
           <DetailRow label="Rate" value={rateLabel} />
           <DetailRow label="Bridge fee" value={feeLabel} />
           <DetailRow label="You receive" value={`${cbtc} CBTC`} />
-          <DetailRow label="Recipient" value={truncatePartyId(quote.cantonParty)} />
+          <DetailRow
+            label="Recipient"
+            value={truncatePartyId(quote.cantonParty)}
+          />
           <DetailRow label="Refundable after" value={refundAt} />
         </div>
 
@@ -1765,11 +2238,18 @@ function TrackingView({
   // Refund is offered once the order is expired/failed and the WBTC isn't back.
   // Mirror CoW: only after the grace buffer past `expires` (avoid the solver race).
   const expired =
-    !!order && now > order.expires + PENDING_BUFFER_SECONDS && !done && !refunded;
+    !!order &&
+    now > order.expires + PENDING_BUFFER_SECONDS &&
+    !done &&
+    !refunded;
 
   // Amounts for the receipt header (fall back to dashes if not yet loaded).
-  const wbtcAmt = order?.wbtcAmount ? formatWbtc(BigInt(order.wbtcAmount)) : null;
-  const cbtcAmt = order?.cbtcAmount ? formatWbtc(BigInt(order.cbtcAmount)) : null;
+  const wbtcAmt = order?.wbtcAmount
+    ? formatWbtc(BigInt(order.wbtcAmount))
+    : null;
+  const cbtcAmt = order?.cbtcAmount
+    ? formatWbtc(BigInt(order.cbtcAmount))
+    : null;
 
   const doRefund = async () => {
     setRefunding(true);
@@ -1778,7 +2258,6 @@ function TrackingView({
     setRefunding(false);
     if (r?.startsWith("__error__:")) setRefundMsg(r.slice("__error__:".length));
   };
-
 
   // Hero icon/tone per progress state; the title + caption come from PROGRESS_COPY
   // (the single source of CoW-style wording).
@@ -1789,10 +2268,26 @@ function TrackingView({
     initial: { icon: null, tone: "text-primary", ring: "bg-primary/10" },
     delivering: { icon: null, tone: "text-primary", ring: "bg-primary/10" },
     delayed: { icon: null, tone: "text-primary", ring: "bg-primary/10" },
-    finished: { icon: "check", tone: "text-green-600", ring: "bg-green-500/10" },
-    refunded: { icon: "undo", tone: "text-on-surface-variant", ring: "bg-muted" },
-    expired: { icon: "priority_high", tone: "text-destructive", ring: "bg-destructive/10" },
-    failed: { icon: "priority_high", tone: "text-destructive", ring: "bg-destructive/10" },
+    finished: {
+      icon: "check",
+      tone: "text-green-600",
+      ring: "bg-green-500/10"
+    },
+    refunded: {
+      icon: "undo",
+      tone: "text-on-surface-variant",
+      ring: "bg-muted"
+    },
+    expired: {
+      icon: "priority_high",
+      tone: "text-destructive",
+      ring: "bg-destructive/10"
+    },
+    failed: {
+      icon: "priority_high",
+      tone: "text-destructive",
+      ring: "bg-destructive/10"
+    }
   };
   const hero = { ...heroVisual[progress], ...PROGRESS_COPY[progress] };
 
@@ -1801,9 +2296,19 @@ function TrackingView({
       {/* Receipt header — big status + the amounts, styled like a token panel. */}
       <div className="rounded-2xl bg-muted/40 p-4">
         <div className="mb-3 flex items-center gap-3">
-          <span className={cn("flex size-10 items-center justify-center rounded-full", hero.ring)}>
+          <span
+            className={cn(
+              "flex size-10 items-center justify-center rounded-full",
+              hero.ring
+            )}
+          >
             {hero.icon ? (
-              <span className={cn("material-symbols-outlined text-[24px]", hero.tone)}>
+              <span
+                className={cn(
+                  "material-symbols-outlined text-[24px]",
+                  hero.tone
+                )}
+              >
                 {hero.icon}
               </span>
             ) : (
@@ -1811,7 +2316,9 @@ function TrackingView({
             )}
           </span>
           <div>
-            <div className="text-base font-semibold text-foreground">{hero.title}</div>
+            <div className="text-base font-semibold text-foreground">
+              {hero.title}
+            </div>
             {/* CoW-style sub-caption — generic + reassuring, never internal jargon. */}
             <div className="text-xs text-muted-foreground">{hero.caption}</div>
           </div>
@@ -1858,7 +2365,9 @@ function TrackingView({
                   <span
                     className={cn(
                       "my-0.5 w-0.5 flex-1 rounded-full",
-                      stepIdx > i && !failedOrRefunded ? "bg-primary" : "bg-muted"
+                      stepIdx > i && !failedOrRefunded
+                        ? "bg-primary"
+                        : "bg-muted"
                     )}
                   />
                 )}
@@ -1876,7 +2385,9 @@ function TrackingView({
                 >
                   {label}
                 </span>
-                {active && <span className="ml-1 animate-pulse text-primary">●</span>}
+                {active && (
+                  <span className="ml-1 animate-pulse text-primary">●</span>
+                )}
               </div>
             </div>
           );
@@ -1901,7 +2412,9 @@ function TrackingView({
       {failed && (
         <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-foreground">
           {order?.note ? (
-            <div className="text-xs text-muted-foreground">Reason: {order.note}</div>
+            <div className="text-xs text-muted-foreground">
+              Reason: {order.note}
+            </div>
           ) : null}
           <div className={order?.note ? "mt-2" : undefined}>
             Your WBTC is still locked in the escrow and is{" "}
@@ -1934,7 +2447,9 @@ function TrackingView({
         </button>
       )}
       {refundMsg && (
-        <div className="text-xs text-destructive">Refund failed: {refundMsg}</div>
+        <div className="text-xs text-destructive">
+          Refund failed: {refundMsg}
+        </div>
       )}
 
       {/* "New swap" — same button in every state. While a swap is still live this
@@ -1959,7 +2474,7 @@ function TrackingView({
 function PendingOrderRow({
   tracked,
   onView,
-  onDismiss,
+  onDismiss
 }: {
   tracked: TrackedOrder;
   onView: () => void;
@@ -1996,7 +2511,9 @@ function PendingOrderRow({
         <div className="truncate text-sm font-medium text-foreground">
           {wbtc ? `${wbtc} WBTC → CBTC` : "Swap"}
         </div>
-        <div className="truncate text-xs text-muted-foreground">{copy.caption}</div>
+        <div className="truncate text-xs text-muted-foreground">
+          {copy.caption}
+        </div>
       </div>
       <button
         onClick={onView}
@@ -2074,8 +2591,8 @@ function SignGateModal({
 }
 
 /**
- * ENABLE-AUTO-ACCEPT modal. Shown when Review finds cBTC auto-accept is OFF —
- * which would let the swap take the user's WBTC before they hold the cBTC. The
+ * ENABLE-AUTO-ACCEPT modal. Shown when Review finds CBTC auto-accept is OFF —
+ * which would let the swap take the user's WBTC before they hold the CBTC. The
  * CTA first opens Loop settings; once the user has visited, it flips to a
  * "confirm" CTA that re-checks the status.
  */
@@ -2100,7 +2617,10 @@ function EnableAutoAcceptModal({
       role="dialog"
       aria-modal="true"
     >
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div
+        className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+        onClick={onClose}
+      />
       <div className="relative w-full max-w-[440px] rounded-3xl border border-foreground/10 bg-card p-6 shadow-xl">
         <div className="mb-3 flex items-center justify-between">
           <div className="flex size-11 items-center justify-center rounded-2xl bg-amber-500/10">
@@ -2120,8 +2640,8 @@ function EnableAutoAcceptModal({
           Turn on auto-accept to swap
         </h2>
         <p className="mt-2 text-sm text-on-surface-variant">
-          Auto-accept lets the swapped CBTC land in your wallet automatically, so
-          your WBTC is only taken once you have the CBTC. Enable{" "}
+          Auto-accept lets the swapped CBTC land in your wallet automatically,
+          so your WBTC is only taken once you have the CBTC. Enable{" "}
           <span className="font-medium text-foreground">
             &ldquo;Automatically accept incoming utility transfers&rdquo;
           </span>{" "}

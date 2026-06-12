@@ -11,7 +11,7 @@ const TAG = "[canton/holdings]";
  * GET /api/canton/holdings?partyId=<party>
  *
  * Returns Holding interface views for the given party, queried via the
- * app's m2m JWT. Returns [] when the party has no cBTC OR when the
+ * app's m2m JWT. Returns [] when the party has no CBTC OR when the
  * Holding interface isn't installed on this validator — those two cases
  * look the same from the wire, which is intentional.
  */
@@ -32,7 +32,9 @@ export async function GET(request: Request) {
 
   try {
     const holdings = await getHoldings(partyId);
-    console.log(`${TAG} returning ${holdings.length} holdings for partyId=${partyId.slice(0, 40)}...`);
+    console.log(
+      `${TAG} returning ${holdings.length} holdings for partyId=${partyId.slice(0, 40)}...`
+    );
     return NextResponse.json({ partyId, count: holdings.length, holdings });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -41,8 +43,15 @@ export async function GET(request: Request) {
     // "security-sensitive error". That's expected, not a server fault — return
     // empty holdings (the balance is read client-side via the Loop provider).
     if (message.includes("(403") || /security-sensitive/i.test(message)) {
-      console.warn(`${TAG} m2m JWT cannot read this party (403) — returning empty holdings`);
-      return NextResponse.json({ partyId, count: 0, holdings: [], unreadable: true });
+      console.warn(
+        `${TAG} m2m JWT cannot read this party (403) — returning empty holdings`
+      );
+      return NextResponse.json({
+        partyId,
+        count: 0,
+        holdings: [],
+        unreadable: true
+      });
     }
     console.error(`${TAG} error:`, err);
     return NextResponse.json({ error: message }, { status: 500 });

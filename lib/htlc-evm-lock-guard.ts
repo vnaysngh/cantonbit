@@ -1,5 +1,5 @@
 /**
- * Pure EVM HTLC lock checks used before cBTC reveal (Loop claim-counter + managed
+ * Pure EVM HTLC lock checks used before CBTC reveal (Loop claim-counter + managed
  * claim-managed). Shared so both paths and unit tests use identical solver-robbery
  * guards without duplicating margin logic.
  */
@@ -25,13 +25,17 @@ export type EvmLockRevealRequirements = {
 export function assertEvmLockSafeForReveal(
   lock: EvmLockSnapshot,
   req: EvmLockRevealRequirements,
-  nowSec = Math.floor(Date.now() / 1000),
+  nowSec = Math.floor(Date.now() / 1000)
 ): void {
   if (lock.amount === 0n) {
-    throw new Error("EVM lock not found — WBTC is not locked under this hashLock");
+    throw new Error(
+      "EVM lock not found — WBTC is not locked under this hashLock"
+    );
   }
   if (lock.amount < BigInt(req.wbtcAmount)) {
-    throw new Error(`EVM lock amount too small (${lock.amount} < ${req.wbtcAmount})`);
+    throw new Error(
+      `EVM lock amount too small (${lock.amount} < ${req.wbtcAmount})`
+    );
   }
   if (lock.receiver !== req.solverEvmAddress.toLowerCase()) {
     throw new Error("EVM lock receiver is not the solver");

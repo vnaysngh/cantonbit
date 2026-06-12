@@ -4,14 +4,14 @@
  * (attest + finalise on OranjAttestorOracle) is replaced.
  *
  * Flow position (Cancore's 8 steps):
- *   step 6  the user reveals the preimage to receive cBTC (T8 released it on a
+ *   step 6  the user reveals the preimage to receive CBTC (T8 released it on a
  *           valid preimage). The orchestrator now HAS the preimage.
  *   step 7  Claim Main — solver calls HTLCEscrow.claim(preImage) → WBTC released
  *           to the solver. THIS module.
  *
  * The preimage may be learned two ways (both supported):
- *   A) the user reveals it to the orchestrator to get their cBTC (off-chain, the
- *      EVM→Canton direction). The orchestrator verifies it, releases cBTC (T8),
+ *   A) the user reveals it to the orchestrator to get their CBTC (off-chain, the
+ *      EVM→Canton direction). The orchestrator verifies it, releases CBTC (T8),
  *      then claims WBTC here.
  *   B) the preimage appears on-chain (e.g. the reverse direction, or a watchtower
  *      reading the Canton claim's exercised argument). reveal-watch (below) reads
@@ -31,7 +31,7 @@ import {
   keccak256,
   type Account,
   type Address,
-  type Hex,
+  type Hex
 } from "viem";
 
 import { HTLC_ESCROW_ABI } from "./htlc-abi.js";
@@ -59,7 +59,10 @@ export class HtlcSettler {
   constructor(cfg: HtlcSettleConfig) {
     this.cfg = cfg;
     this.pub = createPublicClient({ transport: http(cfg.rpcUrl) });
-    this.wallet = createWalletClient({ account: cfg.account, transport: http(cfg.rpcUrl) });
+    this.wallet = createWalletClient({
+      account: cfg.account,
+      transport: http(cfg.rpcUrl)
+    });
   }
 
   /**
@@ -71,7 +74,10 @@ export class HtlcSettler {
    *   HTLCEscrow hashes these raw bytes; keccak256(preImage) must == hashLock).
    * @param hashLock The committed hashlock (bytes32) from the user's signed order.
    */
-  async claimWithPreimage(preImage: Hex, hashLock: Hex): Promise<SettleOutcome> {
+  async claimWithPreimage(
+    preImage: Hex,
+    hashLock: Hex
+  ): Promise<SettleOutcome> {
     // 1. verify the preimage matches the committed hash (never submit a bad one).
     if (keccak256(preImage).toLowerCase() !== hashLock.toLowerCase()) {
       return { kind: "badPreimage", reason: "keccak256(preImage) != hashLock" };
@@ -80,27 +86,42 @@ export class HtlcSettler {
     const escrow = getContract({
       address: this.cfg.htlcEscrow,
       abi: HTLC_ESCROW_ABI,
-      client: { public: this.pub, wallet: this.wallet },
+      client: { public: this.pub, wallet: this.wallet }
     });
 
     // 2. crash-safe: if the lock is gone (claimed/retaken), nothing to do.
     try {
-      const lock = (await escrow.read.locks([hashLock])) as readonly [bigint, bigint, Address, Address, Address];
+      const lock = (await escrow.read.locks([hashLock])) as readonly [
+        bigint,
+        bigint,
+        Address,
+        Address,
+        Address
+      ];
       const amount = lock[1];
       if (amount === 0n) {
         return { kind: "alreadyClaimed" }; // lock deleted on-chain
       }
     } catch (e) {
-      return { kind: "skipped", reason: `lock read failed (transient): ${errMsg(e)}` };
+      return {
+        kind: "skipped",
+        reason: `lock read failed (transient): ${errMsg(e)}`
+      };
     }
 
     // 3. claim — releases the WBTC to the lock's receiver (the solver).
     try {
-      const txHash = await escrow.write.claim([preImage], { account: this.cfg.account, chain: null });
+      const txHash = await escrow.write.claim([preImage], {
+        account: this.cfg.account,
+        chain: null
+      });
       await this.pub.waitForTransactionReceipt({ hash: txHash });
       return { kind: "claimed", txHash };
     } catch (e) {
-      return { kind: "failed", reason: `claim failed (will retry): ${errMsg(e)}` };
+      return {
+        kind: "failed",
+        reason: `claim failed (will retry): ${errMsg(e)}`
+      };
     }
   }
 
@@ -117,32 +138,59 @@ export class HtlcSettler {
    * the USER — so the user retakes their own WBTC; the solver can't retake for
    * them, which is correct (the user's funds, the user's refund).
    */
-  async retakeAfterTimeout(hashLock: Hex, nowSeconds: number): Promise<SettleOutcome> {
+  async retakeAfterTimeout(
+    hashLock: Hex,
+    nowSeconds: number
+  ): Promise<SettleOutcome> {
     const escrow = getContract({
       address: this.cfg.htlcEscrow,
       abi: HTLC_ESCROW_ABI,
-      client: { public: this.pub, wallet: this.wallet },
+      client: { public: this.pub, wallet: this.wallet }
     });
     let lock: readonly [bigint, bigint, Address, Address, Address];
     try {
-      lock = (await escrow.read.locks([hashLock])) as readonly [bigint, bigint, Address, Address, Address];
+      lock = (await escrow.read.locks([hashLock])) as readonly [
+        bigint,
+        bigint,
+        Address,
+        Address,
+        Address
+      ];
     } catch (e) {
-      return { kind: "skipped", reason: `lock read failed (transient): ${errMsg(e)}` };
+      return {
+        kind: "skipped",
+        reason: `lock read failed (transient): ${errMsg(e)}`
+      };
     }
     const [unlockTime, amount, , senderAddress] = lock;
     if (amount === 0n) return { kind: "alreadyClaimed" }; // gone (claimed or already retaken)
     if (nowSeconds < Number(unlockTime)) {
-      return { kind: "skipped", reason: `too early: ${Number(unlockTime) - nowSeconds}s until retake` };
+      return {
+        kind: "skipped",
+        reason: `too early: ${Number(unlockTime) - nowSeconds}s until retake`
+      };
     }
-    if (this.cfg.account.address.toLowerCase() !== senderAddress.toLowerCase()) {
-      return { kind: "skipped", reason: "only the lock sender can retake (this account is not the funder)" };
+    if (
+      this.cfg.account.address.toLowerCase() !== senderAddress.toLowerCase()
+    ) {
+      return {
+        kind: "skipped",
+        reason:
+          "only the lock sender can retake (this account is not the funder)"
+      };
     }
     try {
-      const txHash = await escrow.write.retake([hashLock], { account: this.cfg.account, chain: null });
+      const txHash = await escrow.write.retake([hashLock], {
+        account: this.cfg.account,
+        chain: null
+      });
       await this.pub.waitForTransactionReceipt({ hash: txHash });
       return { kind: "claimed", txHash }; // 'claimed' = the terminal-refund tx landed
     } catch (e) {
-      return { kind: "failed", reason: `retake failed (will retry): ${errMsg(e)}` };
+      return {
+        kind: "failed",
+        reason: `retake failed (will retry): ${errMsg(e)}`
+      };
     }
   }
 }
@@ -155,14 +203,14 @@ export class HtlcSettler {
  * the raw bytes) or null if not yet revealed.
  *
  * This is the on-chain reveal source. (For EVM→Canton the solver usually already
- * has the preimage from the user's cBTC-claim request, so it doesn't need this —
+ * has the preimage from the user's CBTC-claim request, so it doesn't need this —
  * but the watchtower and the reverse direction do.)
  */
 export async function readRevealedPreimage(
   pub: ReturnType<typeof createPublicClient>,
   htlcEscrow: Address,
   hashLock: Hex,
-  fromBlock: bigint,
+  fromBlock: bigint
 ): Promise<Hex | null> {
   const logs = await pub.getContractEvents({
     address: htlcEscrow,
@@ -170,7 +218,7 @@ export async function readRevealedPreimage(
     eventName: "Claimed",
     args: { hashValue: hashLock },
     fromBlock,
-    toBlock: "latest",
+    toBlock: "latest"
   });
   for (const log of logs) {
     const pre = (log as { args?: { preImage?: Hex } }).args?.preImage;

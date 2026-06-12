@@ -3,7 +3,7 @@
  *
  * Ties the four legs together over a poll cadence:
  *   1. watch    — InputSettlerEscrow `Open` events on Base       → [seen]
- *   2. deliver  — create cBTC offer (solver float → user party)  → [delivering]
+ *   2. deliver  — create CBTC offer (solver float → user party)  → [delivering]
  *   3. accept   — user accepts on Canton; capture record-time    → [delivered]
  *   4. settle   — attest on oracle, finalise on escrow           → [finalised]
  *
@@ -26,7 +26,7 @@ import { buildHealthReport, summarize } from "./monitor.js";
 import { refundExpiredOrders, type RefundDeps } from "./refund.js";
 
 // How much time must remain before an order's fillDeadline for the solver to
-// START delivering it. This covers the whole remaining lifecycle: deliver cBTC
+// START delivering it. This covers the whole remaining lifecycle: deliver CBTC
 // (seconds) + accept (seconds–minutes) + attest + finalise (~1–2 min).
 //
 // HARD INVARIANT (the bug that stalled every live swap): this MUST be
@@ -44,8 +44,8 @@ async function main(): Promise<void> {
   console.log("[config]", JSON.stringify(describeEnv(env), null, 2));
   console.log(
     "[trust] single-solver custodial, two-legged (NOT atomic) settlement. " +
-      "Agent key releases the escrow; Canton creds spend the cBTC float. " +
-      "Both treasury-grade.",
+      "Agent key releases the escrow; Canton creds spend the CBTC float. " +
+      "Both treasury-grade."
   );
 
   const store: OrderStore = SupabaseOrderStore.fromEnv();
@@ -54,7 +54,7 @@ async function main(): Promise<void> {
     originChainId: await chainIdOf(env),
     escrow: env.escrow,
     oracle: env.oracle,
-    wbtc: env.wbtc,
+    wbtc: env.wbtc
   });
 
   // FAIL-FAST on the timing contradiction that silently stalled every live swap:
@@ -65,20 +65,20 @@ async function main(): Promise<void> {
     console.error(
       `[preflight] FATAL config: delivery margin (${DELIVERY_MARGIN_SECONDS}s) >= fill window ` +
         `(${cfg.fillDeadlineSeconds}s). Every order would be unfillable. ` +
-        `Increase fillDeadlineSeconds or lower DELIVERY_MARGIN_SECONDS (keep margin <= fill/3).`,
+        `Increase fillDeadlineSeconds or lower DELIVERY_MARGIN_SECONDS (keep margin <= fill/3).`
     );
     process.exit(1);
   }
   if (cfg.fillDeadlineSeconds >= cfg.expiresSeconds) {
     console.error(
       `[preflight] FATAL config: fillDeadline (${cfg.fillDeadlineSeconds}s) >= expires ` +
-        `(${cfg.expiresSeconds}s). The escrow requires fillDeadline < expires.`,
+        `(${cfg.expiresSeconds}s). The escrow requires fillDeadline < expires.`
     );
     process.exit(1);
   }
   console.log(
     `[preflight] timing OK: fill ${cfg.fillDeadlineSeconds / 60}m, expires ${cfg.expiresSeconds / 60}m, ` +
-      `delivery margin ${DELIVERY_MARGIN_SECONDS / 60}m (${(cfg.fillDeadlineSeconds - DELIVERY_MARGIN_SECONDS) / 60}m slack).`,
+      `delivery margin ${DELIVERY_MARGIN_SECONDS / 60}m (${(cfg.fillDeadlineSeconds - DELIVERY_MARGIN_SECONDS) / 60}m slack).`
   );
 
   const canton = new CantonClient(
@@ -87,33 +87,44 @@ async function main(): Promise<void> {
       registryUrl: env.canton.registryUrl,
       decentralizedPartyId: env.canton.decentralizedPartyId,
       instrumentId: env.canton.instrumentId,
-      solverParty: env.canton.solverParty,
+      solverParty: env.canton.solverParty
     },
-    env.canton.auth,
+    env.canton.auth
   );
 
   // --- Float pre-flight (B6): fail loudly before accepting any orders if the
-  // cBTC float can't be read or is empty. On mainnet an empty float means we'd
+  // CBTC float can't be read or is empty. On mainnet an empty float means we'd
   // lock users' WBTC we can't fill — refuse to start.
   try {
     const floatSats = await canton.getFloatSats();
     const floatBtc = Number(floatSats) / 1e8;
-    console.log(`[preflight] cBTC float: ${floatBtc} cBTC (${floatSats} sats)`);
+    console.log(`[preflight] CBTC float: ${floatBtc} CBTC (${floatSats} sats)`);
     if (floatSats === 0n) {
-      const msg = "[preflight] FLOAT IS EMPTY — the solver cannot deliver cBTC. Refusing to start.";
-      if (env.network === "mainnet") { console.error(msg); process.exit(1); }
+      const msg =
+        "[preflight] FLOAT IS EMPTY — the solver cannot deliver CBTC. Refusing to start.";
+      if (env.network === "mainnet") {
+        console.error(msg);
+        process.exit(1);
+      }
       console.warn(msg + " (continuing on non-mainnet)");
     }
   } catch (e) {
-    const msg = `[preflight] could not read the cBTC float: ${e instanceof Error ? e.message : e}`;
-    if (env.network === "mainnet") { console.error(msg + " — refusing to start on mainnet."); process.exit(1); }
+    const msg = `[preflight] could not read the CBTC float: ${e instanceof Error ? e.message : e}`;
+    if (env.network === "mainnet") {
+      console.error(msg + " — refusing to start on mainnet.");
+      process.exit(1);
+    }
     console.warn(msg + " (continuing on non-mainnet)");
   }
 
   const watcher = new OpenWatcher(
-    { rpcUrl: env.originRpcUrl, escrow: env.escrow, startBlock: env.startBlock },
+    {
+      rpcUrl: env.originRpcUrl,
+      escrow: env.escrow,
+      startBlock: env.startBlock
+    },
     store,
-    (orderId) => console.log(`[watch] new order ${orderId}`),
+    (orderId) => console.log(`[watch] new order ${orderId}`)
   );
   const settler = new Settler({
     rpcUrl: env.originRpcUrl,
@@ -125,7 +136,7 @@ async function main(): Promise<void> {
     // afford attest+finalise gas. Set MIN_GAS_ETH_WEI to enable.
     minEthForGasWei: process.env.MIN_GAS_ETH_WEI
       ? BigInt(process.env.MIN_GAS_ETH_WEI)
-      : undefined,
+      : undefined
   });
 
   // Clients for the auto-refund sweep (returns locked WBTC to users on expiry).
@@ -134,8 +145,11 @@ async function main(): Promise<void> {
     store,
     escrow: env.escrow,
     account: env.agentAccount,
-    wallet: createWalletClient({ account: env.agentAccount, transport: http(env.originRpcUrl) }),
-    pub: createPublicClient({ transport: http(env.originRpcUrl) }),
+    wallet: createWalletClient({
+      account: env.agentAccount,
+      transport: http(env.originRpcUrl)
+    }),
+    pub: createPublicClient({ transport: http(env.originRpcUrl) })
   };
 
   // Resumable backfill, then live follow.
@@ -172,26 +186,38 @@ async function main(): Promise<void> {
         maxInflightSats: process.env.MAX_INFLIGHT_SATS
           ? BigInt(process.env.MAX_INFLIGHT_SATS)
           : undefined,
-        // FAIRNESS: per-user in-flight cBTC cap (sats). Stops one user draining the
+        // FAIRNESS: per-user in-flight CBTC cap (sats). Stops one user draining the
         // shared float. Set PER_USER_INFLIGHT_SATS to enable.
         perUserInflightCapSats: process.env.PER_USER_INFLIGHT_SATS
           ? BigInt(process.env.PER_USER_INFLIGHT_SATS)
           : undefined,
-        // PRE-FLIGHT: never deliver cBTC unless the WBTC is securely claimable
+        // PRE-FLIGHT: never deliver CBTC unless the WBTC is securely claimable
         // (Deposited + comfortable margin before expiry) → the two legs pass-or-
         // fail together. 10 min margin so finalise can't lose to the refund window.
         verifyClaimable: (orderId, expires) =>
-          settler.verifyClaimable(orderId, expires, now, 10 * 60),
+          settler.verifyClaimable(orderId, expires, now, 10 * 60)
       });
-      logOutcomes("deliver", delivered.map((d) => ({ id: d.order.orderId, o: d.outcome.kind })));
+      logOutcomes(
+        "deliver",
+        delivered.map((d) => ({ id: d.order.orderId, o: d.outcome.kind }))
+      );
 
       // 3. resolve delivering orders (user accept / expiry)
-      const resolved = await resolveDeliveringOrders(store, canton, { now, fromOffset: 0 });
-      logOutcomes("accept", resolved.map((r) => ({ id: r.orderId, o: r.outcome.kind })));
+      const resolved = await resolveDeliveringOrders(store, canton, {
+        now,
+        fromOffset: 0
+      });
+      logOutcomes(
+        "accept",
+        resolved.map((r) => ({ id: r.orderId, o: r.outcome.kind }))
+      );
 
       // 4. settle delivered orders (attest + finalise)
       const settled = await settler.settleReady(store);
-      logOutcomes("settle", settled.map((s) => ({ id: s.orderId, o: s.outcome.kind })));
+      logOutcomes(
+        "settle",
+        settled.map((s) => ({ id: s.orderId, o: s.outcome.kind }))
+      );
 
       // 4b. auto-refund: return locked WBTC to users on any order past its expiry
       //     that never finalised. Permissionless — funds always go to the user.
@@ -200,9 +226,13 @@ async function main(): Promise<void> {
       const refunds = await refundExpiredOrders(refundDeps, now);
       for (const r of refunds) {
         if (r.outcome.kind === "refunded") {
-          console.log(`[refund] ${r.orderId.slice(0, 12)}… auto-refunded → ${r.outcome.refundTx}`);
+          console.log(
+            `[refund] ${r.orderId.slice(0, 12)}… auto-refunded → ${r.outcome.refundTx}`
+          );
         } else if (r.outcome.kind === "error") {
-          console.error(`[refund] ${r.orderId.slice(0, 12)}… FAILED: ${r.outcome.message}`);
+          console.error(
+            `[refund] ${r.orderId.slice(0, 12)}… FAILED: ${r.outcome.message}`
+          );
         }
       }
 
@@ -210,7 +240,7 @@ async function main(): Promise<void> {
       const health = await buildHealthReport(store, {
         now,
         staleSeenSeconds: 30 * 60,
-        deadlineWarnSeconds: 30 * 60,
+        deadlineWarnSeconds: 30 * 60
       });
       const line = `[health] ${summarize(health)}`;
       if (health.status === "critical") console.error(line);
@@ -219,7 +249,9 @@ async function main(): Promise<void> {
       // Loud, explicit alert for capital-at-risk orders past their deadline.
       for (const o of health.atRisk) {
         if (o.order.fillDeadline < now) {
-          console.error(`[ALERT] order ${o.orderId.slice(0, 16)}… is ${o.status} PAST fillDeadline — cBTC delivered but finalise may be impossible. Manual review needed.`);
+          console.error(
+            `[ALERT] order ${o.orderId.slice(0, 16)}… is ${o.status} PAST fillDeadline — CBTC delivered but finalise may be impossible. Manual review needed.`
+          );
         }
       }
     } catch (e) {
@@ -232,7 +264,8 @@ async function main(): Promise<void> {
 function logOutcomes(leg: string, items: { id: string; o: string }[]): void {
   const active = items.filter((i) => i.o !== "skipped" && i.o !== "pending");
   if (active.length > 0) {
-    for (const i of active) console.log(`[${leg}] ${i.id.slice(0, 12)}… → ${i.o}`);
+    for (const i of active)
+      console.log(`[${leg}] ${i.id.slice(0, 12)}… → ${i.o}`);
   }
 }
 

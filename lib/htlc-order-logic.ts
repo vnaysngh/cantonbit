@@ -21,6 +21,29 @@ export function isSwapClaimable(
   return false;
 }
 
+/** Forward swap that never locked WBTC — a Review/accept-only draft, not a live swap. */
+export function isAbandonedSwapDraft(
+  o: Pick<SwapOrder, "direction" | "status" | "mainLockTx">,
+): boolean {
+  return o.direction === "evm-to-canton" && o.status === "accepted" && !o.mainLockTx;
+}
+
+/**
+ * User-facing history filter — drop never-started drafts and (optionally) other
+ * wallets' orders on the same Canton party (dev/testing shared-party edge case).
+ */
+export function filterHistoryOrders<T extends Pick<SwapOrder, "direction" | "status" | "mainLockTx" | "userEvmAddress">>(
+  orders: T[],
+  opts?: { userEvmAddress?: string | null },
+): T[] {
+  const evm = opts?.userEvmAddress?.trim().toLowerCase();
+  return orders.filter((o) => {
+    if (isAbandonedSwapDraft(o)) return false;
+    if (evm && o.userEvmAddress?.toLowerCase() !== evm) return false;
+    return true;
+  });
+}
+
 /**
  * Decide what createOrder should persist. SECURITY (audit 2026-06-12): a re-POST
  * with the SAME id must NOT overwrite a live order's terms/status — that would

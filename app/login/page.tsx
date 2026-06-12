@@ -242,7 +242,7 @@ export default function LoginPage() {
   };
 
   const verifyOtp = async () => {
-    if (emailStage.kind !== "otp" || otp.length < 8 || emailBusy) return;
+    if (emailStage.kind !== "otp" || otp.length < 6 || emailBusy) return;
     setEmailBusy("verifying");
     setEmailError(null);
 
@@ -355,7 +355,7 @@ export default function LoginPage() {
               ) : (
                 <>
                   <p className="rounded-xl border border-[#dfc7be] bg-[#fff8f5] px-4 py-4 text-[15px] font-semibold leading-6 text-[#756b66]">
-                    We sent an 8-digit code to{" "}
+                    We sent a 6-digit code to{" "}
                     <span className="font-bold text-[#191919]">{emailStage.email}</span>.
                   </p>
                   <div className="relative">
@@ -370,7 +370,7 @@ export default function LoginPage() {
                       type="text"
                       inputMode="numeric"
                       placeholder="00000000"
-                      maxLength={8}
+                      maxLength={6}
                       value={otp}
                       onChange={(e) => {
                         setOtp(e.target.value.replace(/\D/g, ""));
@@ -386,7 +386,7 @@ export default function LoginPage() {
                     type="button"
                     className={primaryBtnClass}
                     onClick={verifyOtp}
-                    disabled={emailDisabled || otp.length < 8}
+                    disabled={emailDisabled || otp.length < 6}
                   >
                     {emailBusy === "verifying" && <Spinner />}
                     {emailBusy === "verifying" ? "Verifying..." : "Verify and sign in"}

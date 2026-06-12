@@ -7,7 +7,7 @@ import { formatWbtc } from "@/lib/swap-evm";
 
 /**
  * Stats — live, HONEST bridge metrics. Every number here is sourced from the
- * solver's /health (real config + live cBTC float). We deliberately do NOT show
+ * solver's /health (real config + live CBTC float). We deliberately do NOT show
  * "total volume" / "# of swaps": the global GET /orders list was removed for
  * security (HIGH-4), so there is no trustworthy aggregate to display, and we
  * won't fabricate one. When an authenticated admin/analytics feed exists, this
@@ -28,7 +28,9 @@ export default function StatsPage() {
         setError(null);
       } catch (e) {
         if (cancelled) return;
-        setError(e instanceof Error ? e.message : "Could not reach the bridge.");
+        setError(
+          e instanceof Error ? e.message : "Could not reach the bridge."
+        );
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -80,7 +82,9 @@ export default function StatsPage() {
               }
             />
             <span className="text-sm font-medium text-foreground">
-              {health?.depeg ? "Swaps paused (price unstable)" : "Bridge online"}
+              {health?.depeg
+                ? "Swaps paused (price unstable)"
+                : "Bridge online"}
             </span>
             <span className="ml-auto text-xs text-muted-foreground">
               {health?.network} · {health?.chain}
@@ -107,8 +111,8 @@ export default function StatsPage() {
           </div>
 
           <p className="mt-6 px-1 text-xs text-muted-foreground">
-            Liquidity refreshes every 30s. CBTC is redeemable 1:1 for BTC, so the
-            rate tracks the live WBTC/BTC price minus the bridge fee.
+            Liquidity refreshes every 30s. CBTC is redeemable 1:1 for BTC, so
+            the rate tracks the live WBTC/BTC price minus the bridge fee.
           </p>
         </>
       )}
@@ -119,7 +123,7 @@ export default function StatsPage() {
 function Stat({
   label,
   value,
-  hint,
+  hint
 }: {
   label: string;
   value: string;

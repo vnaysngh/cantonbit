@@ -1,6 +1,6 @@
 -- Migration 005: redeems table
 --
--- Persistent record of every cBTC→BTC redemption (burn). The Canton ledger
+-- Persistent record of every CBTC→BTC redemption (burn). The Canton ledger
 -- alone can't drive the activity UI: the burn transaction doesn't carry the
 -- amount in a readable form, and the payout status (broadcast / completed)
 -- lives on attestor-side contracts our JWT can't fully observe over time.
@@ -19,7 +19,7 @@ create table if not exists public.redeems (
   user_id uuid references auth.users(id) on delete set null,
   canton_party_id text not null,
   destination_btc_address text not null,
-  -- Decimal-string cBTC amount burned (e.g. "0.0000250000").
+  -- Decimal-string CBTC amount burned (e.g. "0.0000250000").
   amount text not null,
 
   -- The Canton updateId of the burn transaction (CBTCWithdrawAccount_Withdraw).
@@ -35,7 +35,7 @@ create table if not exists public.redeems (
   btc_tx_id text,
 
   -- Lifecycle:
-  --   burned        cBTC destroyed; attestor hasn't created a request yet.
+  --   burned        CBTC destroyed; attestor hasn't created a request yet.
   --   broadcasting  request + btcTxId exist; waiting for the BTC to hit chain.
   --   sent          btcTxId confirmed/visible on the Bitcoin chain (terminal).
   --   stalled       btcTxId assigned but not on-chain past the threshold —

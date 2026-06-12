@@ -140,7 +140,7 @@ const REJECT_MESSAGES = [
   "user denied",
   "rejected the request",
   "rejected transaction",
-  "transaction was rejected",
+  "transaction was rejected"
 ];
 
 function rawErrorMessage(e: unknown): string {
@@ -155,9 +155,16 @@ function rawErrorMessage(e: unknown): string {
   }
   // Raw provider/RPC errors are plain objects — dig out a message rather than
   // String(e) (which renders "[object Object]").
-  const o = e as { message?: string; reason?: string; data?: { message?: string }; error?: { message?: string } };
-  const nested = o?.message || o?.reason || o?.data?.message || o?.error?.message;
-  if (typeof nested === "string" && nested && nested !== "[object Object]") return nested;
+  const o = e as {
+    message?: string;
+    reason?: string;
+    data?: { message?: string };
+    error?: { message?: string };
+  };
+  const nested =
+    o?.message || o?.reason || o?.data?.message || o?.error?.message;
+  if (typeof nested === "string" && nested && nested !== "[object Object]")
+    return nested;
   try {
     const json = JSON.stringify(e);
     return json && json !== "{}" ? json : "";
@@ -185,19 +192,28 @@ export function getSwapErrorMessage(e: unknown): string {
   if (isUserRejection(e)) return USER_REJECTED_MESSAGE;
   if (e instanceof ApiError) {
     const m = e.message?.trim();
-    return m ? m.charAt(0).toUpperCase() + m.slice(1) : `Request failed (${e.status}).`;
+    return m
+      ? m.charAt(0).toUpperCase() + m.slice(1)
+      : `Request failed (${e.status}).`;
   }
   return rawErrorMessage(e) || "Something went wrong. Please try again.";
 }
 
-async function req<T>(path: string, init?: RequestInit, baseUrl?: string): Promise<T> {
+async function req<T>(
+  path: string,
+  init?: RequestInit,
+  baseUrl?: string
+): Promise<T> {
   const res = await fetch(`${baseUrl ?? SWAP_API_URL}${path}`, {
     ...init,
-    headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
+    headers: { "content-type": "application/json", ...(init?.headers ?? {}) }
   });
   const body = (await res.json().catch(() => ({}))) as T & { error?: string };
   if (!res.ok) {
-    throw new ApiError(res.status, (body as { error?: string }).error ?? `${path} failed (${res.status})`);
+    throw new ApiError(
+      res.status,
+      (body as { error?: string }).error ?? `${path} failed (${res.status})`
+    );
   }
   return body as T;
 }
@@ -212,20 +228,29 @@ export function getQuote(input: {
   cantonParty: string;
 }): Promise<QuoteResponse> {
   // HTLC-native quote — same-origin route, no dependency on the old solver service.
-  return req<QuoteResponse>("/quote", {
-    method: "POST",
-    body: JSON.stringify(input),
-  }, "/api/htlc");
+  return req<QuoteResponse>(
+    "/quote",
+    {
+      method: "POST",
+      body: JSON.stringify(input)
+    },
+    "/api/htlc"
+  );
 }
 
 export function submitOrder(input: {
   order: SerializedOrder;
   signature: string;
   cantonParty: string;
-}): Promise<{ orderId: string; status: SwapStatus; openTx?: string; alreadyRegistered?: boolean }> {
+}): Promise<{
+  orderId: string;
+  status: SwapStatus;
+  openTx?: string;
+  alreadyRegistered?: boolean;
+}> {
   return req("/orders", {
     method: "POST",
-    body: JSON.stringify(input),
+    body: JSON.stringify(input)
   });
 }
 
@@ -234,18 +259,18 @@ export function getOrder(orderId: string): Promise<OrderView> {
 }
 
 /**
- * Report the cBTC delivery outcome (read from the user's Loop history) to the
+ * Report the CBTC delivery outcome (read from the user's Loop history) to the
  * solver. status "completed" → solver finalises (releases WBTC); "rejected" →
  * solver marks failed → user refunds. This is how the swap completes: the user's
  * app, which holds the authoritative history, tells the solver to settle.
  */
 export function reportAccepted(
   orderId: string,
-  body: { status: "completed" | "rejected"; historyId?: string },
+  body: { status: "completed" | "rejected"; historyId?: string }
 ): Promise<{ orderId: string; status: SwapStatus }> {
   return req(`/orders/${orderId}/accepted`, {
     method: "POST",
-    body: JSON.stringify(body),
+    body: JSON.stringify(body)
   });
 }
 
@@ -277,7 +302,7 @@ export const STATUS_LABEL: Record<SwapStatus, string> = {
   attested: "Almost there",
   finalised: "Swap complete",
   refunded: "Refunded to your wallet",
-  failed: "Swap didn’t complete",
+  failed: "Swap didn’t complete"
 };
 
 // ---------------------------------------------------------------------------
@@ -319,7 +344,7 @@ export type SwapProgressState =
   | "delayed" // still in-flight but slow — show reassurance, never a frozen spinner
   | "expired" // past the refund window without completing — offer refund
   | "refunded" // WBTC returned to the user
-  | "failed"; // couldn't complete (cBTC rejected / hard failure) — funds safe, refundable
+  | "failed"; // couldn't complete (CBTC rejected / hard failure) — funds safe, refundable
 
 /**
  * The three numbered steps the user sees (CoW renders a small fixed set of steps,
@@ -328,7 +353,7 @@ export type SwapProgressState =
 export const SWAP_STEPS = [
   "Confirming your deposit",
   "Sending CBTC to your wallet",
-  "Swap complete",
+  "Swap complete"
 ] as const;
 
 /** Which of the 3 SWAP_STEPS is active for a given progress state. */
@@ -339,7 +364,7 @@ export const STEP_FOR_PROGRESS: Record<SwapProgressState, number> = {
   finished: 2,
   expired: 0,
   refunded: 0,
-  failed: 0,
+  failed: 0
 };
 
 /**
@@ -348,7 +373,10 @@ export const STEP_FOR_PROGRESS: Record<SwapProgressState, number> = {
  * premature "expired") and the delayed threshold (no frozen spinner), so the UI
  * always resolves to a meaningful state instead of an endless "Swapping…".
  */
-export function deriveProgress(order: OrderView, nowSeconds: number): SwapProgressState {
+export function deriveProgress(
+  order: OrderView,
+  nowSeconds: number
+): SwapProgressState {
   switch (order.status) {
     case "finalised":
       return "finished";
@@ -363,7 +391,8 @@ export function deriveProgress(order: OrderView, nowSeconds: number): SwapProgre
     return "expired";
   }
   // Slow but not expired → DELAYED (reassure), once it's sat a while.
-  const ageSeconds = nowSeconds - Math.floor(new Date(order.createdAt).getTime() / 1000);
+  const ageSeconds =
+    nowSeconds - Math.floor(new Date(order.createdAt).getTime() / 1000);
   if (ageSeconds > DELAYED_AFTER_SECONDS) {
     return "delayed";
   }
@@ -380,16 +409,24 @@ export const PROGRESS_COPY: Record<
   delivering: { title: "Swapping…", caption: "Sending CBTC to your wallet" },
   delayed: {
     title: "Swapping…",
-    caption: "This is taking a little longer than usual — hang tight, your funds are safe.",
+    caption:
+      "This is taking a little longer than usual — hang tight, your funds are safe."
   },
-  finished: { title: "Swap complete", caption: "CBTC delivered to your wallet" },
+  finished: {
+    title: "Swap complete",
+    caption: "CBTC delivered to your wallet"
+  },
   expired: {
     title: "Swap didn’t complete",
-    caption: "It passed its deadline. Your WBTC is safe — you can refund it now.",
+    caption:
+      "It passed its deadline. Your WBTC is safe — you can refund it now."
   },
-  refunded: { title: "Refunded", caption: "Your WBTC was returned to your wallet" },
+  refunded: {
+    title: "Refunded",
+    caption: "Your WBTC was returned to your wallet"
+  },
   failed: {
     title: "Swap didn’t complete",
-    caption: "Your WBTC is safe and can be refunded.",
-  },
+    caption: "Your WBTC is safe and can be refunded."
+  }
 };

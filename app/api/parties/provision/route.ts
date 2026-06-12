@@ -15,14 +15,8 @@ import { NextResponse } from "next/server";
 
 import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
 import { onboardParticipantManagedParty } from "@/lib/party-onboarding";
-import { NETWORK } from "@/lib/constants";
 
 const TAG = "[parties/provision]";
-
-/** The current network's warpx participant namespace (where our DAR is vetted). */
-function warpxNamespace(): string {
-  return NETWORK.warpxPartyId.split("::")[1] ?? "";
-}
 
 export async function POST() {
   try {
@@ -31,11 +25,7 @@ export async function POST() {
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
     const service = await createSupabaseServiceClient();
-    const ns = warpxNamespace();
 
-    // Already provisioned ON THE CURRENT WARPX PARTICIPANT? Return it (idempotent).
-    // A party on a DIFFERENT participant (e.g. an old cbtc-user::mainnet-ns one) is
-    // NOT usable for the on-ledger HtlcLock claim (DAR not vetted there) — re-provision.
     const { data: existing } = await service
       .from("party_mappings")
       .select("canton_party_id, party_hint")
@@ -47,22 +37,9 @@ export async function POST() {
       if (existing.party_hint === "loop-wallet") {
         return NextResponse.json({ partyId: existing.canton_party_id, isNew: false });
       }
-      const existingNs = (existing.canton_party_id as string).split("::")[1] ?? "";
-      if (ns && existingNs === ns) {
+      if (existing.party_hint === "participant-managed") {
         return NextResponse.json({ partyId: existing.canton_party_id, isNew: false });
       }
-      // Wrong participant — allocate a fresh warpx party and re-point the mapping.
-      const { party } = await onboardParticipantManagedParty();
-      const { error: updErr } = await service
-        .from("party_mappings")
-        .update({ canton_party_id: party, party_hint: "participant-managed" })
-        .eq("user_id", user.id);
-      if (updErr) {
-        console.error(`${TAG} re-provision update error:`, updErr);
-        return NextResponse.json({ error: "Failed to re-point party mapping" }, { status: 500 });
-      }
-      console.log(`${TAG} re-provisioned user=${user.id} onto warpx: ${party.slice(0, 28)}…`);
-      return NextResponse.json({ partyId: party, isNew: true });
     }
 
     // Allocate on warpx + grant backend CanActAs (the proven participant-managed path).

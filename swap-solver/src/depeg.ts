@@ -1,11 +1,11 @@
 /**
  * De-peg safety guard.
  *
- * Our swap quotes WBTC↔cBTC at 1:1 because both are claims on 1 BTC — par is
- * correct ONLY while each token actually holds its peg. If WBTC (or cBTC)
+ * Our swap quotes WBTC↔CBTC at 1:1 because both are claims on 1 BTC — par is
+ * correct ONLY while each token actually holds its peg. If WBTC (or CBTC)
  * de-pegs from BTC, the 1:1 rate becomes wrong and the solver would be
  * arbitraged: e.g. if WBTC drops to 0.9 BTC, a user swaps 1 (cheap) WBTC for 1
- * (full) cBTC and drains the float.
+ * (full) CBTC and drains the float.
  *
  * This guard reads the on-chain Chainlink **WBTC/BTC** price feed on the origin
  * chain (the direct de-peg signal) and PAUSES swaps if:
@@ -17,11 +17,16 @@
  * only decides whether swapping is safe right now. Same idea CoW / serious
  * bridges use — a circuit breaker that halts on a peg break.
  *
- * NOTE: this watches the WBTC peg (on-chain, readable). A cBTC de-peg has no
- * public price feed; that risk is monitored off-chain (the cBTC issuer's
+ * NOTE: this watches the WBTC peg (on-chain, readable). A CBTC de-peg has no
+ * public price feed; that risk is monitored off-chain (the CBTC issuer's
  * redemption health) and is documented as a residual.
  */
-import { createPublicClient, http, type Address, type PublicClient } from "viem";
+import {
+  createPublicClient,
+  http,
+  type Address,
+  type PublicClient
+} from "viem";
 
 /** Minimal Chainlink AggregatorV3 ABI — latestRoundData + decimals. */
 const AGGREGATOR_ABI = [
@@ -35,16 +40,16 @@ const AGGREGATOR_ABI = [
       { name: "answer", type: "int256" },
       { name: "startedAt", type: "uint256" },
       { name: "updatedAt", type: "uint256" },
-      { name: "answeredInRound", type: "uint80" },
-    ],
+      { name: "answeredInRound", type: "uint80" }
+    ]
   },
   {
     name: "decimals",
     type: "function",
     stateMutability: "view",
     inputs: [],
-    outputs: [{ name: "", type: "uint8" }],
-  },
+    outputs: [{ name: "", type: "uint8" }]
+  }
 ] as const;
 
 export interface DepegConfig {
@@ -90,28 +95,34 @@ export class DepegGuard {
       const [, ans, , upd] = (await this.pub.readContract({
         address: this.cfg.feed,
         abi: AGGREGATOR_ABI,
-        functionName: "latestRoundData",
+        functionName: "latestRoundData"
       })) as readonly [bigint, bigint, bigint, bigint, bigint];
       decimals = (await this.pub.readContract({
         address: this.cfg.feed,
         abi: AGGREGATOR_ABI,
-        functionName: "decimals",
+        functionName: "decimals"
       })) as number;
       answer = ans;
       updatedAt = upd;
     } catch (e) {
-      return { ok: false, reason: `de-peg feed unreadable (fail-closed): ${errMsg(e)}` };
+      return {
+        ok: false,
+        reason: `de-peg feed unreadable (fail-closed): ${errMsg(e)}`
+      };
     }
 
     if (answer <= 0n) {
-      return { ok: false, reason: `de-peg feed returned non-positive price (${answer})` };
+      return {
+        ok: false,
+        reason: `de-peg feed returned non-positive price (${answer})`
+      };
     }
     // Staleness: a frozen feed could hide a de-peg.
     const ageSeconds = nowSeconds - Number(updatedAt);
     if (ageSeconds > this.cfg.maxStalenessSeconds) {
       return {
         ok: false,
-        reason: `de-peg feed stale: ${ageSeconds}s old (max ${this.cfg.maxStalenessSeconds}s)`,
+        reason: `de-peg feed stale: ${ageSeconds}s old (max ${this.cfg.maxStalenessSeconds}s)`
       };
     }
 
@@ -123,10 +134,16 @@ export class DepegGuard {
         ok: false,
         reason: `WBTC de-pegged: ${priceBtc.toFixed(5)} BTC (${deviationBps}bps off, max ${this.cfg.maxDeviationBps}bps) — swaps paused`,
         priceBtc,
-        deviationBps,
+        deviationBps
       };
     }
-    return { ok: true, priceBtc, deviationBps, priceRaw: answer, priceDecimals: decimals };
+    return {
+      ok: true,
+      priceBtc,
+      deviationBps,
+      priceRaw: answer,
+      priceDecimals: decimals
+    };
   }
 }
 

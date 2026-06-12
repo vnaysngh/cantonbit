@@ -3,7 +3,7 @@
  * TWO triggers so refunds survive even if the daemon is down:
  *   - the solver daemon's 60s timer (POST), and
  *   - a scheduled cron (GET — Vercel cron / external worker, Bearer CRON_SECRET).
- * Idempotent per order. Covers forward/reverse cBTC refunds + Loop custody returns.
+ * Idempotent per order. Covers forward/reverse CBTC refunds + Loop custody returns.
  *
  * AUTH: production requires daemon/cron bearer authorization. Development allows
  * local sweeps without a secret so the worker remains easy to run locally.
@@ -22,39 +22,77 @@ function cronAuthorized(req: NextRequest): boolean {
 
 async function sweep() {
   const svc = htlcService();
-  const { forwardCounter, reverseMain, staleForwardMain, staleLoopSeller, loopCustodyStalled } = await svc.expiredOrders();
-  const results: { id: string; kind: string; ok: boolean; detail: string }[] = [];
+  const {
+    forwardCounter,
+    reverseMain,
+    staleForwardMain,
+    staleLoopSeller,
+    loopCustodyStalled
+  } = await svc.expiredOrders();
+  const results: { id: string; kind: string; ok: boolean; detail: string }[] =
+    [];
   const run = async (id: string, kind: string, fn: () => Promise<unknown>) => {
-    try { const r = (await fn()) as { updateId?: string } | undefined; results.push({ id, kind, ok: true, detail: r?.updateId ?? "ok" }); }
-    catch (e) {
+    try {
+      const r = (await fn()) as { updateId?: string } | undefined;
+      results.push({ id, kind, ok: true, detail: r?.updateId ?? "ok" });
+    } catch (e) {
       const detail = e instanceof Error ? e.message.slice(0, 120) : String(e);
       results.push({ id, kind, ok: false, detail });
       // A refund that's DUE but keeps failing = funds may be stuck; alert.
-      void alert("error", "Auto-refund FAILED for an expired swap", { order: id.slice(0, 18), kind, detail });
+      void alert("error", "Auto-refund FAILED for an expired swap", {
+        order: id.slice(0, 18),
+        kind,
+        detail
+      });
     }
   };
-  for (const o of forwardCounter) await run(o.id, "refund-counter", () => svc.refundCounter(o.id));
-  for (const o of reverseMain) await run(o.id, "refund-main", () => svc.refundMainCanton(o.id));
-  for (const o of staleForwardMain) await run(o.id, "mark-stale", () => svc.markRefunded(o.id));
-  // Loop-seller custody (Variant A): WE hold the cBTC, so send it straight back
+  for (const o of forwardCounter)
+    await run(o.id, "refund-counter", () => svc.refundCounter(o.id));
+  for (const o of reverseMain)
+    await run(o.id, "refund-main", () => svc.refundMainCanton(o.id));
+  for (const o of staleForwardMain)
+    await run(o.id, "mark-stale", () => svc.markRefunded(o.id));
+  // Loop-seller custody (Variant A): WE hold the CBTC, so send it straight back
   // via direct transfer; the user's preapproval auto-accepts.
-  for (const o of staleLoopSeller) await run(o.id, "refund-loop-custody", () => svc.refundMainCanton(o.id));
+  for (const o of staleLoopSeller)
+    await run(o.id, "refund-loop-custody", () => svc.refundMainCanton(o.id));
   // Early custody return for stalled loop-seller swaps with no WBTC counter-lock.
   // The method verifies safety on-chain before returning custody.
-  for (const o of loopCustodyStalled) await run(o.id, "early-refund-loop", () => svc.earlyRefundLoopCustody(o.id));
-  const due = forwardCounter.length + reverseMain.length + staleForwardMain.length + staleLoopSeller.length + loopCustodyStalled.length;
+  for (const o of loopCustodyStalled)
+    await run(o.id, "early-refund-loop", () =>
+      svc.earlyRefundLoopCustody(o.id)
+    );
+  const due =
+    forwardCounter.length +
+    reverseMain.length +
+    staleForwardMain.length +
+    staleLoopSeller.length +
+    loopCustodyStalled.length;
   return { due, refunded: results.filter((r) => r.ok).length, results };
 }
 
 export async function POST(req: Request) {
   const auth = requireDaemon(req);
   if (auth.error) return auth.error;
-  try { return NextResponse.json(await sweep()); }
-  catch (e) { return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 }); }
+  try {
+    return NextResponse.json(await sweep());
+  } catch (e) {
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : String(e) },
+      { status: 500 }
+    );
+  }
 }
 
 export async function GET(req: NextRequest) {
-  if (!cronAuthorized(req)) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  try { return NextResponse.json(await sweep()); }
-  catch (e) { return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 }); }
+  if (!cronAuthorized(req))
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  try {
+    return NextResponse.json(await sweep());
+  } catch (e) {
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : String(e) },
+      { status: 500 }
+    );
+  }
 }

@@ -1,15 +1,15 @@
-# cBTC Minting App
+# CBTC Minting App
 
-Frontend app for minting, burning, and transferring cBTC on Canton Network.
+Frontend app for minting, burning, and transferring CBTC on Canton Network.
 Built on WarpX's Five North validator node.
 
 ## What this app does
 
-- View cBTC balance
-- Send cBTC to another Canton party
-- Receive cBTC from another party
-- Mint cBTC from Bitcoin (Minter only — pending BitSafe access)
-- Redeem cBTC to Bitcoin (Minter only — pending BitSafe access)
+- View CBTC balance
+- Send CBTC to another Canton party
+- Receive CBTC from another party
+- Mint CBTC from Bitcoin (Minter only — pending BitSafe access)
+- Redeem CBTC to Bitcoin (Minter only — pending BitSafe access)
 
 ## Infrastructure
 
@@ -30,9 +30,9 @@ Party ID (partial): warpx-devnet-1::1220231c1885f28...
 Next.js 14+ (App Router), TypeScript, Tailwind CSS, shadcn/ui
 Loop wallet: @fivenorth/loop-sdk (see https://docs.fivenorth.io/)
 Canton API: JSON Ledger API (REST) — used server-side for read paths;
-  user-side writes go through the Loop provider (provider.submitTransaction).
+user-side writes go through the Loop provider (provider.submitTransaction).
 
-## cBTC Token Standard Configuration
+## CBTC Token Standard Configuration
 
 These are the real confirmed values. Not placeholders.
 Token Standard API reference:
@@ -130,7 +130,7 @@ Amounts: always display in BTC units, never satoshis
 
 ## Active investigations / known issues
 
-**Burn (cBTC→BTC) intermittently stalls on the BitSafe attestor side.** Some
+**Burn (CBTC→BTC) intermittently stalls on the BitSafe attestor side.** Some
 burns complete in 5–15 min; others stall at "request created, BTC not
 broadcast" or "no request created at all." Investigation conclusion: the user
 code is byte-identical UI vs. script (proven by snapshot diff); the variance is
@@ -149,7 +149,7 @@ Token Standard API docs:
 https://docs.dev.sync.global/app_dev/token_standard/index.html#api-references
 BitSafe API collection:
 https://github.com/DLC-link/api-collections-public
-cBTC DAR files:
+CBTC DAR files:
 https://github.com/DLC-link/cbtc-lib/tree/main/cbtc-dars
 cbtc-lib examples:
 https://github.com/DLC-link/cbtc-lib/tree/main/examples
@@ -183,7 +183,7 @@ https://docs.daml.com/json-api/
 
 ### Pending (external dependencies)
 
-- [ ] Upload cBTC DARs to warpx node via 5N Dashboard
+- [ ] Upload CBTC DARs to warpx node via 5N Dashboard
 - [ ] Get Holder/Minter credential from BitSafe
 - [ ] Get BITSAFE_API_URL from BitSafe
 

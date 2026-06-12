@@ -28,7 +28,7 @@ create table if not exists public.mint_transfers (
   user_id uuid references auth.users(id) on delete set null,
   canton_party_id text,
 
-  -- Amount minted in cBTC (string to preserve decimal precision)
+  -- Amount minted in CBTC (string to preserve decimal precision)
   amount text not null,
 
   -- Processing status

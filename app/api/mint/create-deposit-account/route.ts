@@ -15,10 +15,12 @@ import { getLedgerJwt, invalidateLedgerJwtCache } from "@/lib/auth";
 import { getAccountContractRules, getBitcoinAddress } from "@/lib/bitsafe";
 import { NETWORK } from "@/lib/constants";
 import { resolveSessionParty } from "@/lib/session-party";
-import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
+import {
+  createSupabaseServerClient,
+  createSupabaseServiceClient
+} from "@/lib/supabase/server";
 
 const APPLICATION_ID = "cbtc-app";
-
 
 // Template ID for the Utility Credential contract issued by BitSafe.
 // Package hash is derived from the credentialBlob; template path is stable across versions.
@@ -34,7 +36,9 @@ export async function POST(req: NextRequest) {
   console.log(`${TAG} request received`);
 
   try {
-    const { partyId: clientPartyId } = await req.json() as { partyId?: string };
+    const { partyId: clientPartyId } = (await req.json()) as {
+      partyId?: string;
+    };
 
     // SECURITY: although signing here uses warpx (so this can't move funds),
     // the resulting deposit-account record is stored under `partyId`. Resolve
@@ -45,31 +49,48 @@ export async function POST(req: NextRequest) {
     const partyId = sess.partyId;
 
     // All signing uses the WarpX-hosted party — m2m JWT has authority over it
-    // and cBTC DARs are vetted on the WarpX node. Owner is also WarpX party
+    // and CBTC DARs are vetted on the WarpX node. Owner is also WarpX party
     // (Canton requires owner to be in actAs, and the m2m JWT only covers WarpX).
     const warpxParty = NETWORK.warpxPartyId;
     if (!warpxParty) {
-      console.error(`${TAG} no warpxPartyId configured for network=${NETWORK.name}`);
-      return NextResponse.json({ error: `No WarpX party configured for ${NETWORK.name}` }, { status: 500 });
+      console.error(
+        `${TAG} no warpxPartyId configured for network=${NETWORK.name}`
+      );
+      return NextResponse.json(
+        { error: `No WarpX party configured for ${NETWORK.name}` },
+        { status: 500 }
+      );
     }
 
     const credentialCid = NETWORK.credentialCid;
     if (!credentialCid) {
-      console.error(`${TAG} no credentialCid configured for network=${NETWORK.name}`);
-      return NextResponse.json({ error: `No minter credential configured for ${NETWORK.name}` }, { status: 500 });
+      console.error(
+        `${TAG} no credentialCid configured for network=${NETWORK.name}`
+      );
+      return NextResponse.json(
+        { error: `No minter credential configured for ${NETWORK.name}` },
+        { status: 500 }
+      );
     }
 
     const credentialBlob = NETWORK.credentialBlob;
     if (!credentialBlob) {
-      console.error(`${TAG} no credentialBlob configured for network=${NETWORK.name}`);
-      return NextResponse.json({ error: `No minter credential blob configured for ${NETWORK.name}` }, { status: 500 });
+      console.error(
+        `${TAG} no credentialBlob configured for network=${NETWORK.name}`
+      );
+      return NextResponse.json(
+        { error: `No minter credential blob configured for ${NETWORK.name}` },
+        { status: 500 }
+      );
     }
 
     console.log(`${TAG} partyId (caller)=${partyId.slice(0, 30)}...`);
     console.log(`${TAG} warpxParty (actAs)=${warpxParty.slice(0, 30)}...`);
     console.log(`${TAG} credentialCid=${credentialCid.slice(0, 30)}...`);
     console.log(`${TAG} credentialBlob length=${credentialBlob.length}`);
-    console.log(`${TAG} network=${NETWORK.name} ledgerHost=${NETWORK.ledgerHost}`);
+    console.log(
+      `${TAG} network=${NETWORK.name} ledgerHost=${NETWORK.ledgerHost}`
+    );
     console.log(`${TAG} coordinatorUrl=${NETWORK.coordinatorUrl}`);
 
     // Step 1: fetch da_rules from coordinator
@@ -77,7 +98,9 @@ export async function POST(req: NextRequest) {
     const rules = await getAccountContractRules();
     console.log(`${TAG} da_rules contractId=${rules.da_rules.contract_id}`);
     console.log(`${TAG} da_rules templateId=${rules.da_rules.template_id}`);
-    console.log(`${TAG} da_rules createdEventBlob length=${rules.da_rules.created_event_blob?.length ?? 0}`);
+    console.log(
+      `${TAG} da_rules createdEventBlob length=${rules.da_rules.created_event_blob?.length ?? 0}`
+    );
 
     // Step 2: get JWT
     console.log(`${TAG} fetching JWT from Authentik...`);
@@ -91,7 +114,7 @@ export async function POST(req: NextRequest) {
       // actAs + readAs: WarpX party only — m2m JWT has authority only over this party.
       // owner must also be in actAs (Canton requires owner authorization).
       // Since we can't put the Loop wallet party in actAs (m2m JWT has no authority over it),
-      // the WarpX party is the owner. cBTC lands on the WarpX party and can be
+      // the WarpX party is the owner. CBTC lands on the WarpX party and can be
       // transferred to the user's Loop party in a subsequent step.
       actAs: [warpxParty],
       readAs: [warpxParty],
@@ -105,10 +128,10 @@ export async function POST(req: NextRequest) {
             // credentialCids is NOT a field in this choice — credential is validated
             // via the disclosedContracts entry, not as a choiceArgument field.
             choiceArgument: {
-              owner: warpxParty,
-            },
-          },
-        },
+              owner: warpxParty
+            }
+          }
+        }
       ],
       disclosedContracts: [
         {
@@ -116,7 +139,7 @@ export async function POST(req: NextRequest) {
           templateId: rules.da_rules.template_id,
           contractId: rules.da_rules.contract_id,
           createdEventBlob: rules.da_rules.created_event_blob,
-          synchronizerId: "",
+          synchronizerId: ""
         },
         // Credential contract lives on BitSafe's node — must be disclosed so
         // our WarpX node can validate credentialCids in CreateDepositAccount.
@@ -124,9 +147,9 @@ export async function POST(req: NextRequest) {
           templateId: CREDENTIAL_TEMPLATE_ID,
           contractId: credentialCid,
           createdEventBlob: credentialBlob,
-          synchronizerId: "",
-        },
-      ],
+          synchronizerId: ""
+        }
+      ]
     });
 
     const url = `${NETWORK.ledgerHost}/v2/commands/submit-and-wait-for-transaction-tree`;
@@ -137,29 +160,39 @@ export async function POST(req: NextRequest) {
     console.log(`${TAG} commandId=${commandId}`);
     const body0 = buildBody(commandId);
     const body0str = JSON.stringify(body0);
-    console.log(`${TAG} request body (${body0str.length} chars): ${body0str.length > 3000 ? body0str.slice(0, 3000) + "...[truncated]" : body0str}`);
+    console.log(
+      `${TAG} request body (${body0str.length} chars): ${body0str.length > 3000 ? body0str.slice(0, 3000) + "...[truncated]" : body0str}`
+    );
 
     let res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${jwt}`
+      },
       body: body0str,
-      cache: "no-store",
+      cache: "no-store"
     });
 
     console.log(`${TAG} ledger response status=${res.status}`);
 
     // 401: JWT expired — invalidate cache, refresh, retry once
     if (res.status === 401) {
-      console.warn(`${TAG} 401 from ledger — invalidating JWT cache and retrying...`);
+      console.warn(
+        `${TAG} 401 from ledger — invalidating JWT cache and retrying...`
+      );
       invalidateLedgerJwtCache();
       jwt = await getLedgerJwt();
       commandId = randomUUID();
       console.log(`${TAG} retrying with fresh JWT, commandId=${commandId}`);
       res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${jwt}`
+        },
         body: JSON.stringify(buildBody(commandId)),
-        cache: "no-store",
+        cache: "no-store"
       });
       console.log(`${TAG} retry response status=${res.status}`);
     }
@@ -170,9 +203,12 @@ export async function POST(req: NextRequest) {
       commandId = randomUUID();
       res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${jwt}`
+        },
         body: JSON.stringify(buildBody(commandId)),
-        cache: "no-store",
+        cache: "no-store"
       });
       console.log(`${TAG} conflict retry response status=${res.status}`);
     }
@@ -183,24 +219,40 @@ export async function POST(req: NextRequest) {
 
       if (res.status === 404 && text.includes("unknown template")) {
         return NextResponse.json(
-          { error: "Node configuration required: cBTC DARs not uploaded to node. Contact support." },
-          { status: 502 },
+          {
+            error:
+              "Node configuration required: CBTC DARs not uploaded to node. Contact support."
+          },
+          { status: 502 }
         );
       }
-      return NextResponse.json({ error: `Ledger error (${res.status}): ${text}` }, { status: 502 });
+      return NextResponse.json(
+        { error: `Ledger error (${res.status}): ${text}` },
+        { status: 502 }
+      );
     }
 
     const data = await res.json();
     const dataStr = JSON.stringify(data);
-    console.log(`${TAG} raw tx response keys=${Object.keys(data as object).join(",")}`);
-    console.log(`${TAG} raw tx response body (${dataStr.length} chars): ${dataStr.length > 3000 ? dataStr.slice(0, 3000) + "...[truncated]" : dataStr}`);
+    console.log(
+      `${TAG} raw tx response keys=${Object.keys(data as object).join(",")}`
+    );
+    console.log(
+      `${TAG} raw tx response body (${dataStr.length} chars): ${dataStr.length > 3000 ? dataStr.slice(0, 3000) + "...[truncated]" : dataStr}`
+    );
 
     const contractId = extractDepositAccountContractId(data);
     if (!contractId) {
-      console.error(`${TAG} could not extract contractId from response:`, dataStr.slice(0, 2000));
+      console.error(
+        `${TAG} could not extract contractId from response:`,
+        dataStr.slice(0, 2000)
+      );
       return NextResponse.json(
-        { error: "Deposit account created but contract ID not found in transaction response." },
-        { status: 502 },
+        {
+          error:
+            "Deposit account created but contract ID not found in transaction response."
+        },
+        { status: 502 }
       );
     }
 
@@ -209,29 +261,40 @@ export async function POST(req: NextRequest) {
     // Save to Supabase — also fetch bitcoin address so it's cached immediately
     try {
       const supabase = await createSupabaseServerClient();
-      const { data: { user } } = await supabase.auth.getUser();
+      const {
+        data: { user }
+      } = await supabase.auth.getUser();
       if (user) {
         // Fetch bitcoin address to cache alongside the contract
         let bitcoinAddress: string | null = null;
         try {
           bitcoinAddress = await getBitcoinAddress(contractId);
-          console.log(`${TAG} fetched bitcoin address for Supabase cache: ${bitcoinAddress}`);
+          console.log(
+            `${TAG} fetched bitcoin address for Supabase cache: ${bitcoinAddress}`
+          );
         } catch (addrErr) {
-          console.warn(`${TAG} could not fetch bitcoin address for cache (non-fatal):`, addrErr);
+          console.warn(
+            `${TAG} could not fetch bitcoin address for cache (non-fatal):`,
+            addrErr
+          );
         }
 
         const serviceClient = await createSupabaseServiceClient();
-        const { error } = await serviceClient
-          .from("deposit_accounts")
-          .upsert({
+        const { error } = await serviceClient.from("deposit_accounts").upsert(
+          {
             user_id: user.id,
             canton_party_id: partyId,
             deposit_account_contract_id: contractId,
-            bitcoin_address: bitcoinAddress,
-          }, { onConflict: "deposit_account_contract_id", ignoreDuplicates: true });
+            bitcoin_address: bitcoinAddress
+          },
+          { onConflict: "deposit_account_contract_id", ignoreDuplicates: true }
+        );
 
         if (error) {
-          console.warn(`${TAG} Supabase save failed (non-fatal):`, error.message);
+          console.warn(
+            `${TAG} Supabase save failed (non-fatal):`,
+            error.message
+          );
         } else {
           console.log(`${TAG} Supabase save ok for contractId=${contractId}`);
         }
@@ -241,7 +304,6 @@ export async function POST(req: NextRequest) {
     }
 
     return NextResponse.json({ contractId });
-
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`${TAG} unexpected error:`, err);
@@ -253,19 +315,30 @@ function extractDepositAccountContractId(data: unknown): string | null {
   if (!data || typeof data !== "object") return null;
 
   // Primary shape per BitSafe docs: response.transaction.eventsById[key].created.contractId
-  const txn = (data as { transaction?: { eventsById?: Record<string, unknown> } }).transaction;
+  const txn = (
+    data as { transaction?: { eventsById?: Record<string, unknown> } }
+  ).transaction;
   if (txn?.eventsById) {
     for (const ev of Object.values(txn.eventsById)) {
-      const created = (ev as { created?: { contractId?: string; templateId?: string } }).created;
-      if (created?.contractId && created.templateId?.includes("CBTCDepositAccount")) {
-        console.log(`[mint/create-deposit-account] found contractId via transaction.eventsById (template match)`);
+      const created = (
+        ev as { created?: { contractId?: string; templateId?: string } }
+      ).created;
+      if (
+        created?.contractId &&
+        created.templateId?.includes("CBTCDepositAccount")
+      ) {
+        console.log(
+          `[mint/create-deposit-account] found contractId via transaction.eventsById (template match)`
+        );
         return created.contractId;
       }
     }
     for (const ev of Object.values(txn.eventsById)) {
       const created = (ev as { created?: { contractId?: string } }).created;
       if (created?.contractId) {
-        console.log(`[mint/create-deposit-account] found contractId via transaction.eventsById (first created)`);
+        console.log(
+          `[mint/create-deposit-account] found contractId via transaction.eventsById (first created)`
+        );
         return created.contractId;
       }
     }
@@ -273,33 +346,64 @@ function extractDepositAccountContractId(data: unknown): string | null {
 
   // Actual Canton v2 response shape: transactionTree.eventsById[key].CreatedTreeEvent.value
   // (not CreatedEvent directly on the event — that's an older/different shape)
-  const tree = (data as { transactionTree?: { eventsById?: Record<string, unknown> } }).transactionTree;
+  const tree = (
+    data as { transactionTree?: { eventsById?: Record<string, unknown> } }
+  ).transactionTree;
   if (tree?.eventsById) {
     // Pass 1: template match on CBTCDepositAccount (exclude the Rules contract)
     for (const ev of Object.values(tree.eventsById)) {
       const val =
-        (ev as { CreatedTreeEvent?: { value?: { contractId?: string; templateId?: string } } }).CreatedTreeEvent?.value ??
-        (ev as { CreatedEvent?: { contractId?: string; templateId?: string } }).CreatedEvent;
-      if (val?.contractId && val.templateId?.includes("CBTCDepositAccount") && !val.templateId.includes("Rules")) {
-        console.log(`[mint/create-deposit-account] found contractId via CreatedTreeEvent.value (template match)`);
+        (
+          ev as {
+            CreatedTreeEvent?: {
+              value?: { contractId?: string; templateId?: string };
+            };
+          }
+        ).CreatedTreeEvent?.value ??
+        (ev as { CreatedEvent?: { contractId?: string; templateId?: string } })
+          .CreatedEvent;
+      if (
+        val?.contractId &&
+        val.templateId?.includes("CBTCDepositAccount") &&
+        !val.templateId.includes("Rules")
+      ) {
+        console.log(
+          `[mint/create-deposit-account] found contractId via CreatedTreeEvent.value (template match)`
+        );
         return val.contractId;
       }
     }
     // Pass 2: first CreatedTreeEvent (fallback)
     for (const ev of Object.values(tree.eventsById)) {
       const val =
-        (ev as { CreatedTreeEvent?: { value?: { contractId?: string; templateId?: string } } }).CreatedTreeEvent?.value ??
+        (
+          ev as {
+            CreatedTreeEvent?: {
+              value?: { contractId?: string; templateId?: string };
+            };
+          }
+        ).CreatedTreeEvent?.value ??
         (ev as { CreatedEvent?: { contractId?: string } }).CreatedEvent;
       if (val?.contractId) {
-        console.log(`[mint/create-deposit-account] found contractId via CreatedTreeEvent.value (first created)`);
+        console.log(
+          `[mint/create-deposit-account] found contractId via CreatedTreeEvent.value (first created)`
+        );
         return val.contractId;
       }
     }
     // Pass 3: exerciseResult.depositAccountCid from ExercisedTreeEvent (belt-and-suspenders)
     for (const ev of Object.values(tree.eventsById)) {
-      const exercised = (ev as { ExercisedTreeEvent?: { value?: { exerciseResult?: { depositAccountCid?: string } } } }).ExercisedTreeEvent?.value;
+      const exercised = (
+        ev as {
+          ExercisedTreeEvent?: {
+            value?: { exerciseResult?: { depositAccountCid?: string } };
+          };
+        }
+      ).ExercisedTreeEvent?.value;
       if (exercised?.exerciseResult?.depositAccountCid) {
-        console.log(`[mint/create-deposit-account] found contractId via ExercisedTreeEvent.exerciseResult.depositAccountCid`);
+        console.log(
+          `[mint/create-deposit-account] found contractId via ExercisedTreeEvent.exerciseResult.depositAccountCid`
+        );
         return exercised.exerciseResult.depositAccountCid;
       }
     }

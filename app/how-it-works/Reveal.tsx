@@ -24,7 +24,7 @@ export function Reveal({ children, delay = 0, className }: { children: React.Rea
   return (
     <div
       ref={ref}
-      className={className}
+      className={className ?? "w-full"}
       style={{
         opacity: shown ? 1 : 0,
         transform: shown ? "none" : "translateY(18px)",

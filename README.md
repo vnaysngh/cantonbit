@@ -9,7 +9,7 @@
 ## 1. What we're building
 
 A **Cancore-equivalent** trustless atomic swap between **EVM tokens** (WBTC/USDC on
-Base/Arbitrum) and **Canton tokens** (cBTC, CC). Priority direction: **EVM → Canton**.
+Base/Arbitrum) and **Canton tokens** (CBTC, CC). Priority direction: **EVM → Canton**.
 
 The swap is bound by a single secret (HTLC). Reveal the secret → both legs settle.
 Timeout without reveal → both sides refund. Neither party can take the other's funds
@@ -26,8 +26,8 @@ design we reverse-engineered from their verified contract + app bundle + docs.
 1. Create Order   (user)    publish order, commit to hashLock H = keccak256(secret)
 2. Accept Order   (solver)  solver takes the order
 3. HTLC Proposal  (user)    user APPROVES + LOCKS WBTC on the EVM HTLC under H   ← MetaMask
-4. Counter HTLC   (solver)  solver LOCKS cBTC on Canton (Allocation + HtlcLock under H)
-5/6. Claim Counter(user)    user CLAIMS the cBTC → reveals the secret             ← see §4
+4. Counter HTLC   (solver)  solver LOCKS CBTC on Canton (Allocation + HtlcLock under H)
+5/6. Claim Counter(user)    user CLAIMS the CBTC → reveals the secret             ← see §4
 7. Claim Main     (solver)  solver reads the revealed secret, CLAIMS the WBTC on EVM
 8. Completed
 ```
@@ -37,22 +37,23 @@ EVM (user) timelock **longer** than Canton (solver) timelock, so the solver alwa
 time to claim after seeing the reveal.
 
 ### keccak256 parity (critical)
+
 - EVM: `keccak256(rawSecretBytes)`
 - Daml: `DA.Crypto.Text.keccak256(hexString)` — decodes the hex back to the same raw
   bytes, then hashes → **identical H**.
 - Canonical test vector: secret `the-cross-chain-secret-32bytes!!`
   (hex `7468652d…2121`) → **H = `0x94277b389401042e35f8709846050797955e2b321bee500555c2fbdc2f4e9903`**.
-- (Note: Cancore's *docs* say SHA-256, but their *deployed contract* uses keccak256.
+- (Note: Cancore's _docs_ say SHA-256, but their _deployed contract_ uses keccak256.
   We use keccak256 — proven parity on both legs.)
 
 ---
 
 ## 3. The two wallet modes (Cancore's model, confirmed from their docs §6)
 
-| Mode | Who | Canton party hosted on | Canton signing |
-|---|---|---|---|
-| **Participant-managed (DEFAULT)** | email/password users | **our node** (warpx) | the platform/backend signs for them — **no popup** |
-| **Loop / browser-extension** | self-swap ("Loop mode") | external Loop participant | user signs in the Loop wallet popup |
+| Mode                              | Who                     | Canton party hosted on    | Canton signing                                     |
+| --------------------------------- | ----------------------- | ------------------------- | -------------------------------------------------- |
+| **Participant-managed (DEFAULT)** | email/password users    | **our node** (warpx)      | the platform/backend signs for them — **no popup** |
+| **Loop / browser-extension**      | self-swap ("Loop mode") | external Loop participant | user signs in the Loop wallet popup                |
 
 **Key insight:** "Loop mode" in Cancore means a **self-swap** (sender = recipient), NOT
 "normal external users". The **mainline product is participant-managed** — the user's
@@ -61,26 +62,27 @@ Canton party lives on our node, and the backend signs the on-ledger claim for th
 
 ---
 
-## 4. The cBTC leg — fully on-ledger trustless (PROVEN)
+## 4. The CBTC leg — fully on-ledger trustless (PROVEN)
 
-cBTC has **no native on-ledger hashlock** (proven: Allocation/TransferInstruction are
+CBTC has **no native on-ledger hashlock** (proven: Allocation/TransferInstruction are
 not hash-aware). So we wrap a standard Splice **Allocation** in our **custom Daml HTLC
 template** (`canton-htlc/daml/CbtcHtlc.daml`, `HtlcLock`) that enforces the hash:
 
 ```
-LOCK   solver allocates cBTC (AllocationFactory_Allocate, solver = sender = executor)
+LOCK   solver allocates CBTC (AllocationFactory_Allocate, solver = sender = executor)
        + creates HtlcLock wrapping it (records hashLock + timelock)
 CLAIM  receiver exercises HtlcLock.Claim(preimage)
        → the Daml LEDGER checks keccak256(preimage) == hashLock   ← ON-LEDGER HASH GATE
-       → fires Allocation_ExecuteTransfer → cBTC delivered to the receiver
+       → fires Allocation_ExecuteTransfer → CBTC delivered to the receiver
        → the preimage is now public on-ledger (drives the EVM claim)
 REFUND after timelock, locker exercises HtlcLock.Refund → Allocation_Withdraw
 ```
 
 ### Why the claim works for hosted (participant-managed) users — the three keys
+
 1. **DAR `observer receiver`** (`CBTC_HTLC_PKG_ID`, currently `cbtc-htlc-hardened` v0.1.0):
    the receiver is a LOCAL party on our node where
-   the DAR is vetted, so they can observe + exercise the choice. (A *cross-participant*
+   the DAR is vetted, so they can observe + exercise the choice. (A _cross-participant_
    observer would fail with `NO_SYNCHRONIZER_FOR_SUBMISSION` — which is why Loop-wallet
    users need a different path.)
 2. **`CanActAs` grant**: the backend's ledger user is granted `CanActAs` over the hosted
@@ -89,12 +91,14 @@ REFUND after timelock, locker exercises HtlcLock.Refund → Allocation_Withdraw
    must see the Allocation that `HtlcLock.Claim` fetches).
 
 ### ✅ PROVEN on the live WarpX DevNet node
+
 Full on-ledger claim succeeded: receiver exercised `HtlcLock.Claim` → ledger verified
-the keccak hash → `Allocation_ExecuteTransfer` fired → cBTC delivered (updateId
-`12203ce0…`). Server log: *"HtlcLock.Claim by receiver — on-ledger keccak check passed,
-cBTC released."*
+the keccak hash → `Allocation_ExecuteTransfer` fired → CBTC delivered (updateId
+`12203ce0…`). Server log: _"HtlcLock.Claim by receiver — on-ledger keccak check passed,
+CBTC released."_
 
 ### Loop-wallet users (self-swap edge case)
+
 Their party is on an external participant that doesn't have our DAR. For them, Cancore
 uses a **standard `TransferInstruction_Accept`** (no custom template) with the hash
 checked **backend-side** (`encryptedPreimage` off-chain). Trust-minimized, not on-ledger.
@@ -104,6 +108,7 @@ checked **backend-side** (`encryptedPreimage` off-chain). Trust-minimized, not o
 ## 5. The EVM leg — fully trustless on-chain HTLC
 
 `contracts/src/HTLCEscrow.sol` — aligned to Cancore's verified `HTLC.sol` + hardened:
+
 - `lock(hashValue, unlockTime, amount, token, receiver)` — locks ERC20 under the hashlock.
 - `claim(bytes preImage)` — receiver-only, before unlockTime; on-chain
   `keccak256(preImage) == hashValue` check; reveals preImage in the `Claimed` event.
@@ -115,11 +120,11 @@ checked **backend-side** (`encryptedPreimage` off-chain). Trust-minimized, not o
 
 ## 6. Trust model (honest)
 
-| Leg | Trust |
-|---|---|
-| **EVM** | ✅ **Fully trustless** — real on-chain HTLC, hash enforced by the contract |
-| **cBTC — participant-managed users** | ✅ **Fully trustless** — hash enforced **on the Daml ledger** (our DAR) |
-| **cBTC — Loop-wallet (self-swap) users** | ⚠️ Trust-minimized — standard accept + **backend** hash gate (same as Cancore's Loop users) |
+| Leg                                      | Trust                                                                                       |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------- |
+| **EVM**                                  | ✅ **Fully trustless** — real on-chain HTLC, hash enforced by the contract                  |
+| **CBTC — participant-managed users**     | ✅ **Fully trustless** — hash enforced **on the Daml ledger** (our DAR)                     |
+| **CBTC — Loop-wallet (self-swap) users** | ⚠️ Trust-minimized — standard accept + **backend** hash gate (same as Cancore's Loop users) |
 
 For users we host (the mainline), **both legs are fully trustless.** User funds are
 always protected by the EVM HTLC + timeout refunds even if the solver misbehaves.
@@ -128,37 +133,37 @@ always protected by the EVM HTLC + timeout refunds even if the solver misbehaves
 
 ## 7. Repo layout
 
-| Path | What |
-|---|---|
-| `contracts/` | EVM HTLC (`HTLCEscrow.sol`) + Foundry tests + Cancore reference |
-| `canton-htlc/` | Daml HTLC DAR (`CbtcHtlc.daml`, `HtlcLock`) + tests |
-| `lib/htlc-onledger.ts` | on-ledger cBTC: allocate, createHtlcLock, claim, refund (the DAR path) |
-| `lib/htlc-service-singleton.ts` | swap order lifecycle service (open→…→completed) |
-| `lib/htlc-client.ts`, `lib/htlc-evm-encode.ts` | frontend client + EVM calldata encoders |
-| `app/api/htlc/*` | swap API routes (create/accept/lock/claim-prepare/claim-record/preimage) |
-| `app/swap/page.tsx` | the swap UI (MetaMask lock, claim, timeline) |
-| `swap-solver/src/htlc-*.ts(.mts)` | solver daemon, settler, e2e scripts, the on-node spike |
+| Path                                           | What                                                                     |
+| ---------------------------------------------- | ------------------------------------------------------------------------ |
+| `contracts/`                                   | EVM HTLC (`HTLCEscrow.sol`) + Foundry tests + Cancore reference          |
+| `canton-htlc/`                                 | Daml HTLC DAR (`CbtcHtlc.daml`, `HtlcLock`) + tests                      |
+| `lib/htlc-onledger.ts`                         | on-ledger CBTC: allocate, createHtlcLock, claim, refund (the DAR path)   |
+| `lib/htlc-service-singleton.ts`                | swap order lifecycle service (open→…→completed)                          |
+| `lib/htlc-client.ts`, `lib/htlc-evm-encode.ts` | frontend client + EVM calldata encoders                                  |
+| `app/api/htlc/*`                               | swap API routes (create/accept/lock/claim-prepare/claim-record/preimage) |
+| `app/swap/page.tsx`                            | the swap UI (MetaMask lock, claim, timeline)                             |
+| `swap-solver/src/htlc-*.ts(.mts)`              | solver daemon, settler, e2e scripts, the on-node spike                   |
 
 ---
 
 ## 8. Key on-chain / on-ledger references
 
-| Thing | Value |
-|---|---|
-| EVM HTLCEscrow (Base Sepolia) | `0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1` |
-| cBTC HTLC DAR (hardened) | `cbtc-htlc-hardened v0.1.0` — pkg `1b2397fd7dcf177d90785059d33780de50936804b145b0fe7275bcf73faf2d28` |
-| Canonical hashLock H | `0x94277b389401042e35f8709846050797955e2b321bee500555c2fbdc2f4e9903` |
-| Solver Canton party (devnet) | `warpx-devnet-1::1220231c1885f289…` |
-| Hosted test receiver (devnet) | `oranjswap::1220231c1885f289…` |
+| Thing                         | Value                                                                                                |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------- |
+| EVM HTLCEscrow (Base Sepolia) | `0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1`                                                         |
+| CBTC HTLC DAR (hardened)      | `cbtc-htlc-hardened v0.1.0` — pkg `1b2397fd7dcf177d90785059d33780de50936804b145b0fe7275bcf73faf2d28` |
+| Canonical hashLock H          | `0x94277b389401042e35f8709846050797955e2b321bee500555c2fbdc2f4e9903`                                 |
+| Solver Canton party (devnet)  | `warpx-devnet-1::1220231c1885f289…`                                                                  |
+| Hosted test receiver (devnet) | `oranjswap::1220231c1885f289…`                                                                       |
 
 ### Operational env vars
 
-| Var | Purpose |
-|---|---|
-| `CBTC_HTLC_PKG_ID` | Hardened `CbtcHtlc:HtlcLock` package id. Required; app fails closed if missing. |
-| `HTLC_DAEMON_SECRET` | Bearer token for solver/maintenance HTLC API routes. |
-| `CRON_SECRET` | Bearer token gating scheduled/daemon HTLC sweeps. |
-| `ALERT_WEBHOOK_URL` | Slack/Discord incoming-webhook for operational alerts (failed claims, solver insolvency, stuck-swap refund failures). Unset → alerts log to console only. |
+| Var                  | Purpose                                                                                                                                                   |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CBTC_HTLC_PKG_ID`   | Hardened `CbtcHtlc:HtlcLock` package id. Required; app fails closed if missing.                                                                           |
+| `HTLC_DAEMON_SECRET` | Bearer token for solver/maintenance HTLC API routes.                                                                                                      |
+| `CRON_SECRET`        | Bearer token gating scheduled/daemon HTLC sweeps.                                                                                                         |
+| `ALERT_WEBHOOK_URL`  | Slack/Discord incoming-webhook for operational alerts (failed claims, solver insolvency, stuck-swap refund failures). Unset → alerts log to console only. |
 
 ---
 
@@ -170,7 +175,7 @@ always protected by the EVM HTLC + timeout refunds even if the solver misbehaves
 - **Canton network fee:** paid in CC (Amulet) — hosted user parties need CC funded.
 - **EnableCC:** one-time onboarding so a Canton account can hold/use CC (needed per party).
 - **Order lifecycle:** `open → accepted → htlc_proposal_sent → htlc_active →
-  both_claimed` / `refunded` / `cancelled`.
+both_claimed` / `refunded` / `cancelled`.
 - **Refund/Retake:** Canton auto-refunds after timeout (or manual Refund); EVM via
   `retake(hashLock)` in MetaMask (or directly on Etherscan as a fallback).
 - **Cancel:** maker can cancel before any HTLC locks (no on-chain activity).

@@ -14,7 +14,6 @@
  * Minimum mint amount: 0.001 BTC
  */
 
-
 const TAG = "[mint]";
 
 /** Minimum mint amount in satoshis (0.001 BTC). */
@@ -81,7 +80,7 @@ export async function getDepositAddress(
   return data.address;
 }
 
-/** A reader for the user's current unlocked cBTC balance (BTC string). The mint
+/** A reader for the user's current unlocked CBTC balance (BTC string). The mint
  *  page supplies one backed by the Loop wallet (provider.getHolding). */
 export type BalanceReader = () => Promise<string>;
 
@@ -94,7 +93,9 @@ export type BalanceReader = () => Promise<string>;
  *
  * Poll every 30s — mint complete when balance > snapshot.
  */
-export async function snapshotHoldingBalance(read: BalanceReader): Promise<string> {
+export async function snapshotHoldingBalance(
+  read: BalanceReader
+): Promise<string> {
   const total = await read();
   console.log(`${TAG} snapshotHoldingBalance total=${total} BTC`);
   return total;

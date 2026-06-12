@@ -1,6 +1,6 @@
 /**
  * Server-side read of the user's Loop transfer history, to get the AUTHORITATIVE
- * outcome of a cBTC delivery (status "completed" = accepted, "rejected" =
+ * outcome of a CBTC delivery (status "completed" = accepted, "rejected" =
  * rejected). Same reason as the preapproval route: /history needs the Loop JWT
  * (api_key) and is CORS-blocked from the browser.
  *
@@ -34,18 +34,29 @@ interface HistoryTransfer {
 export async function GET() {
   const apiKey = await getJwtSession();
   if (!apiKey) {
-    return NextResponse.json({ error: "no session", needsSignature: true }, { status: 401 });
+    return NextResponse.json(
+      { error: "no session", needsSignature: true },
+      { status: 401 }
+    );
   }
 
   const base = loopApiBase();
   try {
     const url = `${base}/api/v1/history?limit=20&sortBy=created_at&sortOrder=desc&type=any`;
-    const hr = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` } });
+    const hr = await fetch(url, {
+      headers: { Authorization: `Bearer ${apiKey}` }
+    });
     if (hr.status === 401 || hr.status === 403) {
-      return NextResponse.json({ error: "session expired", needsSignature: true }, { status: 401 });
+      return NextResponse.json(
+        { error: "session expired", needsSignature: true },
+        { status: 401 }
+      );
     }
     if (!hr.ok) {
-      return NextResponse.json({ error: "history failed", historyStatus: hr.status }, { status: 502 });
+      return NextResponse.json(
+        { error: "history failed", historyStatus: hr.status },
+        { status: 502 }
+      );
     }
     const data = (await hr.json()) as { transfers?: HistoryTransfer[] };
     const cbtcAdmin = NETWORK.decentralizedPartyId;
@@ -56,10 +67,13 @@ export async function GET() {
         amount: t.amount,
         from: t.from,
         status: t.status, // completed | rejected | pending
-        created_at: t.created_at,
+        created_at: t.created_at
       }));
     return NextResponse.json({ transfers });
   } catch (e) {
-    return NextResponse.json({ error: "history error", detail: String(e) }, { status: 502 });
+    return NextResponse.json(
+      { error: "history error", detail: String(e) },
+      { status: 502 }
+    );
   }
 }

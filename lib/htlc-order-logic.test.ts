@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
-import { isSwapClaimable } from "./htlc-order-logic";
+import { isSwapClaimable, filterHistoryOrders, isAbandonedSwapDraft } from "./htlc-order-logic";
 
 const base = {
   direction: "evm-to-canton" as const,
@@ -33,4 +33,25 @@ test("isSwapClaimable: revealed preimage blocks claim", () => {
     }),
     false,
   );
+});
+
+test("isAbandonedSwapDraft: accepted forward with no EVM lock", () => {
+  assert.equal(
+    isAbandonedSwapDraft({ direction: "evm-to-canton", status: "accepted", mainLockTx: undefined }),
+    true,
+  );
+  assert.equal(
+    isAbandonedSwapDraft({ direction: "evm-to-canton", status: "accepted", mainLockTx: "0xabc" }),
+    false,
+  );
+});
+
+test("filterHistoryOrders: drops abandoned drafts and foreign EVM wallets", () => {
+  const orders = [
+    { direction: "evm-to-canton" as const, status: "accepted" as const, mainLockTx: undefined, userEvmAddress: "0xaaa" },
+    { direction: "evm-to-canton" as const, status: "main_claimed" as const, mainLockTx: "0xlock", userEvmAddress: "0xbbb" },
+    { direction: "evm-to-canton" as const, status: "main_claimed" as const, mainLockTx: "0xlock", userEvmAddress: "0xaaa" },
+  ];
+  assert.equal(filterHistoryOrders(orders).length, 2);
+  assert.equal(filterHistoryOrders(orders, { userEvmAddress: "0xaaa" }).length, 1);
 });

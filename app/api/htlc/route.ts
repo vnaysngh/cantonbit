@@ -7,10 +7,9 @@
  */
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
-import { NETWORK } from "@/lib/constants";
 import { assertValidTimelocks } from "@/lib/htlc-timelock";
 import { assertOrderAmounts, QuoteUnavailableError, DepegError } from "@/lib/htlc-quote";
-import { expectedSolverCanton, expectedSolverEvm, requirePartyOwner } from "@/lib/htlc-auth";
+import { expectedSolverCanton, expectedSolverEvm, isParticipantManagedParty, requirePartyOwner } from "@/lib/htlc-auth";
 
 export async function POST(req: Request) {
   try {
@@ -45,13 +44,10 @@ export async function POST(req: Request) {
     // client can't submit an output more favorable than a fresh quote (+tolerance).
     const cbtcUnits = BigInt(Math.round(parseFloat(String(body.cbtcAmount)) * 1e8));
     await assertOrderAmounts(body.direction, BigInt(body.wbtcAmount), cbtcUnits);
-    // AUTHORITATIVE counterMode — derived from WHERE the receiver party lives, not
-    // from the client (a UI race once sent "loop" for a warpx-hosted party). A party
-    // in OUR warpx namespace → managed (on-ledger HtlcLock, backend CanActAs claim);
-    // anything else (e.g. a Loop party) → loop (standard transfer + auto-accept).
-    const warpxNs = NETWORK.warpxPartyId.split("::")[1] ?? "";
-    const receiverNs = String(body.userCantonParty).split("::")[1] ?? "";
-    body.counterMode = warpxNs && receiverNs === warpxNs ? "managed" : "loop";
+    // AUTHORITATIVE counterMode — participant-managed (email) vs Loop external wallet.
+    body.counterMode = (await isParticipantManagedParty(String(body.userCantonParty)))
+      ? "managed"
+      : "loop";
     const order = await htlcService().createOrder(body);
     return NextResponse.json({ order });
   } catch (e) {

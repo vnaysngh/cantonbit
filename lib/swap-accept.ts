@@ -1,8 +1,8 @@
 /**
- * cBTC delivery: the user's side of the CoW-aligned swap settlement.
+ * CBTC delivery: the user's side of the CoW-aligned swap settlement.
  *
  * The swap uses a MANDATORY auto-accept gate (like an EVM allowance — turned on
- * once, always on), so the delivered cBTC auto-accepts in the user's wallet and
+ * once, always on), so the delivered CBTC auto-accepts in the user's wallet and
  * the solver's accept-first/pay-second ordering holds. The outcome is confirmed
  * by reading the user's authoritative Loop transfer history. Both reads need the
  * Loop JWT (CORS-blocked + JWT-only from the browser).
@@ -30,13 +30,15 @@ import type { LoopProvider } from "@/hooks/useLoopWallet";
  * ownership; no private key leaves the wallet. Returns null if the user declines.
  */
 export async function signExchange(
-  provider: LoopProvider,
+  provider: LoopProvider
 ): Promise<{ public_key: string; signature: string; epoch: number } | null> {
   const epoch = Date.now();
   const message = `Exchange API Key for ${provider.party_id}\nTimestamp: ${epoch}`;
   const sigRaw = await provider.signMessage(message);
   const signature =
-    typeof sigRaw === "string" ? sigRaw : (sigRaw as { signature?: string })?.signature;
+    typeof sigRaw === "string"
+      ? sigRaw
+      : (sigRaw as { signature?: string })?.signature;
   if (!signature) return null;
   return { public_key: provider.public_key, signature, epoch };
 }
@@ -65,14 +67,16 @@ export async function swapSessionActive(partyId?: string): Promise<boolean> {
  * failed. Exported so the swap screen can drive the explicit "Sign in your Loop
  * wallet" prerequisite action (rather than signing implicitly mid-flow).
  */
-export async function mintSwapSession(provider: LoopProvider): Promise<boolean> {
+export async function mintSwapSession(
+  provider: LoopProvider
+): Promise<boolean> {
   try {
     const exchange = await signExchange(provider);
     if (!exchange) return false; // user declined the signature
     const res = await fetch("/api/swap/session", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(exchange),
+      body: JSON.stringify(exchange)
     });
     return res.ok;
   } catch {
@@ -97,7 +101,7 @@ export async function clearSwapSession(): Promise<void> {
  */
 async function getWithSession(
   path: string,
-  provider?: LoopProvider | null,
+  provider?: LoopProvider | null
 ): Promise<Response | null> {
   let res = await fetch(path, { method: "GET" });
   if (res.status === 401 && provider) {
@@ -109,8 +113,8 @@ async function getWithSession(
 }
 
 /**
- * Whether the user has the cBTC auto-accept (utility preapproval) gate ON. This
- * is what makes the swap safe: with it on, the delivered cBTC auto-accepts, so
+ * Whether the user has the CBTC auto-accept (utility preapproval) gate ON. This
+ * is what makes the swap safe: with it on, the delivered CBTC auto-accepts, so
  * the solver's accept-first/pay-second ordering holds. Reads the cached Loop JWT
  * session — NO signature here (the session is a prerequisite established before
  * the swap). On a missing/expired session (401) it returns null WITHOUT a silent
@@ -122,12 +126,14 @@ async function getWithSession(
  * possible future use; this gate deliberately does not use it to re-mint.)
  */
 export async function hasCbtcAutoAccept(
-  _provider: LoopProvider,
+  _provider: LoopProvider
 ): Promise<boolean | null> {
   try {
     const res = await getWithSession("/api/swap/preapproval"); // no silent re-mint
     if (!res || !res.ok) return null;
-    const { cbtcAutoAccept } = (await res.json()) as { cbtcAutoAccept?: boolean };
+    const { cbtcAutoAccept } = (await res.json()) as {
+      cbtcAutoAccept?: boolean;
+    };
     return cbtcAutoAccept === true;
   } catch {
     return null;
@@ -144,19 +150,21 @@ export interface CbtcHistoryTransfer {
 }
 
 /**
- * Read the AUTHORITATIVE outcome of the cBTC delivery from the user's Loop
+ * Read the AUTHORITATIVE outcome of the CBTC delivery from the user's Loop
  * transfer history (status completed=accepted, rejected=rejected). The user's own
  * history is the source of truth — the solver can't read it cross-participant.
  * Reads the cached Loop JWT session (no signature unless the session expired).
  * Returns the recent CBTC received transfers, or null if it couldn't read them.
  */
 export async function getCbtcDeliveryHistory(
-  provider: LoopProvider,
+  provider: LoopProvider
 ): Promise<CbtcHistoryTransfer[] | null> {
   try {
     const res = await getWithSession("/api/swap/history", provider);
     if (!res || !res.ok) return null;
-    const { transfers } = (await res.json()) as { transfers?: CbtcHistoryTransfer[] };
+    const { transfers } = (await res.json()) as {
+      transfers?: CbtcHistoryTransfer[];
+    };
     return transfers ?? [];
   } catch {
     return null;

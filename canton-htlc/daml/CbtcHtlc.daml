@@ -70,7 +70,7 @@ assertBoundTo locker receiver executor amount instrumentId unlockTime av = do
   assertMsg "HTLC: unlockTime outlives settleBefore" (unlockTime <= st.settleBefore)
 
 -- | A hash-time-locked wrapper around a Splice `Allocation`. The Allocation
--- (created via the registry) holds the actual locked cBTC/CC; this contract is
+-- (created via the registry) holds the actual locked CBTC/CC; this contract is
 -- the cryptographic gatekeeper that only lets it execute on a valid preimage,
 -- and lets the locker reclaim it after the timelock.
 template HtlcLock
@@ -107,7 +107,7 @@ template HtlcLock
     -- TransferInstruction_Accept path, not this DAR.)
     observer executor, receiver
 
-    -- | THE RECEIVER reveals the preimage to release the locked cBTC to themselves.
+    -- | THE RECEIVER reveals the preimage to release the locked CBTC to themselves.
     -- The DAML ledger checks keccak256(preimage)==hashLock, then fires
     -- Allocation_ExecuteTransfer — the receiver's own authority (from exercising
     -- this choice) + the executor/sender pre-delegation satisfy its controllers.

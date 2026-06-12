@@ -8,13 +8,13 @@
  *                 attests + finalises.) If the record-time is AFTER
  *                 order.fillDeadline, the fill can no longer satisfy the order —
  *                 mark `failed` (the user accepted too late; they'll refund WBTC).
- *   - expired   → the offer lapsed unaccepted; the solver's cBTC float is
+ *   - expired   → the offer lapsed unaccepted; the solver's CBTC float is
  *                 released automatically by the offer cancellation. Mark
  *                 `failed`; do NOT attest. The user refunds their WBTC.
  *   - unknown   → still pending; leave as `delivering` to re-check next tick.
  *
  * This shrinks the two-legged risk window: we only proceed to attest+finalise
- * AFTER confirming the user already holds the cBTC.
+ * AFTER confirming the user already holds the CBTC.
  */
 
 import type { Hex } from "viem";
@@ -49,7 +49,7 @@ export async function resolveDelivery(
   store: OrderStore,
   canton: CantonClient,
   orderId: Hex,
-  params: AcceptWatchParams,
+  params: AcceptWatchParams
 ): Promise<AcceptOutcome> {
   const rec = await store.get(orderId);
   if (!rec) return { kind: "failed", reason: "order not found" };
@@ -58,13 +58,19 @@ export async function resolveDelivery(
   }
   const offerId = rec.cantonDeliveryRef;
   if (!offerId) {
-    await store.update(orderId, { status: "failed", note: "no offer id on a delivering order" });
+    await store.update(orderId, {
+      status: "failed",
+      note: "no offer id on a delivering order"
+    });
     return { kind: "failed", reason: "no offer id" };
   }
 
   const receiver = rec.cantonParty;
   if (!receiver) {
-    await store.update(orderId, { status: "failed", note: "no canton party on a delivering order" });
+    await store.update(orderId, {
+      status: "failed",
+      note: "no canton party on a delivering order"
+    });
     return { kind: "failed", reason: "no canton party" };
   }
 
@@ -82,13 +88,13 @@ export async function resolveDelivery(
       // the deadline. If past the deadline, the float would have returned to us —
       // treat as failed so we never finalise after fillDeadline.
       if (params.now > rec.order.fillDeadline) {
-        // SECURITY (HIGH-1): the cBTC WAS accepted — mark cbtcAccepted so this is
+        // SECURITY (HIGH-1): the CBTC WAS accepted — mark cbtcAccepted so this is
         // NEVER auto-refunded (that would give the user both legs). It can't
         // finalise (past fillDeadline → proof invalid); it needs manual review.
         await store.update(orderId, {
           status: "failed",
           cbtcAccepted: true,
-          note: "accept detected but past fillDeadline — cannot finalise; MANUAL REVIEW (not refundable: cBTC delivered)",
+          note: "accept detected but past fillDeadline — cannot finalise; MANUAL REVIEW (not refundable: CBTC delivered)"
         });
         return { kind: "failed", reason: "accepted/cleared past fillDeadline" };
       }
@@ -97,16 +103,20 @@ export async function resolveDelivery(
         status: "delivered",
         cbtcAccepted: true,
         fillTimestamp,
-        note: `cBTC accept detected via solver ACS (cross-participant). updateId=${rec.cantonDeliveryRef}`,
+        note: `CBTC accept detected via solver ACS (cross-participant). updateId=${rec.cantonDeliveryRef}`
       });
-      return { kind: "delivered", fillTimestamp, recordTime: String(fillTimestamp) };
+      return {
+        kind: "delivered",
+        fillTimestamp,
+        recordTime: String(fillTimestamp)
+      };
     }
     // Still pending. If past the fillDeadline, the swap can't complete — abandon
     // so the user refunds (we never delivered-and-finalised one-sided).
     if (params.now > rec.order.fillDeadline) {
       await store.update(orderId, {
         status: "failed",
-        note: "cBTC offer unaccepted past fillDeadline (cross-participant) — user refunds",
+        note: "CBTC offer unaccepted past fillDeadline (cross-participant) — user refunds"
       });
       return { kind: "failed", reason: "unaccepted past fillDeadline (xpart)" };
     }
@@ -118,17 +128,19 @@ export async function resolveDelivery(
   const resolution = await canton.resolveOffer({
     receiverParty: receiver,
     offerContractId: offerId,
-    fromOffset: params.fromOffset,
+    fromOffset: params.fromOffset
   });
 
   if (resolution.kind === "unknown") {
     // Still active OR not yet visible. If it's still active AND the order's
     // fillDeadline has passed, the swap can no longer complete — abandon.
-    const stillActive = await canton.isOfferActive(receiver, offerId).catch(() => true);
+    const stillActive = await canton
+      .isOfferActive(receiver, offerId)
+      .catch(() => true);
     if (stillActive && params.now > rec.order.fillDeadline) {
       await store.update(orderId, {
         status: "failed",
-        note: "offer still unaccepted past fillDeadline — abandoning; user will refund",
+        note: "offer still unaccepted past fillDeadline — abandoning; user will refund"
       });
       return { kind: "failed", reason: "unaccepted past fillDeadline" };
     }
@@ -138,7 +150,7 @@ export async function resolveDelivery(
   if (resolution.kind === "expired") {
     await store.update(orderId, {
       status: "failed",
-      note: `offer expired/cancelled unaccepted (updateId=${resolution.updateId}); float released, user will refund`,
+      note: `offer expired/cancelled unaccepted (updateId=${resolution.updateId}); float released, user will refund`
     });
     return { kind: "failed", reason: "offer expired unaccepted" };
   }
@@ -148,12 +160,12 @@ export async function resolveDelivery(
 
   // Critical: the fill must be <= fillDeadline or the proof is invalid.
   if (fillTimestamp > rec.order.fillDeadline) {
-    // SECURITY (HIGH-1): cBTC WAS accepted (just too late to finalise). Mark
+    // SECURITY (HIGH-1): CBTC WAS accepted (just too late to finalise). Mark
     // cbtcAccepted so it's NEVER auto-refunded; needs manual review.
     await store.update(orderId, {
       status: "failed",
       cbtcAccepted: true,
-      note: `accepted too late: record-time ${fillTimestamp} > fillDeadline ${rec.order.fillDeadline}; cannot finalise — MANUAL REVIEW (not refundable: cBTC delivered)`,
+      note: `accepted too late: record-time ${fillTimestamp} > fillDeadline ${rec.order.fillDeadline}; cannot finalise — MANUAL REVIEW (not refundable: CBTC delivered)`
     });
     return { kind: "failed", reason: "accepted after fillDeadline" };
   }
@@ -162,16 +174,20 @@ export async function resolveDelivery(
     status: "delivered",
     cbtcAccepted: true,
     fillTimestamp,
-    note: `cBTC accepted by user at ${resolution.recordTime} (updateId=${resolution.updateId})`,
+    note: `CBTC accepted by user at ${resolution.recordTime} (updateId=${resolution.updateId})`
   });
-  return { kind: "delivered", fillTimestamp, recordTime: resolution.recordTime };
+  return {
+    kind: "delivered",
+    fillTimestamp,
+    recordTime: resolution.recordTime
+  };
 }
 
 /** Process all `delivering` orders once. */
 export async function resolveDeliveringOrders(
   store: OrderStore,
   canton: CantonClient,
-  params: AcceptWatchParams,
+  params: AcceptWatchParams
 ): Promise<{ orderId: Hex; outcome: AcceptOutcome }[]> {
   const results: { orderId: Hex; outcome: AcceptOutcome }[] = [];
   for (const rec of await store.byStatus("delivering")) {

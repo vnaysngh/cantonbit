@@ -12,7 +12,13 @@
  * The user's only guarantee is the `expires` timeout, after which this returns
  * their funds. We sweep every tick so that guarantee is automatic.
  */
-import { getContract, type Hex, type PublicClient, type WalletClient, type Account } from "viem";
+import {
+  getContract,
+  type Hex,
+  type PublicClient,
+  type WalletClient,
+  type Account
+} from "viem";
 
 import { ESCROW_ABI } from "./abi.js";
 import { deserializeOrder } from "./convert.js";
@@ -53,19 +59,23 @@ export async function refundOrder(
   if (rec.status === "finalised") return { kind: "alreadyFinalised" };
   if (rec.status === "refunded") return { kind: "alreadyRefunded" };
 
-  // SECURITY (HIGH-1) — the bulletproof guard: NEVER refund an order whose cBTC
+  // SECURITY (HIGH-1) — the bulletproof guard: NEVER refund an order whose CBTC
   // the user has already accepted. `cbtcAccepted` is set the moment an accept is
   // detected ANYWHERE (auto-accept on delivery, ACS detection, even accepted-but-
   // too-late-to-finalise), independent of status. Refunding such an order would
-  // hand the user BOTH legs (cBTC + refunded WBTC) at the treasury's expense.
+  // hand the user BOTH legs (CBTC + refunded WBTC) at the treasury's expense.
   // This also protects the public POST /orders/:id/refund endpoint from being
   // used to refund a delivered order. Status check is the coarse signal;
   // cbtcAccepted is the precise one (catches the `failed`-but-accepted case).
-  if (rec.cbtcAccepted || rec.status === "delivered" || rec.status === "attested") {
+  if (
+    rec.cbtcAccepted ||
+    rec.status === "delivered" ||
+    rec.status === "attested"
+  ) {
     return {
       kind: "error",
       message:
-        "refusing to refund — the cBTC was already accepted by the user; this must be finalised (or manually reviewed), not refunded",
+        "refusing to refund — the CBTC was already accepted by the user; this must be finalised (or manually reviewed), not refunded"
     };
   }
 
@@ -75,27 +85,46 @@ export async function refundOrder(
   }
 
   const order = deserializeOrder(rec.order);
-  const escrowC = getContract({ address: escrow, abi: ESCROW_ABI, client: wallet });
+  const escrowC = getContract({
+    address: escrow,
+    abi: ESCROW_ABI,
+    client: wallet
+  });
 
   // Reconcile with chain truth first — a late finalise may have claimed it, or a
   // previous sweep may have already refunded it.
   const onchain = Number(await escrowC.read.orderStatus([orderId]));
   if (onchain === ONCHAIN_CLAIMED) {
-    await store.update(orderId, { status: "finalised", note: "claimed on-chain (late finalise)" });
+    await store.update(orderId, {
+      status: "finalised",
+      note: "claimed on-chain (late finalise)"
+    });
     return { kind: "alreadyFinalised" };
   }
   if (onchain === ONCHAIN_REFUNDED) {
-    await store.update(orderId, { status: "refunded", note: "already refunded on-chain" });
+    await store.update(orderId, {
+      status: "refunded",
+      note: "already refunded on-chain"
+    });
     return { kind: "alreadyRefunded" };
   }
 
   try {
-    const refundTx = await escrowC.write.refund([order], { account, chain: null });
+    const refundTx = await escrowC.write.refund([order], {
+      account,
+      chain: null
+    });
     await pub.waitForTransactionReceipt({ hash: refundTx });
-    await store.update(orderId, { status: "refunded", note: `refund ${refundTx}` });
+    await store.update(orderId, {
+      status: "refunded",
+      note: `refund ${refundTx}`
+    });
     return { kind: "refunded", refundTx };
   } catch (e) {
-    return { kind: "error", message: e instanceof Error ? e.message : String(e) };
+    return {
+      kind: "error",
+      message: e instanceof Error ? e.message : String(e)
+    };
   }
 }
 
@@ -109,22 +138,24 @@ export async function refundExpiredOrders(
   now: number
 ): Promise<{ orderId: Hex; outcome: RefundOutcome }[]> {
   const { store } = deps;
-  // Candidates: ONLY orders where the cBTC has NOT yet been handed to the user —
+  // Candidates: ONLY orders where the CBTC has NOT yet been handed to the user —
   // `seen` (no delivery) and `delivering` (offer created, NOT yet accepted). For
-  // these, refunding the WBTC is loss-free: the solver still holds its cBTC.
+  // these, refunding the WBTC is loss-free: the solver still holds its CBTC.
   //
   // SECURITY (HIGH-1): `delivered`/`attested` are DELIBERATELY EXCLUDED. In those
-  // states the user has ALREADY accepted the cBTC on Canton — auto-refunding the
-  // WBTC there would hand the user BOTH legs (cBTC + refunded WBTC) and the
+  // states the user has ALREADY accepted the CBTC on Canton — auto-refunding the
+  // WBTC there would hand the user BOTH legs (CBTC + refunded WBTC) and the
   // treasury eats the loss. A `delivered` order past expiry must be SETTLED
   // (finalise keeps working after expiry on-chain), never refunded; the watch
   // loop keeps retrying attest+finalise and a stuck one needs manual review, not
   // an auto-refund.
   const [seenRecs, deliveringRecs] = await Promise.all([
     store.byStatus("seen"),
-    store.byStatus("delivering"),
+    store.byStatus("delivering")
   ]);
-  const candidates = [...seenRecs, ...deliveringRecs].filter((o) => now > o.order.expires);
+  const candidates = [...seenRecs, ...deliveringRecs].filter(
+    (o) => now > o.order.expires
+  );
 
   const results: { orderId: Hex; outcome: RefundOutcome }[] = [];
   for (const rec of candidates) {
@@ -134,7 +165,10 @@ export async function refundExpiredOrders(
     } catch (e) {
       results.push({
         orderId: rec.orderId,
-        outcome: { kind: "error", message: e instanceof Error ? e.message : String(e) },
+        outcome: {
+          kind: "error",
+          message: e instanceof Error ? e.message : String(e)
+        }
       });
     }
   }

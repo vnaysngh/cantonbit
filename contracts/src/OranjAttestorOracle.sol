@@ -7,7 +7,7 @@ import { BaseInputOracle } from "oif-contracts/src/oracles/BaseInputOracle.sol";
 
 /**
  * @title OranjAttestorOracle
- * @notice Trusted-attestor input oracle for the WBTC(Base) → cBTC(Canton) swap.
+ * @notice Trusted-attestor input oracle for the WBTC(Base) → CBTC(Canton) swap.
  *
  * @dev This is the ONLY custom Solidity in the swap. It reuses OIF's audited
  * `BaseInputOracle` for the read side (`isProven` / `efficientRequireProven`
@@ -17,7 +17,7 @@ import { BaseInputOracle } from "oif-contracts/src/oracles/BaseInputOracle.sol";
  * / Polymer) writes the `_attestations` slot when it receives a verified proof
  * that the output was filled on the remote chain. Canton is not EVM and has no
  * such messaging oracle, so here a TRUSTED OFF-CHAIN AGENT plays that role:
- * after it confirms the cBTC delivery is final on Canton, it calls `attest()`.
+ * after it confirms the CBTC delivery is final on Canton, it calls `attest()`.
  *
  * The escrow's release path is:
  *   InputSettlerEscrow.finalise()
@@ -33,7 +33,7 @@ import { BaseInputOracle } from "oif-contracts/src/oracles/BaseInputOracle.sol";
  * The attestor key is TREASURY-GRADE. Anyone able to call `attest()` can mark
  * an arbitrary fill as proven and thereby cause `finalise()` to release the
  * locked WBTC — with or without a real Canton delivery. There is no on-chain
- * check that the cBTC actually moved; that trust is entirely off-chain. Guard
+ * check that the CBTC actually moved; that trust is entirely off-chain. Guard
  * the attestor key like a hot treasury wallet: dedicated signer, server-only,
  * never logged. This is an explicit, accepted property of a single-solver
  * custodial v1 — it is NOT trustless.

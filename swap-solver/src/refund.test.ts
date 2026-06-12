@@ -2,7 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { pad, type Hex } from "viem";
 
-import { InMemoryOrderStore, type OrderStore, type SerializedOrder, type OrderStatus } from "./store.js";
+import {
+  InMemoryOrderStore,
+  type OrderStore,
+  type SerializedOrder,
+  type OrderStatus
+} from "./store.js";
 import { refundExpiredOrders, type RefundDeps } from "./refund.js";
 
 const NOW = 1_780_000_000;
@@ -14,15 +19,35 @@ function tmpStore(): OrderStore {
 function order(expires: number): SerializedOrder {
   return {
     user: "0x1111111111111111111111111111111111111111",
-    nonce: "1", originChainId: "84532", expires, fillDeadline: expires - 600,
+    nonce: "1",
+    originChainId: "84532",
+    expires,
+    fillDeadline: expires - 600,
     inputOracle: "0x00000000000000000000000000000000000000aa",
     inputs: [["1", "1"]],
-    outputs: [{ oracle: pad("0xaa", { size: 32 }), settler: pad("0xbb", { size: 32 }), chainId: "1", token: pad("0xc", { size: 32 }), amount: "1", recipient: pad("0xr", { size: 32 }), callbackData: "0x", context: "0x" }],
+    outputs: [
+      {
+        oracle: pad("0xaa", { size: 32 }),
+        settler: pad("0xbb", { size: 32 }),
+        chainId: "1",
+        token: pad("0xc", { size: 32 }),
+        amount: "1",
+        recipient: pad("0xr", { size: 32 }),
+        callbackData: "0x",
+        context: "0x"
+      }
+    ]
   };
 }
 
-async function seed(store: OrderStore, status: OrderStatus, expires: number): Promise<Hex> {
-  const id = pad(`0x${Math.floor(Math.random() * 1e9).toString(16)}`, { size: 32 }) as Hex;
+async function seed(
+  store: OrderStore,
+  status: OrderStatus,
+  expires: number
+): Promise<Hex> {
+  const id = pad(`0x${Math.floor(Math.random() * 1e9).toString(16)}`, {
+    size: 32
+  }) as Hex;
   await store.insertSeen(id, 1, order(expires));
   await store.update(id, { status });
   return id;
@@ -34,14 +59,18 @@ async function seed(store: OrderStore, status: OrderStatus, expires: number): Pr
 function trapDeps(store: OrderStore): RefundDeps {
   const trap = new Proxy(
     {},
-    { get() { throw new Error("chain client must not be touched in selection tests"); } },
+    {
+      get() {
+        throw new Error("chain client must not be touched in selection tests");
+      }
+    }
   );
   return {
     store,
     escrow: "0x0000000000000000000000000000000000000abc",
     account: { address: "0x0000000000000000000000000000000000000def" } as never,
     wallet: trap as never,
-    pub: trap as never,
+    pub: trap as never
   };
 }
 
@@ -67,7 +96,7 @@ test("sweep targets ONLY pre-delivery expired orders (seen/delivering)", async (
   const s = tmpStore();
   await seed(s, "seen", NOW - 600);
   await seed(s, "delivering", NOW - 600);
-  // SECURITY (HIGH-1): `delivered` must NOT be a candidate — its cBTC is already
+  // SECURITY (HIGH-1): `delivered` must NOT be a candidate — its CBTC is already
   // with the user. Seed one to prove it's excluded from the sweep.
   await seed(s, "delivered", NOW - 600);
   const results = await refundExpiredOrders(trapDeps(s), NOW);
@@ -78,15 +107,19 @@ test("sweep targets ONLY pre-delivery expired orders (seen/delivering)", async (
 
 test("HIGH-1: an expired DELIVERED order is NEVER auto-refunded (would double-pay)", async () => {
   const s = tmpStore();
-  const id = await seed(s, "delivered", NOW - 600); // cBTC accepted, then expired
+  const id = await seed(s, "delivered", NOW - 600); // CBTC accepted, then expired
   const results = await refundExpiredOrders(trapDeps(s), NOW);
   // Not even selected as a candidate → no chain touch, no refund.
-  assert.equal(results.length, 0, "a delivered order must not be a refund candidate");
+  assert.equal(
+    results.length,
+    0,
+    "a delivered order must not be a refund candidate"
+  );
   // And its status is untouched (still delivered, awaiting finalise/manual review).
   assert.equal((await s.get(id))!.status, "delivered");
 });
 
-test("HIGH-1: a 'failed' order whose cBTC was accepted is NOT refundable", async () => {
+test("HIGH-1: a 'failed' order whose CBTC was accepted is NOT refundable", async () => {
   const { refundOrder } = await import("./refund.js");
   const s = tmpStore();
   const id = await seed(s, "failed", NOW - 600);

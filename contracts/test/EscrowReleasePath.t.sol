@@ -69,7 +69,7 @@ contract EscrowReleasePathTest is Test {
             oracle: _toId(address(oracle)), // output.oracle == our oracle
             settler: cantonSettlerId, // output.settler == canton settler id
             chainId: CANTON_CHAIN_ID,
-            token: bytes32(uint256(0xC87C)), // cBTC token identifier (opaque here)
+            token: bytes32(uint256(0xC87C)), // CBTC token identifier (opaque here)
             amount: 5e8,
             recipient: bytes32(uint256(0x05E7_0A47)), // canton party id (opaque)
             callbackData: "",
@@ -115,7 +115,7 @@ contract EscrowReleasePathTest is Test {
         assertEq(wbtc.balanceOf(address(escrow)), LOCK_AMOUNT, "escrow should hold the lock");
         assertEq(wbtc.balanceOf(solver), 0, "solver lock pulled");
 
-        // 2) (off-chain: deliver cBTC on Canton — simulated as a no-op here)
+        // 2) (off-chain: deliver CBTC on Canton — simulated as a no-op here)
         uint32 fillTs = uint32(block.timestamp);
 
         // Build solveParams the finalise() will use.

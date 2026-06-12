@@ -21,14 +21,14 @@ export async function GET(request: Request) {
     const jwt = await getLedgerJwt();
     const res = await fetch(`${NETWORK.ledgerHost}/v2/packages`, {
       headers: { authorization: `Bearer ${jwt}` },
-      cache: "no-store",
+      cache: "no-store"
     });
 
     if (!res.ok) {
       const text = await res.text().catch(() => "<no body>");
       return NextResponse.json(
         { error: `GET /v2/packages failed (${res.status}): ${text}` },
-        { status: 500 },
+        { status: 500 }
       );
     }
 
@@ -37,7 +37,7 @@ export async function GET(request: Request) {
     // names returns 404 here. /v2/packages/<id> returns the raw binary DAR.
     //
     // So the practical answer: we can confirm "N packages installed" but
-    // can't filter by name. The real test of whether cBTC DARs are present
+    // can't filter by name. The real test of whether CBTC DARs are present
     // is whether the mint or burn flow works — they reference templates by
     // package-name prefix (#cbtc:...) and Canton resolves those at submit
     // time. If the templates aren't found, the submit returns a clear
@@ -50,7 +50,7 @@ export async function GET(request: Request) {
       note:
         filter !== null
           ? "Filter ignored: this Canton version doesn't expose package names via the JSON API. Try the mint flow to verify DARs."
-          : undefined,
+          : undefined
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

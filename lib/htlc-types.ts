@@ -3,8 +3,15 @@
 export type SwapDirection = "evm-to-canton" | "canton-to-evm";
 
 export type SwapStatus =
-  | "open" | "accepted" | "main_locked" | "counter_locked"
-  | "counter_claimed" | "main_claimed" | "refunded" | "cancelled" | "failed";
+  | "open"
+  | "accepted"
+  | "main_locked"
+  | "counter_locked"
+  | "counter_claimed"
+  | "main_claimed"
+  | "refunded"
+  | "cancelled"
+  | "failed";
 
 export interface SwapOrder {
   id: string;
@@ -26,11 +33,11 @@ export interface SwapOrder {
   revealedPreimage?: `0x${string}`;
   mainClaimTx?: string;
   createdAt: number;
-  // How the cBTC counter-leg is settled:
+  // How the CBTC counter-leg is settled:
   //   "managed" — participant-managed (email) user: on-ledger HtlcLock, backend
   //               claims via CanActAs. Fully trustless (on-ledger keccak gate).
   //   "loop"    — Loop-wallet user: their party is on Loop's node where our DAR
-  //               CANNOT run, so we use Loop's Option 1 — the solver delivers cBTC
+  //               CANNOT run, so we use Loop's Option 1 — the solver delivers CBTC
   //               via a STANDARD transfer that auto-accepts in the user's wallet.
   //               All secret/claim logic stays on OUR node. Defaults to "managed"
   //               when unset so existing orders keep the proven behavior.

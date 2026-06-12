@@ -19,7 +19,10 @@ import { getJwtSession, loopApiBase } from "@/lib/swap-session";
 export async function GET() {
   const apiKey = await getJwtSession();
   if (!apiKey) {
-    return NextResponse.json({ error: "no session", needsSignature: true }, { status: 401 });
+    return NextResponse.json(
+      { error: "no session", needsSignature: true },
+      { status: 401 }
+    );
   }
 
   const base = loopApiBase();
@@ -29,22 +32,37 @@ export async function GET() {
   let preapprovals: { instrument_admin?: string }[] = [];
   try {
     const pr = await fetch(`${base}/api/v1/profile`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: { Authorization: `Bearer ${apiKey}` }
     });
     if (pr.status === 401 || pr.status === 403) {
       // JWT rejected (expired/invalid despite the cookie) — ask the client to re-mint.
-      return NextResponse.json({ error: "session expired", needsSignature: true }, { status: 401 });
+      return NextResponse.json(
+        { error: "session expired", needsSignature: true },
+        { status: 401 }
+      );
     }
     if (!pr.ok) {
-      return NextResponse.json({ error: "profile failed", profileStatus: pr.status }, { status: 502 });
+      return NextResponse.json(
+        { error: "profile failed", profileStatus: pr.status },
+        { status: 502 }
+      );
     }
-    const profile = (await pr.json()) as { utility_preapprovals?: { instrument_admin?: string }[] };
-    preapprovals = Array.isArray(profile.utility_preapprovals) ? profile.utility_preapprovals : [];
+    const profile = (await pr.json()) as {
+      utility_preapprovals?: { instrument_admin?: string }[];
+    };
+    preapprovals = Array.isArray(profile.utility_preapprovals)
+      ? profile.utility_preapprovals
+      : [];
   } catch (e) {
-    return NextResponse.json({ error: "profile error", detail: String(e) }, { status: 502 });
+    return NextResponse.json(
+      { error: "profile error", detail: String(e) },
+      { status: 502 }
+    );
   }
 
-  // Is the cBTC admin preapproved (auto-accept ON for cBTC)?
-  const cbtcAutoAccept = preapprovals.some((p) => p.instrument_admin === cbtcAdmin);
+  // Is the CBTC admin preapproved (auto-accept ON for CBTC)?
+  const cbtcAutoAccept = preapprovals.some(
+    (p) => p.instrument_admin === cbtcAdmin
+  );
   return NextResponse.json({ cbtcAutoAccept });
 }

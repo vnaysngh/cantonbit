@@ -22,7 +22,7 @@ export interface CantonConfig {
   registryUrl: string;
   decentralizedPartyId: string;
   instrumentId: { admin: string; id: string };
-  /** The solver's own cBTC party (the float). */
+  /** The solver's own CBTC party (the float). */
   solverParty: string;
 }
 
@@ -53,7 +53,7 @@ export class CantonClient {
     this.auth = auth;
   }
 
-  /** The solver's own cBTC party (the float source). */
+  /** The solver's own CBTC party (the float source). */
   get solverParty(): string {
     return this.cfg.solverParty;
   }
@@ -64,12 +64,14 @@ export class CantonClient {
       return this.cached.accessToken;
     }
     if (!this.inflight) {
-      this.inflight = this.fetchToken().then((t) => {
-        this.cached = t;
-        return t;
-      }).finally(() => {
-        this.inflight = null;
-      });
+      this.inflight = this.fetchToken()
+        .then((t) => {
+          this.cached = t;
+          return t;
+        })
+        .finally(() => {
+          this.inflight = null;
+        });
     }
     return (await this.inflight).accessToken;
   }
@@ -79,34 +81,39 @@ export class CantonClient {
       grant_type: "client_credentials",
       client_id: this.auth.clientId,
       client_secret: this.auth.clientSecret,
-      scope: this.auth.scope,
+      scope: this.auth.scope
     });
     const res = await fetch(this.auth.tokenUrl, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body,
+      body
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "<no body>");
-      throw new Error(`Authentik token request failed (${res.status}): ${text}`);
+      throw new Error(
+        `Authentik token request failed (${res.status}): ${text}`
+      );
     }
-    const data = (await res.json()) as { access_token: string; expires_in: number };
+    const data = (await res.json()) as {
+      access_token: string;
+      expires_in: number;
+    };
     return {
       accessToken: data.access_token,
-      expiresAt: Date.now() + data.expires_in * 1000,
+      expiresAt: Date.now() + data.expires_in * 1000
     };
   }
 
-  // --- Float check: total cBTC the solver party can spend ---
+  // --- Float check: total CBTC the solver party can spend ---
 
   /**
-   * Sum of the solver party's spendable cBTC holdings, in satoshis (bigint).
+   * Sum of the solver party's spendable CBTC holdings, in satoshis (bigint).
    * Used to refuse delivery when the float is insufficient (never half-deliver).
    */
   /**
-   * Spendable cBTC float = sum of UNLOCKED holdings only. Locked holdings (e.g.
+   * Spendable CBTC float = sum of UNLOCKED holdings only. Locked holdings (e.g.
    * allocated to an in-flight settlement) are excluded — counting them would
-   * over-report the float and let the solver try to spend the same cBTC twice.
+   * over-report the float and let the solver try to spend the same CBTC twice.
    */
   async getFloatSats(): Promise<bigint> {
     const holdings = await this.getHoldings(this.cfg.solverParty);
@@ -128,34 +135,40 @@ export class CantonClient {
     const jwt = await this.getJwt();
     const offset = await this.getLedgerEnd(jwt);
 
-    const res = await fetch(`${this.cfg.ledgerHost}/v2/state/active-contracts`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
-      body: JSON.stringify({
-        filter: {
-          filtersByParty: {
-            [party]: {
-              cumulative: [
-                {
-                  identifierFilter: {
-                    InterfaceFilter: {
-                      value: {
-                        interfaceId:
-                          "#splice-api-token-holding-v1:Splice.Api.Token.HoldingV1:Holding",
-                        includeInterfaceView: true,
-                        includeCreatedEventBlob: true,
-                      },
-                    },
-                  },
-                },
-              ],
-            },
-          },
+    const res = await fetch(
+      `${this.cfg.ledgerHost}/v2/state/active-contracts`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${jwt}`
         },
-        verbose: false,
-        activeAtOffset: offset,
-      }),
-    });
+        body: JSON.stringify({
+          filter: {
+            filtersByParty: {
+              [party]: {
+                cumulative: [
+                  {
+                    identifierFilter: {
+                      InterfaceFilter: {
+                        value: {
+                          interfaceId:
+                            "#splice-api-token-holding-v1:Splice.Api.Token.HoldingV1:Holding",
+                          includeInterfaceView: true,
+                          includeCreatedEventBlob: true
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          verbose: false,
+          activeAtOffset: offset
+        })
+      }
+    );
     if (!res.ok) {
       const text = await res.text().catch(() => "<no body>");
       throw new Error(`getHoldings ACS query failed (${res.status}): ${text}`);
@@ -164,10 +177,11 @@ export class CantonClient {
     const out: HoldingLite[] = [];
     const nowIso = new Date().toISOString();
     for (const entry of raw) {
-      const ev = (entry as ActiveContractEntry).contractEntry?.JsActiveContract?.createdEvent;
+      const ev = (entry as ActiveContractEntry).contractEntry?.JsActiveContract
+        ?.createdEvent;
       if (!ev?.contractId) continue;
 
-      // Only cBTC holdings (the splice Utility.Registry Holding template) — NOT
+      // Only CBTC holdings (the splice Utility.Registry Holding template) — NOT
       // Canton Coin / Amulet, which also surface under the Holding interface.
       const tpl = ev.templateId ?? "";
       if (!tpl.includes("Utility.Registry.Holding")) continue;
@@ -200,7 +214,7 @@ export class CantonClient {
         contractId: ev.contractId,
         amount,
         createdEventBlob: ev.createdEventBlob ?? "",
-        locked,
+        locked
       });
     }
     return out;
@@ -208,14 +222,17 @@ export class CantonClient {
 
   private async getLedgerEnd(jwt: string): Promise<number> {
     // Read-only + idempotent → safe to retry on transient RPC/network blips.
-    return retry(async () => {
-      const res = await fetch(`${this.cfg.ledgerHost}/v2/state/ledger-end`, {
-        headers: { Authorization: `Bearer ${jwt}` },
-      });
-      if (!res.ok) throw new Error(`getLedgerEnd failed (${res.status})`);
-      const { offset } = (await res.json()) as { offset: number };
-      return offset;
-    }, { label: "getLedgerEnd" });
+    return retry(
+      async () => {
+        const res = await fetch(`${this.cfg.ledgerHost}/v2/state/ledger-end`, {
+          headers: { Authorization: `Bearer ${jwt}` }
+        });
+        if (!res.ok) throw new Error(`getLedgerEnd failed (${res.status})`);
+        const { offset } = (await res.json()) as { offset: number };
+        return offset;
+      },
+      { label: "getLedgerEnd" }
+    );
   }
 
   /**
@@ -231,7 +248,7 @@ export class CantonClient {
     return !pending;
   }
 
-  // --- Phase 1: create the cBTC transfer offer (solver float → user party) ---
+  // --- Phase 1: create the CBTC transfer offer (solver float → user party) ---
 
   /**
    * Port of lib/transfer.ts createTransfer (Phase 1 only). Creates a
@@ -252,7 +269,12 @@ export class CantonClient {
      * nonce do on the EVM. Falls back to a random UUID if omitted (no dedup).
      */
     commandId?: string;
-  }): Promise<{ updateId: string; offerContractId: string; autoAccepted: boolean; inputHoldingCids: string[] }> {
+  }): Promise<{
+    updateId: string;
+    offerContractId: string;
+    autoAccepted: boolean;
+    inputHoldingCids: string[];
+  }> {
     const jwt = await this.getJwt();
     const now = new Date().toISOString();
     const executeBefore = new Date(Date.now() + TRANSFER_TTL_MS).toISOString();
@@ -260,7 +282,7 @@ export class CantonClient {
     // Never fund from a locked holding — exclude them before selection.
     const picked = selectHoldings(
       params.inputHoldings.filter((h) => !h.locked),
-      params.amountBtc,
+      params.amountBtc
     );
     const inputHoldingCids = picked.map((h) => h.contractId);
 
@@ -275,7 +297,7 @@ export class CantonClient {
       requestedAt: now,
       executeBefore,
       inputHoldingCids,
-      meta: { values: {} },
+      meta: { values: {} }
     };
     const factoryRes = await fetch(registryUrl, {
       method: "POST",
@@ -284,13 +306,15 @@ export class CantonClient {
         choiceArguments: {
           expectedAdmin: this.cfg.decentralizedPartyId,
           transfer: transferArgs,
-          extraArgs: { context: { values: {} }, meta: { values: {} } },
-        },
-      }),
+          extraArgs: { context: { values: {} }, meta: { values: {} } }
+        }
+      })
     });
     if (!factoryRes.ok) {
       const text = await factoryRes.text().catch(() => "<no body>");
-      throw new Error(`TransferFactory registry call failed (${factoryRes.status}): ${text}`);
+      throw new Error(
+        `TransferFactory registry call failed (${factoryRes.status}): ${text}`
+      );
     }
     const factory = (await factoryRes.json()) as TransferFactoryResponse;
 
@@ -303,21 +327,24 @@ export class CantonClient {
     const disclosed: DisclosedContract[] = [
       ...factory.choiceContext.disclosedContracts.map((dc) => ({
         ...dc,
-        synchronizerId: dc.synchronizerId ?? "",
+        synchronizerId: dc.synchronizerId ?? ""
       })),
       ...picked.map((h) => ({
         templateId: HOLDING_TEMPLATE_FQN,
         contractId: h.contractId,
         createdEventBlob: h.createdEventBlob,
-        synchronizerId: "",
-      })),
+        synchronizerId: ""
+      }))
     ];
 
     const submitRes = await fetch(
       `${this.cfg.ledgerHost}/v2/commands/submit-and-wait-for-transaction-tree`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${jwt}`
+        },
         body: JSON.stringify({
           applicationId: "cbtc-app",
           workflowId: `swap-transfer-${commandId}`,
@@ -346,19 +373,21 @@ export class CantonClient {
                   transfer: transferArgs,
                   extraArgs: {
                     context: factory.choiceContext.choiceContextData,
-                    meta: { values: {} },
-                  },
-                },
-              },
-            },
+                    meta: { values: {} }
+                  }
+                }
+              }
+            }
           ],
-          disclosedContracts: disclosed,
-        }),
-      },
+          disclosedContracts: disclosed
+        })
+      }
     );
     if (!submitRes.ok) {
       const text = await submitRes.text().catch(() => "<no body>");
-      throw new Error(`TransferFactory_Transfer submit failed (${submitRes.status}): ${text}`);
+      throw new Error(
+        `TransferFactory_Transfer submit failed (${submitRes.status}): ${text}`
+      );
     }
     const submitJson = (await submitRes.json()) as {
       transactionTree?: { updateId: string };
@@ -372,38 +401,51 @@ export class CantonClient {
     // often cannot read the receiver's party (it lives on another participant →
     // 403). "Can't read the offer" must NOT be confused with "offer was
     // auto-accepted" — that's a correctness bug that releases the WBTC before the
-    // cBTC is really accepted.
+    // CBTC is really accepted.
     //
     // Decide PENDING vs AUTO-ACCEPTED. We CANNOT infer this from the receiver's
     // offer set — our m2m token usually can't read the receiver's party (403),
     // and "can't read" must never be confused with "auto-accepted" (that bug
-    // releases WBTC before the cBTC is accepted).
+    // releases WBTC before the CBTC is accepted).
     //
     // The authoritative, solver-readable signal is the TransferInstruction
     // contract: in the Canton token standard the SENDER (our float) is a
     // stakeholder, so a pending instruction appears in OUR OWN active contracts
     // and disappears once the receiver accepts/rejects. (Confirmed against the
-    // Loop SDK server docs + the live mainnet ledger.) A locked cBTC holding is
+    // Loop SDK server docs + the live mainnet ledger.) A locked CBTC holding is
     // a corroborating secondary signal.
-    const found = await this.findOfferForInputs(params.receiverParty, inputHoldingCids);
+    const found = await this.findOfferForInputs(
+      params.receiverParty,
+      inputHoldingCids
+    );
     if (found.kind === "found") {
       // We can see the pending offer directly → definitely pending.
-      return { updateId, offerContractId: found.contractId, autoAccepted: false, inputHoldingCids };
+      return {
+        updateId,
+        offerContractId: found.contractId,
+        autoAccepted: false,
+        inputHoldingCids
+      };
     }
     const pending = await this.floatHasPendingTransfer(inputHoldingCids);
-    return { updateId, offerContractId: pending.cid ?? "", autoAccepted: !pending.pending, inputHoldingCids };
+    return {
+      updateId,
+      offerContractId: pending.cid ?? "",
+      autoAccepted: !pending.pending,
+      inputHoldingCids
+    };
   }
 
-  // --- Allocation (cBTC escrow) — lock / release / refund ----------------------
+  // --- Allocation (CBTC escrow) — lock / release / refund ----------------------
   // Mirrors createOffer exactly (same registry-factory → submit pattern). The
   // ONLY difference is the choice (AllocationFactory_Allocate) and the args. The
-  // allocation LOCKS the solver's cBTC until either the executor releases it
+  // allocation LOCKS the solver's CBTC until either the executor releases it
   // (Allocation_ExecuteTransfer, after verifying WBTC) or it's refunded
   // (Allocation_Withdraw). settleBefore is the timeout after which release is
-  // impossible and the cBTC is recoverable by the sender.
+  // impossible and the CBTC is recoverable by the sender.
 
   /**
-   * Lock cBTC into an Allocation (solver float → held for `receiverParty`).
+   * Lock CBTC into an Allocation (solver float → held for `receiverParty`).
    * Returns the created Allocation contractId + the locked holding cids.
    */
   async allocate(params: {
@@ -413,16 +455,22 @@ export class CantonClient {
     settlementId: string;
     settleBefore: Date;
     allocateBefore?: Date;
-  }): Promise<{ updateId: string; allocationCid: string; lockedHoldingCids: string[] }> {
+  }): Promise<{
+    updateId: string;
+    allocationCid: string;
+    lockedHoldingCids: string[];
+  }> {
     const jwt = await this.getJwt();
     const now = new Date().toISOString();
-    const allocateBefore = (params.allocateBefore ?? params.settleBefore).toISOString();
+    const allocateBefore = (
+      params.allocateBefore ?? params.settleBefore
+    ).toISOString();
     const settleBefore = params.settleBefore.toISOString();
 
     // Never fund from a locked holding — exclude them before selection.
     const picked = selectHoldings(
       params.inputHoldings.filter((h) => !h.locked),
-      params.amountBtc,
+      params.amountBtc
     );
     const inputHoldingCids = picked.map((h) => h.contractId);
 
@@ -434,7 +482,7 @@ export class CantonClient {
         requestedAt: now,
         allocateBefore,
         settleBefore,
-        meta: { values: {} },
+        meta: { values: {} }
       },
       transferLegId: "leg-0",
       transferLeg: {
@@ -442,8 +490,8 @@ export class CantonClient {
         receiver: params.receiverParty,
         amount: params.amountBtc,
         instrumentId: this.cfg.instrumentId,
-        meta: { values: {} },
-      },
+        meta: { values: {} }
+      }
     };
     const factoryRes = await fetch(registryUrl, {
       method: "POST",
@@ -454,27 +502,29 @@ export class CantonClient {
           allocation,
           requestedAt: now,
           inputHoldingCids,
-          extraArgs: { context: { values: {} }, meta: { values: {} } },
-        },
-      }),
+          extraArgs: { context: { values: {} }, meta: { values: {} } }
+        }
+      })
     });
     if (!factoryRes.ok) {
       const text = await factoryRes.text().catch(() => "<no body>");
-      throw new Error(`AllocationFactory registry call failed (${factoryRes.status}): ${text}`);
+      throw new Error(
+        `AllocationFactory registry call failed (${factoryRes.status}): ${text}`
+      );
     }
     const factory = (await factoryRes.json()) as TransferFactoryResponse;
 
     const disclosed: DisclosedContract[] = [
       ...factory.choiceContext.disclosedContracts.map((dc) => ({
         ...dc,
-        synchronizerId: dc.synchronizerId ?? "",
+        synchronizerId: dc.synchronizerId ?? ""
       })),
       ...picked.map((h) => ({
         templateId: HOLDING_TEMPLATE_FQN,
         contractId: h.contractId,
         createdEventBlob: h.createdEventBlob,
-        synchronizerId: "",
-      })),
+        synchronizerId: ""
+      }))
     ];
 
     const { updateId, createdCids } = await this.submitExercise({
@@ -488,9 +538,12 @@ export class CantonClient {
         allocation,
         requestedAt: now,
         inputHoldingCids,
-        extraArgs: { context: factory.choiceContext.choiceContextData, meta: { values: {} } },
+        extraArgs: {
+          context: factory.choiceContext.choiceContextData,
+          meta: { values: {} }
+        }
       },
-      disclosed,
+      disclosed
     });
     // The created Allocation contract is the new non-holding contract in the tree.
     const allocationCid = createdCids[0] ?? "";
@@ -499,14 +552,14 @@ export class CantonClient {
 
   /**
    * Fetch the registry choice-context for an Allocation lifecycle choice. Like
-   * the transfer-accept and allocate paths, the cBTC registry must supply the
+   * the transfer-accept and allocate paths, the CBTC registry must supply the
    * disclosed contracts + choiceContextData for `Allocation_ExecuteTransfer` /
    * `_Withdraw` / `_Cancel` — exercising with an empty context fails on the live
    * registry. `kind` selects the endpoint per the Allocation OpenAPI.
    */
   private async allocationChoiceContext(
     allocationCid: string,
-    kind: "execute-transfer" | "withdraw" | "cancel",
+    kind: "execute-transfer" | "withdraw" | "cancel"
   ): Promise<{ choiceContextData: unknown; disclosed: DisclosedContract[] }> {
     const url =
       `${this.cfg.registryUrl}/api/token-standard/v0/registrars/${this.cfg.decentralizedPartyId}` +
@@ -514,11 +567,13 @@ export class CantonClient {
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ meta: {} }),
+      body: JSON.stringify({ meta: {} })
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "<no body>");
-      throw new Error(`allocation choice-context (${kind}) failed (${res.status}): ${text}`);
+      throw new Error(
+        `allocation choice-context (${kind}) failed (${res.status}): ${text}`
+      );
     }
     const ctx = (await res.json()) as {
       choiceContextData: unknown;
@@ -526,13 +581,13 @@ export class CantonClient {
     };
     const disclosed = (ctx.disclosedContracts ?? []).map((dc) => ({
       ...dc,
-      synchronizerId: dc.synchronizerId ?? "",
+      synchronizerId: dc.synchronizerId ?? ""
     }));
     return { choiceContextData: ctx.choiceContextData, disclosed };
   }
 
   /**
-   * Release locked cBTC to the receiver. The cBTC registry's DvpLegAllocation
+   * Release locked CBTC to the receiver. The CBTC registry's DvpLegAllocation
    * requires `Allocation_ExecuteTransfer` to be authorized by BOTH the executor
    * (solver) AND the receiver (verified live: DAML_AUTHORIZATION_ERROR otherwise).
    * Pass `receiverParty` so we can co-act as them — works only when our JWT has
@@ -542,25 +597,32 @@ export class CantonClient {
    */
   async executeAllocation(
     allocationCid: string,
-    receiverParty?: string,
+    receiverParty?: string
   ): Promise<{ updateId: string }> {
     const jwt = await this.getJwt();
-    const ctx = await this.allocationChoiceContext(allocationCid, "execute-transfer");
+    const ctx = await this.allocationChoiceContext(
+      allocationCid,
+      "execute-transfer"
+    );
     const { updateId } = await this.submitExercise({
       jwt,
       workflow: "swap-allocation-execute",
       templateId: ALLOCATION_INTERFACE,
       contractId: allocationCid,
       choice: "Allocation_ExecuteTransfer",
-      choiceArgument: { extraArgs: { context: ctx.choiceContextData, meta: { values: {} } } },
+      choiceArgument: {
+        extraArgs: { context: ctx.choiceContextData, meta: { values: {} } }
+      },
       disclosed: ctx.disclosed,
-      actAsExtra: receiverParty ? [receiverParty] : undefined,
+      actAsExtra: receiverParty ? [receiverParty] : undefined
     });
     return { updateId };
   }
 
-  /** Refund locked cBTC back to the sender (solver). The escape hatch / timeout path. */
-  async withdrawAllocation(allocationCid: string): Promise<{ updateId: string }> {
+  /** Refund locked CBTC back to the sender (solver). The escape hatch / timeout path. */
+  async withdrawAllocation(
+    allocationCid: string
+  ): Promise<{ updateId: string }> {
     const jwt = await this.getJwt();
     const ctx = await this.allocationChoiceContext(allocationCid, "withdraw");
     const { updateId } = await this.submitExercise({
@@ -569,8 +631,10 @@ export class CantonClient {
       templateId: ALLOCATION_INTERFACE,
       contractId: allocationCid,
       choice: "Allocation_Withdraw",
-      choiceArgument: { extraArgs: { context: ctx.choiceContextData, meta: { values: {} } } },
-      disclosed: ctx.disclosed,
+      choiceArgument: {
+        extraArgs: { context: ctx.choiceContextData, meta: { values: {} } }
+      },
+      disclosed: ctx.disclosed
     });
     return { updateId };
   }
@@ -589,7 +653,7 @@ export class CantonClient {
     choice: string;
     choiceArgument: unknown;
     disclosed: DisclosedContract[];
-    /** Extra parties to act as (beyond the solver). For choices the cBTC registry
+    /** Extra parties to act as (beyond the solver). For choices the CBTC registry
      *  requires the receiver to co-authorize (e.g. Allocation_ExecuteTransfer on a
      *  DvpLegAllocation). Only works when our JWT has authority over them (same
      *  participant); a cross-participant user party cannot be added here. */
@@ -601,7 +665,10 @@ export class CantonClient {
       `${this.cfg.ledgerHost}/v2/commands/submit-and-wait-for-transaction-tree`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${p.jwt}` },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${p.jwt}`
+        },
         body: JSON.stringify({
           applicationId: "cbtc-app",
           workflowId: `${p.workflow}-${commandId}`,
@@ -614,13 +681,13 @@ export class CantonClient {
                 templateId: p.templateId,
                 contractId: p.contractId,
                 choice: p.choice,
-                choiceArgument: p.choiceArgument,
-              },
-            },
+                choiceArgument: p.choiceArgument
+              }
+            }
           ],
-          disclosedContracts: p.disclosed,
-        }),
-      },
+          disclosedContracts: p.disclosed
+        })
+      }
     );
     if (!res.ok) {
       const text = await res.text().catch(() => "<no body>");
@@ -629,7 +696,14 @@ export class CantonClient {
     const json = (await res.json()) as {
       transactionTree?: {
         updateId: string;
-        eventsById?: Record<string, { CreatedTreeEvent?: { value?: { contractId?: string; templateId?: string } } }>;
+        eventsById?: Record<
+          string,
+          {
+            CreatedTreeEvent?: {
+              value?: { contractId?: string; templateId?: string };
+            };
+          }
+        >;
       };
     };
     const tree = json.transactionTree;
@@ -641,7 +715,8 @@ export class CantonClient {
       // Keep the Allocation contract; skip plain Holding change-outputs. NOTE the
       // Allocation template path is "...V0.Holding.Allocation:DvpLegAllocation"
       // — it CONTAINS "Holding", so match on the entity name, not a substring.
-      const isPlainHolding = tpl.endsWith(":Holding") || tpl.includes("Holding.V0.Holding:Holding");
+      const isPlainHolding =
+        tpl.endsWith(":Holding") || tpl.includes("Holding.V0.Holding:Holding");
       if (!isPlainHolding) createdCids.push(c.contractId);
     }
     return { updateId: tree?.updateId ?? "", createdCids };
@@ -650,26 +725,46 @@ export class CantonClient {
   /**
    * Is a transfer the float just created still PENDING? Readable with our own
    * token (the sender is a stakeholder), so this never hits the receiver-party
-   * 403. Pending ⇔ a TransferInstruction is active on our float, OR a cBTC
+   * 403. Pending ⇔ a TransferInstruction is active on our float, OR a CBTC
    * holding we own is still locked (the in-flight transfer's lock).
    *
    * Returns the TransferInstruction contract id when found, so the caller can
    * track it for the accept/expiry watch.
    */
   private async floatHasPendingTransfer(
-    inputHoldingCids: string[],
+    inputHoldingCids: string[]
   ): Promise<{ pending: boolean; cid?: string }> {
     const jwt = await this.getJwt();
     const offset = await this.getLedgerEnd(jwt);
-    const res = await fetch(`${this.cfg.ledgerHost}/v2/state/active-contracts`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
-      body: JSON.stringify({
-        filter: { filtersByParty: { [this.cfg.solverParty]: { cumulative: [{ identifierFilter: { WildcardFilter: { value: { includeCreatedEventBlob: false } } } }] } } },
-        verbose: false,
-        activeAtOffset: offset,
-      }),
-    });
+    const res = await fetch(
+      `${this.cfg.ledgerHost}/v2/state/active-contracts`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${jwt}`
+        },
+        body: JSON.stringify({
+          filter: {
+            filtersByParty: {
+              [this.cfg.solverParty]: {
+                cumulative: [
+                  {
+                    identifierFilter: {
+                      WildcardFilter: {
+                        value: { includeCreatedEventBlob: false }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          verbose: false,
+          activeAtOffset: offset
+        })
+      }
+    );
     // Can't read our own float (shouldn't happen) → conservatively "pending" so
     // we never wrongly auto-finalise.
     if (!res.ok) return { pending: true };
@@ -698,39 +793,63 @@ export class CantonClient {
    *  "unreadable" (the receiver's party isn't readable by our token — 403). */
   private async findOfferForInputs(
     receiverParty: string,
-    sourceHoldingCids: string[],
-  ): Promise<{ kind: "found"; contractId: string } | { kind: "absent" } | { kind: "unreadable" }> {
+    sourceHoldingCids: string[]
+  ): Promise<
+    | { kind: "found"; contractId: string }
+    | { kind: "absent" }
+    | { kind: "unreadable" }
+  > {
     const jwt = await this.getJwt();
     const offset = await this.getLedgerEnd(jwt);
-    const res = await fetch(`${this.cfg.ledgerHost}/v2/state/active-contracts`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
-      body: JSON.stringify({
-        filter: {
-          filtersByParty: {
-            [receiverParty]: {
-              cumulative: [
-                { identifierFilter: { WildcardFilter: { value: { includeCreatedEventBlob: false } } } },
-              ],
-            },
-          },
+    const res = await fetch(
+      `${this.cfg.ledgerHost}/v2/state/active-contracts`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${jwt}`
         },
-        verbose: false,
-        activeAtOffset: offset,
-      }),
-    });
+        body: JSON.stringify({
+          filter: {
+            filtersByParty: {
+              [receiverParty]: {
+                cumulative: [
+                  {
+                    identifierFilter: {
+                      WildcardFilter: {
+                        value: { includeCreatedEventBlob: false }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          verbose: false,
+          activeAtOffset: offset
+        })
+      }
+    );
     if (!res.ok) return { kind: "unreadable" }; // typically 403 on another participant's party
     const items = (await res.json()) as ActiveContractEntry[];
     const sourceSet = new Set(sourceHoldingCids);
     for (const item of items) {
       const ev = item.contractEntry?.JsActiveContract?.createdEvent;
       if (!ev) continue;
-      if (!ev.templateId?.includes("TransferOffer") && !ev.templateId?.includes("TransferInstruction")) {
+      if (
+        !ev.templateId?.includes("TransferOffer") &&
+        !ev.templateId?.includes("TransferInstruction")
+      ) {
         continue;
       }
-      const cids = (ev.createArgument as { transfer?: { inputHoldingCids?: string[] } } | undefined)
-        ?.transfer?.inputHoldingCids ?? [];
-      if (cids.some((c) => sourceSet.has(c))) return { kind: "found", contractId: ev.contractId };
+      const cids =
+        (
+          ev.createArgument as
+            | { transfer?: { inputHoldingCids?: string[] } }
+            | undefined
+        )?.transfer?.inputHoldingCids ?? [];
+      if (cids.some((c) => sourceSet.has(c)))
+        return { kind: "found", contractId: ev.contractId };
     }
     return { kind: "absent" };
   }
@@ -742,33 +861,52 @@ export class CantonClient {
    * `true`  → still pending (user hasn't accepted/rejected; may be expired).
    * `false` → archived (accepted OR expired — disambiguate via resolveOffer).
    */
-  async isOfferActive(receiverParty: string, offerContractId: string): Promise<boolean> {
+  async isOfferActive(
+    receiverParty: string,
+    offerContractId: string
+  ): Promise<boolean> {
     const jwt = await this.getJwt();
     const offset = await this.getLedgerEnd(jwt);
-    const res = await fetch(`${this.cfg.ledgerHost}/v2/state/active-contracts`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
-      body: JSON.stringify({
-        filter: {
-          filtersByParty: {
-            [receiverParty]: {
-              cumulative: [
-                { identifierFilter: { WildcardFilter: { value: { includeCreatedEventBlob: false } } } },
-              ],
-            },
-          },
+    const res = await fetch(
+      `${this.cfg.ledgerHost}/v2/state/active-contracts`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${jwt}`
         },
-        verbose: false,
-        activeAtOffset: offset,
-      }),
-    });
+        body: JSON.stringify({
+          filter: {
+            filtersByParty: {
+              [receiverParty]: {
+                cumulative: [
+                  {
+                    identifierFilter: {
+                      WildcardFilter: {
+                        value: { includeCreatedEventBlob: false }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          verbose: false,
+          activeAtOffset: offset
+        })
+      }
+    );
     if (!res.ok) {
       const text = await res.text().catch(() => "<no body>");
-      throw new Error(`isOfferActive ACS query failed (${res.status}): ${text}`);
+      throw new Error(
+        `isOfferActive ACS query failed (${res.status}): ${text}`
+      );
     }
     const items = (await res.json()) as ActiveContractEntry[];
     return items.some(
-      (it) => it.contractEntry?.JsActiveContract?.createdEvent?.contractId === offerContractId,
+      (it) =>
+        it.contractEntry?.JsActiveContract?.createdEvent?.contractId ===
+        offerContractId
     );
   }
 
@@ -793,7 +931,10 @@ export class CantonClient {
 
     const res = await fetch(`${this.cfg.ledgerHost}/v2/updates`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${jwt}`
+      },
       body: JSON.stringify({
         beginExclusive: params.fromOffset,
         endInclusive: end,
@@ -801,27 +942,36 @@ export class CantonClient {
           filtersByParty: {
             [params.receiverParty]: {
               cumulative: [
-                { identifierFilter: { WildcardFilter: { value: { includeCreatedEventBlob: false } } } },
-              ],
-            },
-          },
+                {
+                  identifierFilter: {
+                    WildcardFilter: {
+                      value: { includeCreatedEventBlob: false }
+                    }
+                  }
+                }
+              ]
+            }
+          }
         },
-        verbose: true,
-      }),
+        verbose: true
+      })
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "<no body>");
-      throw new Error(`resolveOffer updates query failed (${res.status}): ${text}`);
+      throw new Error(
+        `resolveOffer updates query failed (${res.status}): ${text}`
+      );
     }
     const data = (await res.json()) as unknown[];
 
     for (const item of data) {
-      const txn = (item as { update?: { Transaction?: { value?: RawTransaction } } })
-        .update?.Transaction?.value;
+      const txn = (
+        item as { update?: { Transaction?: { value?: RawTransaction } } }
+      ).update?.Transaction?.value;
       if (!txn) continue;
 
       const archivedOffer = txn.events.some(
-        (e) => e.ArchivedEvent?.contractId === params.offerContractId,
+        (e) => e.ArchivedEvent?.contractId === params.offerContractId
       );
       if (!archivedOffer) continue;
 
@@ -830,14 +980,23 @@ export class CantonClient {
         const c = e.CreatedEvent;
         if (!c) return false;
         const isHolding = (c.templateId ?? "").includes("Holding");
-        const owner = (c.createArgument as { owner?: string } | undefined)?.owner;
+        const owner = (c.createArgument as { owner?: string } | undefined)
+          ?.owner;
         return isHolding && owner === params.receiverParty;
       });
 
       if (createdReceiverHolding) {
-        return { kind: "accepted", recordTime: txn.effectiveAt, updateId: txn.updateId };
+        return {
+          kind: "accepted",
+          recordTime: txn.effectiveAt,
+          updateId: txn.updateId
+        };
       }
-      return { kind: "expired", recordTime: txn.effectiveAt, updateId: txn.updateId };
+      return {
+        kind: "expired",
+        recordTime: txn.effectiveAt,
+        updateId: txn.updateId
+      };
     }
     return { kind: "unknown" };
   }
@@ -854,13 +1013,13 @@ export interface HoldingLite {
    * e.g. allocated to a settlement. Locked holdings are NOT spendable and MUST be
    * excluded from float / transfer / allocate inputs. A holding with an EXPIRED
    * lock is spendable again (the registry allows it as an input), so it is NOT
-   * marked locked. Verified against the live cBTC registry: lock = {holders,
+   * marked locked. Verified against the live CBTC registry: lock = {holders,
    * expiresAt, expiresAfter, context}; null when free.
    */
   locked: boolean;
 }
 
-/** The HoldingView.lock shape from the live cBTC registry. */
+/** The HoldingView.lock shape from the live CBTC registry. */
 interface HoldingLock {
   expiresAt?: string | null;
   expiresAfter?: string | null;
@@ -874,7 +1033,10 @@ interface HoldingLock {
  * (relative) conservatively as "still locked" since we can't resolve it to an
  * absolute time without the lock's creation time.
  */
-export function isActivelyLocked(lock: HoldingLock | null | undefined, nowIso: string): boolean {
+export function isActivelyLocked(
+  lock: HoldingLock | null | undefined,
+  nowIso: string
+): boolean {
   if (lock == null) return false;
   if (lock.expiresAt) return lock.expiresAt > nowIso; // future expiry → locked
   if (lock.expiresAfter) return true; // relative expiry we can't resolve → treat as locked
@@ -892,7 +1054,11 @@ interface RawTransaction {
   offset: number;
   effectiveAt: string; // ISO record-time
   events: Array<{
-    CreatedEvent?: { contractId: string; templateId?: string; createArgument?: unknown };
+    CreatedEvent?: {
+      contractId: string;
+      templateId?: string;
+      createArgument?: unknown;
+    };
     ArchivedEvent?: { contractId: string; templateId?: string };
   }>;
 }
@@ -918,7 +1084,10 @@ interface ActiveContractEntry {
         templateId?: string;
         createdEventBlob?: string;
         createArgument?: unknown;
-        interfaceViews?: { viewValue?: unknown; viewStatus?: { code?: number; message?: string } }[];
+        interfaceViews?: {
+          viewValue?: unknown;
+          viewStatus?: { code?: number; message?: string };
+        }[];
       };
     };
   };
@@ -930,14 +1099,17 @@ const TRANSFER_FACTORY_INTERFACE =
   "#splice-api-token-transfer-instruction-v1:Splice.Api.Token.TransferInstructionV1:TransferFactory";
 const TRANSFER_TTL_MS = 24 * 60 * 60 * 1000;
 
-// --- Allocation (cBTC escrow) interfaces — siblings of the transfer ones. ---
+// --- Allocation (CBTC escrow) interfaces — siblings of the transfer ones. ---
 const ALLOCATION_FACTORY_INTERFACE =
   "#splice-api-token-allocation-instruction-v1:Splice.Api.Token.AllocationInstructionV1:AllocationFactory";
 const ALLOCATION_INTERFACE =
   "#splice-api-token-allocation-v1:Splice.Api.Token.AllocationV1:Allocation";
 
 /** Largest-first holding selection to cover an amount; throws if insufficient. */
-export function selectHoldings(holdings: HoldingLite[], amountBtc: string): HoldingLite[] {
+export function selectHoldings(
+  holdings: HoldingLite[],
+  amountBtc: string
+): HoldingLite[] {
   const target = btcStringToSats(amountBtc);
   const sorted = [...holdings].sort((a, b) => {
     const d = btcStringToSats(b.amount) - btcStringToSats(a.amount);
@@ -958,8 +1130,13 @@ export function selectHoldings(holdings: HoldingLite[], amountBtc: string): Hold
 
 /** Thrown when the solver float can't cover a delivery. */
 export class InsufficientFloatError extends Error {
-  constructor(public haveSats: bigint, public needSats: bigint) {
-    super(`insufficient cBTC float: have ${haveSats} sats, need ${needSats} sats`);
+  constructor(
+    public haveSats: bigint,
+    public needSats: bigint
+  ) {
+    super(
+      `insufficient CBTC float: have ${haveSats} sats, need ${needSats} sats`
+    );
     this.name = "InsufficientFloatError";
   }
 }

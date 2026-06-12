@@ -1,14 +1,14 @@
 /**
- * Delivery leg (Task 7a) — create the cBTC offer for a `seen` order.
+ * Delivery leg (Task 7a) — create the CBTC offer for a `seen` order.
  *
- * For each order: run the two-legged ordering GUARD, check the solver's cBTC
+ * For each order: run the two-legged ordering GUARD, check the solver's CBTC
  * float, then create the transfer offer (solver float → user's Canton party)
  * and mark the order `delivering`. It does NOT wait for the external user to
  * accept — that's Task 7b, which captures the fill timestamp and marks
  * `delivered`.
  *
  * Ordering guard rationale: in two-legged settlement the solver bears the
- * completion risk. We only put cBTC into an offer once the Base lock is final
+ * completion risk. We only put CBTC into an offer once the Base lock is final
  * and there is enough time left to (a) let the user accept and (b) attest +
  * finalise before fillDeadline. If not, we skip rather than risk a delivery we
  * can't get paid for.
@@ -16,7 +16,11 @@
 
 import { formatUnits, type Hex } from "viem";
 
-import { CantonClient, InsufficientFloatError, btcStringToSats } from "./canton.js";
+import {
+  CantonClient,
+  InsufficientFloatError,
+  btcStringToSats
+} from "./canton.js";
 import { verifyCantonParty } from "./order.js";
 import type { OrderStore, OrderRecord } from "./store.js";
 
@@ -26,10 +30,10 @@ export interface DeliveryParams {
   minSecondsBeforeDeadline: number;
   /** Current unix time (seconds). Injected for testability. */
   now: number;
-  /** cBTC decimals for converting the on-chain amount to a BTC string. */
+  /** CBTC decimals for converting the on-chain amount to a BTC string. */
   cbtcDecimals: number;
   /**
-   * C3 — optional hard ceiling on TOTAL cBTC value in-flight (sats), summed over
+   * C3 — optional hard ceiling on TOTAL CBTC value in-flight (sats), summed over
    * orders that are delivering/delivered but not yet finalised/refunded. 0 or
    * undefined = no extra cap. This is DEFENSE IN DEPTH: the float bound +
    * locked-float exclusion already prevent over-delivery; this caps the blast
@@ -37,23 +41,23 @@ export interface DeliveryParams {
    */
   maxInflightSats?: bigint;
   /**
-   * FAIRNESS — optional per-user ceiling on in-flight cBTC (sats), summed over a
+   * FAIRNESS — optional per-user ceiling on in-flight CBTC (sats), summed over a
    * single user's delivering/delivered-but-not-finalised orders. Prevents ONE
-   * user from monopolizing the shared cBTC float and starving others. CoW has no
+   * user from monopolizing the shared CBTC float and starving others. CoW has no
    * shared float (solvers front their own capital), so it omits this; our
    * custodial single-float design needs it. 0/undefined = no per-user cap.
    */
   perUserInflightCapSats?: bigint;
   /**
    * PRE-FLIGHT: verify the WBTC collection is GUARANTEED before we deliver the
-   * cBTC, so the two legs pass-or-fail together (never user-gets-cBTC-but-we-
-   * lose-WBTC). Returns ok=false to ABORT the delivery (we never hand over cBTC
+   * CBTC, so the two legs pass-or-fail together (never user-gets-CBTC-but-we-
+   * lose-WBTC). Returns ok=false to ABORT the delivery (we never hand over CBTC
    * we can't get paid for). Provided by the solver (it has the escrow client).
    * If undefined, delivery proceeds without the guarantee (e.g. tests).
    */
   verifyClaimable?: (
     orderId: Hex,
-    expires: number,
+    expires: number
   ) => Promise<{ ok: true } | { ok: false; reason: string }>;
 }
 
@@ -74,7 +78,7 @@ export async function startDelivery(
   store: OrderStore,
   canton: CantonClient,
   orderId: Hex,
-  params: DeliveryParams,
+  params: DeliveryParams
 ): Promise<DeliveryOutcome> {
   const rec = await store.get(orderId);
   if (!rec) return { kind: "failed", reason: "order not found in store" };
@@ -88,10 +92,13 @@ export async function startDelivery(
   // --- GUARD 1: time. Must have margin before fillDeadline. ---
   const secondsLeft = rec.order.fillDeadline - params.now;
   if (secondsLeft < params.minSecondsBeforeDeadline) {
-    return { kind: "skipped", reason: `only ${secondsLeft}s before fillDeadline (need >= ${params.minSecondsBeforeDeadline}s)` };
+    return {
+      kind: "skipped",
+      reason: `only ${secondsLeft}s before fillDeadline (need >= ${params.minSecondsBeforeDeadline}s)`
+    };
   }
 
-  // The cBTC amount to deliver, as a BTC string (the transfer API speaks BTC).
+  // The CBTC amount to deliver, as a BTC string (the transfer API speaks BTC).
   const amountBtc = formatUnits(BigInt(out.amount), params.cbtcDecimals);
 
   // The full Canton party the solver must deliver to. The order only commits to
@@ -107,17 +114,28 @@ export async function startDelivery(
     if (recovered) {
       cantonParty = recovered;
       // Persist back onto the record so subsequent ticks don't re-recover.
-      await store.update(orderId, { cantonParty: recovered, note: "cantonParty recovered from quote-time map" });
+      await store.update(orderId, {
+        cantonParty: recovered,
+        note: "cantonParty recovered from quote-time map"
+      });
     }
   }
   if (!cantonParty) {
-    return { kind: "skipped", reason: "no Canton party preimage (not on record, none remembered at quote time)" };
+    return {
+      kind: "skipped",
+      reason:
+        "no Canton party preimage (not on record, none remembered at quote time)"
+    };
   }
   // ...and SECURITY-CRITICAL: the preimage must hash to the committed recipient.
-  // Otherwise a wrong/malicious party could redirect the cBTC. This re-checks the
-  // RECOVERED party too — a poisoned recovery map can't redirect cBTC.
+  // Otherwise a wrong/malicious party could redirect the CBTC. This re-checks the
+  // RECOVERED party too — a poisoned recovery map can't redirect CBTC.
   if (!verifyCantonParty(cantonParty, out.recipient)) {
-    return await fail(store, orderId, "Canton party does not match the on-chain recipient commitment — refusing to deliver");
+    return await fail(
+      store,
+      orderId,
+      "Canton party does not match the on-chain recipient commitment — refusing to deliver"
+    );
   }
 
   // --- GUARD 2: float. Refuse rather than half-deliver. ---
@@ -125,62 +143,78 @@ export async function startDelivery(
   try {
     floatSats = await canton.getFloatSats();
   } catch (e) {
-    return { kind: "skipped", reason: `float check failed (transient): ${errMsg(e)}` };
+    return {
+      kind: "skipped",
+      reason: `float check failed (transient): ${errMsg(e)}`
+    };
   }
   const needSats = btcStringToSats(amountBtc);
   if (floatSats < needSats) {
-    return await fail(store, orderId, `insufficient cBTC float: have ${floatSats} sats, need ${needSats} sats`);
+    return await fail(
+      store,
+      orderId,
+      `insufficient CBTC float: have ${floatSats} sats, need ${needSats} sats`
+    );
   }
 
   // --- GUARD 3 (C3): total in-flight exposure cap (defense in depth). Sum the
-  // cBTC value of orders already delivering/delivered (not yet finalised); if
+  // CBTC value of orders already delivering/delivered (not yet finalised); if
   // adding this one would exceed the configured ceiling, skip until something
   // settles. Bounds the blast radius of any accounting error to a known limit. ---
   if (params.maxInflightSats && params.maxInflightSats > 0n) {
     let inflight = 0n;
     const [delivering, deliveredRecs] = await Promise.all([
       store.byStatus("delivering"),
-      store.byStatus("delivered"),
+      store.byStatus("delivered")
     ]);
     for (const r of [...delivering, ...deliveredRecs]) {
       const o = r.order.outputs[0];
       if (o) inflight += BigInt(o.amount);
     }
     if (inflight + needSats > params.maxInflightSats) {
-      return { kind: "skipped", reason: `in-flight cap: ${inflight}+${needSats} > ${params.maxInflightSats} sats — waiting for settlement` };
+      return {
+        kind: "skipped",
+        reason: `in-flight cap: ${inflight}+${needSats} > ${params.maxInflightSats} sats — waiting for settlement`
+      };
     }
   }
 
-  // --- GUARD 3b (FAIRNESS): per-user in-flight cap. Sum THIS user's cBTC value
+  // --- GUARD 3b (FAIRNESS): per-user in-flight cap. Sum THIS user's CBTC value
   // already delivering/delivered (not yet finalised); if adding this order would
   // exceed the per-user ceiling, skip until the user's earlier orders settle. Stops
   // one user from draining the shared float and starving everyone else. (CoW omits
   // this only because it has no shared float — each solver fronts its own capital.) ---
   if (params.perUserInflightCapSats && params.perUserInflightCapSats > 0n) {
     let userInflight = 0n;
-    for (const r of await store.byUser(rec.order.user, ["delivering", "delivered"])) {
+    for (const r of await store.byUser(rec.order.user, [
+      "delivering",
+      "delivered"
+    ])) {
       const o = r.order.outputs[0];
       if (o) userInflight += BigInt(o.amount);
     }
     if (userInflight + needSats > params.perUserInflightCapSats) {
       return {
         kind: "skipped",
-        reason: `per-user in-flight cap: ${rec.order.user} has ${userInflight}+${needSats} > ${params.perUserInflightCapSats} sats — waiting for their earlier orders to settle`,
+        reason: `per-user in-flight cap: ${rec.order.user} has ${userInflight}+${needSats} > ${params.perUserInflightCapSats} sats — waiting for their earlier orders to settle`
       };
     }
   }
 
   // --- GUARD 4 (PRE-FLIGHT): WBTC collection must be GUARANTEED before we hand
-  // over the cBTC, so the two legs pass-or-fail together. If the WBTC isn't
+  // over the CBTC, so the two legs pass-or-fail together. If the WBTC isn't
   // securely claimable (not Deposited, or too close to the refund window), we
-  // ABORT — we never deliver cBTC we can't get paid for. This is the safeguard
-  // against "user gets cBTC but we lose the WBTC". ---
+  // ABORT — we never deliver CBTC we can't get paid for. This is the safeguard
+  // against "user gets CBTC but we lose the WBTC". ---
   if (params.verifyClaimable) {
     const v = await params.verifyClaimable(orderId, rec.order.expires);
     if (!v.ok) {
       // Not safe to deliver yet — leave as `seen` to retry (transient: e.g. the
       // Deposit not yet visible) or it'll eventually expire + refund the user.
-      return { kind: "skipped", reason: `pre-flight: WBTC not securely claimable — ${v.reason}` };
+      return {
+        kind: "skipped",
+        reason: `pre-flight: WBTC not securely claimable — ${v.reason}`
+      };
     }
   }
 
@@ -191,13 +225,16 @@ export async function startDelivery(
   // guard at the top of this function is NOT sufficient alone because of the
   // await gap between it and the first status write; the claim closes that gap. ---
   const won = await store.claimStatus(orderId, "seen", "delivering", {
-    note: "claimed for delivery",
+    note: "claimed for delivery"
   });
   if (!won) {
-    return { kind: "skipped", reason: "another worker already claimed this order (concurrency guard)" };
+    return {
+      kind: "skipped",
+      reason: "another worker already claimed this order (concurrency guard)"
+    };
   }
 
-  // NOTE (Allocation investigation, 2026-06): we evaluated delivering cBTC via the
+  // NOTE (Allocation investigation, 2026-06): we evaluated delivering CBTC via the
   // Splice Allocation primitive (lock → execute). E2E on mainnet proved Allocation
   // is the WRONG primitive for a one-directional delivery: it is a two-party DvP
   // settlement template (`DvpLegAllocation`) whose `Allocation_ExecuteTransfer`
@@ -213,32 +250,33 @@ export async function startDelivery(
   // --- Create the offer (Phase 1) — TransferInstruction delivery. ---
   try {
     const holdings = await canton.getHoldings(canton.solverParty);
-    const { updateId, offerContractId, autoAccepted, inputHoldingCids } = await canton.createOffer({
-      receiverParty: cantonParty,
-      amountBtc,
-      inputHoldings: holdings,
-      // Deterministic command id keyed by the swap → Canton dedupes a repeat
-      // delivery of this exact order at the ledger level (CoW-aligned guard).
-      commandId: `deliver-${orderId}`,
-    });
+    const { updateId, offerContractId, autoAccepted, inputHoldingCids } =
+      await canton.createOffer({
+        receiverParty: cantonParty,
+        amountBtc,
+        inputHoldings: holdings,
+        // Deterministic command id keyed by the swap → Canton dedupes a repeat
+        // delivery of this exact order at the ledger level (CoW-aligned guard).
+        commandId: `deliver-${orderId}`
+      });
 
     // ONLY a confirmed auto-accept collapses straight to `delivered` — the offer
     // was CONSUMED on creation (the pending transfer for our inputs is already
-    // gone), so the cBTC is accepted and delivery is final.
+    // gone), so the CBTC is accepted and delivery is final.
     if (autoAccepted) {
       await store.update(orderId, {
         status: "delivered",
-        cbtcAccepted: true, // SECURITY (HIGH-1): cBTC handed over → never auto-refund
+        cbtcAccepted: true, // SECURITY (HIGH-1): CBTC handed over → never auto-refund
         cantonDeliveryRef: updateId,
         fillTimestamp: params.now,
         note: `auto-accepted on delivery (updateId=${updateId})`,
-        inputHoldingCids,
+        inputHoldingCids
       });
       return { kind: "delivered", updateId, fillTimestamp: params.now };
     }
 
     // Otherwise the offer is PENDING the user's accept. We must WAIT for it before
-    // finalising (else we'd take the WBTC before the user has the cBTC). We track
+    // finalising (else we'd take the WBTC before the user has the CBTC). We track
     // the accept from the SOLVER's OWN ACS (isDeliveryAccepted, sender-readable,
     // no 403) using inputHoldingCids — works even cross-participant where the
     // receiver's offer isn't readable. resolveDeliveringOrders advances it to
@@ -250,7 +288,7 @@ export async function startDelivery(
       inputHoldingCids,
       note: offerContractId
         ? `offer created (updateId=${updateId})`
-        : `cBTC offer sent — awaiting accept (cross-participant; tracked via float). updateId=${updateId}`,
+        : `CBTC offer sent — awaiting accept (cross-participant; tracked via float). updateId=${updateId}`
     });
     return { kind: "delivering", offerContractId, updateId };
   } catch (e) {
@@ -263,13 +301,20 @@ export async function startDelivery(
     // createOffer either fully succeeded (we'd have returned above) or fully
     // failed here, so it's safe to revert to seen and retry cleanly.
     await store.claimStatus(orderId, "delivering", "seen", {
-      note: `offer creation failed, released for retry: ${errMsg(e)}`,
+      note: `offer creation failed, released for retry: ${errMsg(e)}`
     });
-    return { kind: "skipped", reason: `offer creation failed (will retry): ${errMsg(e)}` };
+    return {
+      kind: "skipped",
+      reason: `offer creation failed (will retry): ${errMsg(e)}`
+    };
   }
 }
 
-async function fail(store: OrderStore, orderId: Hex, reason: string): Promise<DeliveryOutcome> {
+async function fail(
+  store: OrderStore,
+  orderId: Hex,
+  reason: string
+): Promise<DeliveryOutcome> {
   await store.update(orderId, { status: "failed", note: reason });
   return { kind: "failed", reason };
 }
@@ -282,7 +327,7 @@ function errMsg(e: unknown): string {
 export async function deliverSeenOrders(
   store: OrderStore,
   canton: CantonClient,
-  params: DeliveryParams,
+  params: DeliveryParams
 ): Promise<{ order: OrderRecord; outcome: DeliveryOutcome }[]> {
   const results: { order: OrderRecord; outcome: DeliveryOutcome }[] = [];
   for (const rec of await store.byStatus("seen")) {

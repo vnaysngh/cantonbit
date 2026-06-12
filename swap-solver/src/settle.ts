@@ -1,7 +1,7 @@
 /**
  * Settle leg (Task 8) — release the locked WBTC for a `delivered` order.
  *
- * For each `delivered` order (cBTC already accepted by the user on Canton, with
+ * For each `delivered` order (CBTC already accepted by the user on Canton, with
  * a captured fillTimestamp): compute the payloadHash, `attest()` it on our
  * oracle, then `finalise()` on the escrow to pull the WBTC to the solver.
  * Transitions: delivered → attested → finalised.
@@ -25,7 +25,7 @@ import {
   getContract,
   type Account,
   type Address,
-  type Hex,
+  type Hex
 } from "viem";
 
 import { ESCROW_ABI, ORACLE_ABI, ORDER_STATUS } from "./abi.js";
@@ -69,7 +69,10 @@ export class Settler {
   constructor(cfg: SettleConfig) {
     this.cfg = cfg;
     this.pub = createPublicClient({ transport: http(cfg.rpcUrl) });
-    this.wallet = createWalletClient({ account: cfg.account, transport: http(cfg.rpcUrl) });
+    this.wallet = createWalletClient({
+      account: cfg.account,
+      transport: http(cfg.rpcUrl)
+    });
   }
 
   /** The solver's identity (hashed into the proof) = the agent address as bytes32. */
@@ -78,9 +81,9 @@ export class Settler {
   }
 
   /**
-   * PRE-FLIGHT (called BEFORE delivering cBTC): is the WBTC collection guaranteed
-   * to succeed? If yes, delivering the cBTC is safe — both legs will complete
-   * together (never user-gets-cBTC-but-we-lose-WBTC). Checks the two conditions
+   * PRE-FLIGHT (called BEFORE delivering CBTC): is the WBTC collection guaranteed
+   * to succeed? If yes, delivering the CBTC is safe — both legs will complete
+   * together (never user-gets-CBTC-but-we-lose-WBTC). Checks the two conditions
    * that make a later finalise() unfailable:
    *   1. the order's WBTC is DEPOSITED in escrow on-chain (locked & claimable), and
    *   2. there's comfortable margin before `expires` (so finalise can't lose a
@@ -93,20 +96,30 @@ export class Settler {
     orderId: Hex,
     expires: number,
     nowSeconds: number,
-    minMarginSeconds: number,
+    minMarginSeconds: number
   ): Promise<{ ok: true } | { ok: false; reason: string }> {
     // 2. time margin — finalise must run well before the refund window opens.
     if (nowSeconds + minMarginSeconds >= expires) {
-      return { ok: false, reason: `too close to expiry: ${expires - nowSeconds}s left (need > ${minMarginSeconds}s)` };
+      return {
+        ok: false,
+        reason: `too close to expiry: ${expires - nowSeconds}s left (need > ${minMarginSeconds}s)`
+      };
     }
     // 1. WBTC must be DEPOSITED (locked & claimable) in the escrow.
     try {
-      const escrow = getContract({ address: this.cfg.escrow, abi: ESCROW_ABI, client: { public: this.pub, wallet: this.wallet } });
+      const escrow = getContract({
+        address: this.cfg.escrow,
+        abi: ESCROW_ABI,
+        client: { public: this.pub, wallet: this.wallet }
+      });
       const status = Number(await escrow.read.orderStatus([orderId]));
       // enum OrderStatus { None, Deposited, Claimed, Refunded }
       if (status !== 1 /* Deposited */) {
         const names = ["None", "Deposited", "Claimed", "Refunded"];
-        return { ok: false, reason: `WBTC not claimable: escrow status is ${names[status] ?? status} (need Deposited)` };
+        return {
+          ok: false,
+          reason: `WBTC not claimable: escrow status is ${names[status] ?? status} (need Deposited)`
+        };
       }
     } catch (e) {
       return { ok: false, reason: `couldn't read escrow status: ${errMsg(e)}` };
@@ -128,7 +141,10 @@ export class Settler {
     const rec = await store.get(orderId);
     if (!rec) return { kind: "failed", reason: "order not found" };
     if (rec.status !== "delivered" && rec.status !== "attested") {
-      return { kind: "skipped", reason: `status '${rec.status}' is not delivered/attested` };
+      return {
+        kind: "skipped",
+        reason: `status '${rec.status}' is not delivered/attested`
+      };
     }
     if (rec.fillTimestamp == null) {
       return await fail(store, orderId, "delivered order has no fillTimestamp");
@@ -141,18 +157,28 @@ export class Settler {
     // GAS PRE-FLIGHT (CoW solver native-token guard, settlement.rs:84-136): if the
     // agent hot key lacks the ETH to pay for attest+finalise, SKIP rather than
     // start and strand the order half-settled. Skipped (not failed) so the next
-    // tick retries once the key is topped up. The cBTC is already delivered; we
+    // tick retries once the key is topped up. The CBTC is already delivered; we
     // just defer pulling the WBTC until we can afford the gas.
     if (this.cfg.minEthForGasWei && this.cfg.minEthForGasWei > 0n) {
       let agentEth: bigint;
       try {
-        agentEth = await this.pub.getBalance({ address: this.cfg.account.address });
+        agentEth = await this.pub.getBalance({
+          address: this.cfg.account.address
+        });
       } catch (e) {
-        return { kind: "skipped", reason: `agent balance read failed (transient): ${e instanceof Error ? e.message : e}` };
+        return {
+          kind: "skipped",
+          reason: `agent balance read failed (transient): ${e instanceof Error ? e.message : e}`
+        };
       }
       if (agentEth < this.cfg.minEthForGasWei) {
-        console.warn(`[settle] agent ETH ${agentEth} < min ${this.cfg.minEthForGasWei} wei — deferring settlement of ${orderId.slice(0, 12)}… (top up the hot key)`);
-        return { kind: "skipped", reason: `agent ETH too low for gas: ${agentEth} < ${this.cfg.minEthForGasWei} wei` };
+        console.warn(
+          `[settle] agent ETH ${agentEth} < min ${this.cfg.minEthForGasWei} wei — deferring settlement of ${orderId.slice(0, 12)}… (top up the hot key)`
+        );
+        return {
+          kind: "skipped",
+          reason: `agent ETH too low for gas: ${agentEth} < ${this.cfg.minEthForGasWei} wei`
+        };
       }
     }
 
@@ -162,13 +188,25 @@ export class Settler {
     // Defensive: fillTimestamp must still be <= fillDeadline (7b already checked,
     // but re-check before spending gas).
     if (fillTs > order.fillDeadline) {
-      return await fail(store, orderId, `fillTimestamp ${fillTs} > fillDeadline ${order.fillDeadline}`);
+      return await fail(
+        store,
+        orderId,
+        `fillTimestamp ${fillTs} > fillDeadline ${order.fillDeadline}`
+      );
     }
 
     const dataHash = fillDescriptionHash(solverId, orderId, fillTs, output);
 
-    const oracle = getContract({ address: this.cfg.oracle, abi: ORACLE_ABI, client: { public: this.pub, wallet: this.wallet } });
-    const escrow = getContract({ address: this.cfg.escrow, abi: ESCROW_ABI, client: { public: this.pub, wallet: this.wallet } });
+    const oracle = getContract({
+      address: this.cfg.oracle,
+      abi: ORACLE_ABI,
+      client: { public: this.pub, wallet: this.wallet }
+    });
+    const escrow = getContract({
+      address: this.cfg.escrow,
+      abi: ESCROW_ABI,
+      client: { public: this.pub, wallet: this.wallet }
+    });
 
     // --- 1. attest (idempotent) ---
     let attestTxHash = rec.attestTxHash;
@@ -176,19 +214,22 @@ export class Settler {
       output.chainId,
       output.oracle,
       output.settler,
-      dataHash,
+      dataHash
     ])) as boolean;
 
     if (!alreadyProven) {
       try {
         attestTxHash = await oracle.write.attest(
           [output.chainId, output.oracle, output.settler, dataHash],
-          { account: this.cfg.account, chain: null },
+          { account: this.cfg.account, chain: null }
         );
         await this.pub.waitForTransactionReceipt({ hash: attestTxHash });
         await store.update(orderId, { status: "attested", attestTxHash });
       } catch (e) {
-        return { kind: "skipped", reason: `attest failed (will retry): ${errMsg(e)}` };
+        return {
+          kind: "skipped",
+          reason: `attest failed (will retry): ${errMsg(e)}`
+        };
       }
     } else if (rec.status === "delivered") {
       await store.update(orderId, { status: "attested", attestTxHash });
@@ -198,8 +239,15 @@ export class Settler {
     // Skip if already Claimed on-chain (crash-safe re-run).
     const status = (await escrow.read.orderStatus([orderId])) as number;
     if (status === ORDER_STATUS.Claimed) {
-      await store.update(orderId, { status: "finalised", note: "already claimed on-chain" });
-      return { kind: "finalised", attestTxHash, finaliseTxHash: rec.finaliseTxHash };
+      await store.update(orderId, {
+        status: "finalised",
+        note: "already claimed on-chain"
+      });
+      return {
+        kind: "finalised",
+        attestTxHash,
+        finaliseTxHash: rec.finaliseTxHash
+      };
     }
 
     try {
@@ -209,22 +257,33 @@ export class Settler {
       const destination = this.destinationId();
       const finaliseTxHash = await escrow.write.finalise(
         [orderToTuple(order), solveParams, destination, "0x"],
-        { account: this.cfg.account, chain: null },
+        { account: this.cfg.account, chain: null }
       );
       await this.pub.waitForTransactionReceipt({ hash: finaliseTxHash });
       await store.update(orderId, { status: "finalised", finaliseTxHash });
       return { kind: "finalised", attestTxHash, finaliseTxHash };
     } catch (e) {
-      return { kind: "skipped", reason: `finalise failed (will retry): ${errMsg(e)}` };
+      return {
+        kind: "skipped",
+        reason: `finalise failed (will retry): ${errMsg(e)}`
+      };
     }
   }
 
   /** Process all settleable (delivered/attested) orders once. */
-  async settleReady(store: OrderStore): Promise<{ orderId: Hex; outcome: SettleOutcome }[]> {
+  async settleReady(
+    store: OrderStore
+  ): Promise<{ orderId: Hex; outcome: SettleOutcome }[]> {
     const out: { orderId: Hex; outcome: SettleOutcome }[] = [];
-    const _ready = [...(await store.byStatus("delivered")), ...(await store.byStatus("attested"))];
+    const _ready = [
+      ...(await store.byStatus("delivered")),
+      ...(await store.byStatus("attested"))
+    ];
     for (const rec of _ready) {
-      out.push({ orderId: rec.orderId, outcome: await this.settleOne(store, rec.orderId) });
+      out.push({
+        orderId: rec.orderId,
+        outcome: await this.settleOne(store, rec.orderId)
+      });
     }
     return out;
   }
@@ -235,7 +294,11 @@ function orderToTuple(o: ReturnType<typeof deserializeOrder>) {
   return o;
 }
 
-async function fail(store: OrderStore, orderId: Hex, reason: string): Promise<SettleOutcome> {
+async function fail(
+  store: OrderStore,
+  orderId: Hex,
+  reason: string
+): Promise<SettleOutcome> {
   await store.update(orderId, { status: "failed", note: reason });
   return { kind: "failed", reason };
 }

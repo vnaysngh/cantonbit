@@ -1,5 +1,5 @@
 /**
- * POST /api/htlc/{id}/refund-counter — refund the locked cBTC (Cancore "Refund").
+ * POST /api/htlc/{id}/refund-counter — refund the locked CBTC (Cancore "Refund").
  * After the Canton timelock, the solver withdraws via HtlcLock.Refund →
  * Allocation_Withdraw (backend signs as locker). Only valid after solverTimelock.
  */
@@ -7,7 +7,10 @@ import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
 import { requireDaemon } from "@/lib/htlc-auth";
 
-export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function POST(
+  req: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
   const { id } = await params;
   try {
     const auth = requireDaemon(req);

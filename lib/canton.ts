@@ -9,7 +9,7 @@ import type {
   Holding,
   SubmitAndWaitRequest,
   TransactionTree,
-  Transfer,
+  Transfer
 } from "./types";
 
 const APPLICATION_ID = "cbtc-app";
@@ -32,7 +32,7 @@ const TAG = "[canton]";
 
 async function ledgerFetch<T>(
   path: string,
-  init: RequestInit & { jsonBody?: unknown },
+  init: RequestInit & { jsonBody?: unknown }
 ): Promise<T> {
   const jwt = await getLedgerJwt();
   const url = `${NETWORK.ledgerHost}${path}`;
@@ -48,7 +48,9 @@ async function ledgerFetch<T>(
   if (init.jsonBody !== undefined) {
     const bodyStr = JSON.stringify(init.jsonBody);
     // Log full body for small payloads, truncate large ones (blobs)
-    console.log(`${TAG} request body (${bodyStr.length} chars): ${bodyStr.length > 2000 ? bodyStr.slice(0, 2000) + "...[truncated]" : bodyStr}`);
+    console.log(
+      `${TAG} request body (${bodyStr.length} chars): ${bodyStr.length > 2000 ? bodyStr.slice(0, 2000) + "...[truncated]" : bodyStr}`
+    );
   }
 
   const res = await fetch(url, {
@@ -56,22 +58,26 @@ async function ledgerFetch<T>(
     headers,
     body:
       init.jsonBody !== undefined ? JSON.stringify(init.jsonBody) : init.body,
-    cache: "no-store",
+    cache: "no-store"
   });
 
   console.log(`${TAG} response status=${res.status} url=${url}`);
 
   if (!res.ok) {
     const text = await res.text().catch(() => "<no body>");
-    console.error(`${TAG} ERROR ${method} ${path} status=${res.status} body=${text}`);
+    console.error(
+      `${TAG} ERROR ${method} ${path} status=${res.status} body=${text}`
+    );
     throw new Error(
-      `Canton ${method} ${path} failed (${res.status} ${res.statusText}): ${text}`,
+      `Canton ${method} ${path} failed (${res.status} ${res.statusText}): ${text}`
     );
   }
 
   const data = (await res.json()) as T;
   const dataStr = JSON.stringify(data);
-  console.log(`${TAG} response body (${dataStr.length} chars): ${dataStr.length > 2000 ? dataStr.slice(0, 2000) + "...[truncated]" : dataStr}`);
+  console.log(
+    `${TAG} response body (${dataStr.length} chars): ${dataStr.length > 2000 ? dataStr.slice(0, 2000) + "...[truncated]" : dataStr}`
+  );
   return data;
 }
 
@@ -91,7 +97,7 @@ interface LedgerEndResponse {
 export async function getLedgerEnd(): Promise<number> {
   console.log(`${TAG} getLedgerEnd network=${NETWORK.name}`);
   const data = await ledgerFetch<LedgerEndResponse>("/v2/state/ledger-end", {
-    method: "GET",
+    method: "GET"
   });
   console.log(`${TAG} getLedgerEnd offset=${data.offset}`);
   return data.offset;
@@ -106,9 +112,26 @@ interface ActiveContractsRequest {
       {
         cumulative: Array<{
           identifierFilter:
-            | { InterfaceFilter: { value: { interfaceId: string; includeInterfaceView: boolean; includeCreatedEventBlob: boolean } } }
-            | { TemplateFilter: { value: { templateId: string; includeCreatedEventBlob: boolean } } }
-            | { WildcardFilter: { value: { includeCreatedEventBlob: boolean } } };
+            | {
+                InterfaceFilter: {
+                  value: {
+                    interfaceId: string;
+                    includeInterfaceView: boolean;
+                    includeCreatedEventBlob: boolean;
+                  };
+                };
+              }
+            | {
+                TemplateFilter: {
+                  value: {
+                    templateId: string;
+                    includeCreatedEventBlob: boolean;
+                  };
+                };
+              }
+            | {
+                WildcardFilter: { value: { includeCreatedEventBlob: boolean } };
+              };
         }>;
       }
     >;
@@ -174,7 +197,7 @@ function unwrapContracts(resp: ActiveContractsResponse): JsActiveContract[] {
 function buildInterfaceFilterRequest(
   partyId: string,
   interfaceId: string,
-  activeAtOffset: number,
+  activeAtOffset: number
 ): ActiveContractsRequest {
   // Query as the actual party — the m2m JWT has authority over warpx + all cbtc-user parties.
   // Contracts owned by a cbtc-user party are NOT visible to warpx (different witness sets),
@@ -190,23 +213,23 @@ function buildInterfaceFilterRequest(
                   value: {
                     interfaceId,
                     includeInterfaceView: true,
-                    includeCreatedEventBlob: true,
-                  },
-                },
-              },
-            },
-          ],
-        },
-      },
+                    includeCreatedEventBlob: true
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
     },
     verbose: false,
-    activeAtOffset,
+    activeAtOffset
   };
 }
 
 function pickInterfaceView<T>(
   event: JsCreatedEvent,
-  interfaceId: string,
+  interfaceId: string
 ): T | null {
   // The interfaceId we send uses package-name form (#splice-api-token-holding-v1:Foo:Bar),
   // but the ledger response uses package-hash form (abc123...:Foo:Bar).
@@ -229,12 +252,12 @@ export async function getHoldings(partyId: string): Promise<Holding[]> {
   const body = buildInterfaceFilterRequest(
     partyId,
     HOLDING_INTERFACE_ID,
-    activeAtOffset,
+    activeAtOffset
   );
 
   const resp = await ledgerFetch<ActiveContractsResponse>(
     "/v2/state/active-contracts",
-    { method: "POST", jsonBody: body },
+    { method: "POST", jsonBody: body }
   );
 
   const allEntries = unwrapContracts(resp);
@@ -245,92 +268,124 @@ export async function getHoldings(partyId: string): Promise<Holding[]> {
     const ev = entry.JsActiveContract.createdEvent;
     const payload = pickInterfaceView<Holding["payload"]>(
       ev,
-      HOLDING_INTERFACE_ID,
+      HOLDING_INTERFACE_ID
     );
     if (!payload) {
-      console.log(`${TAG} getHoldings skipping contractId=${ev.contractId} (no interface view)`);
+      console.log(
+        `${TAG} getHoldings skipping contractId=${ev.contractId} (no interface view)`
+      );
       continue;
     }
     // Filter to only holdings owned by the requested party
     if (payload.owner !== partyId) {
-      console.log(`${TAG} getHoldings skipping contractId=${ev.contractId} owner=${String(payload.owner).slice(0,30)}... (not our party)`);
+      console.log(
+        `${TAG} getHoldings skipping contractId=${ev.contractId} owner=${String(payload.owner).slice(0, 30)}... (not our party)`
+      );
       continue;
     }
-    // Filter to only the cBTC instrument. The party also holds CC/Amulet
+    // Filter to only the CBTC instrument. The party also holds CC/Amulet
     // (admin=DSO::…, id=Amulet) which implements the same Holding interface — but
-    // it is NOT cBTC, and feeding it to the cBTC TransferFactory makes the
+    // it is NOT CBTC, and feeding it to the CBTC TransferFactory makes the
     // registry reject the inputs ("Given holdings are invalid").
-    const inst = (payload as { instrumentId?: { admin?: string; id?: string } }).instrumentId;
-    if (!inst || inst.admin !== NETWORK.instrumentId.admin || inst.id !== NETWORK.instrumentId.id) {
-      console.log(`${TAG} getHoldings skipping contractId=${ev.contractId} instrument=${inst?.admin?.slice(0,12)}…/${inst?.id} (not cBTC)`);
+    const inst = (payload as { instrumentId?: { admin?: string; id?: string } })
+      .instrumentId;
+    if (
+      !inst ||
+      inst.admin !== NETWORK.instrumentId.admin ||
+      inst.id !== NETWORK.instrumentId.id
+    ) {
+      console.log(
+        `${TAG} getHoldings skipping contractId=${ev.contractId} instrument=${inst?.admin?.slice(0, 12)}…/${inst?.id} (not CBTC)`
+      );
       continue;
     }
     // Skip LOCKED holdings — the registry rejects a locked holding as an input
     // ("Given holdings are invalid"). A lock with no/future expiry = locked; a
     // past expiresAt = spendable again. (Mirrors the solver's isActivelyLocked.)
-    const lock = payload.lock as { expiresAt?: string | null; expiresAfter?: string | null } | null | undefined;
+    const lock = payload.lock as
+      | { expiresAt?: string | null; expiresAfter?: string | null }
+      | null
+      | undefined;
     if (lock != null) {
       const nowIso = new Date().toISOString();
       const locked = lock.expiresAt ? lock.expiresAt > nowIso : true; // expiresAfter/indefinite → locked
       if (locked) {
-        console.log(`${TAG} getHoldings skipping contractId=${ev.contractId} (locked)`);
+        console.log(
+          `${TAG} getHoldings skipping contractId=${ev.contractId} (locked)`
+        );
         continue;
       }
     }
     const p = payload as unknown as Record<string, unknown>;
-    console.log(`${TAG} getHoldings including contractId=${ev.contractId} owner=${String(payload.owner).slice(0,30)}... amount=${JSON.stringify(p.amount ?? p.quantity ?? "?")}`);
+    console.log(
+      `${TAG} getHoldings including contractId=${ev.contractId} owner=${String(payload.owner).slice(0, 30)}... amount=${JSON.stringify(p.amount ?? p.quantity ?? "?")}`
+    );
     out.push({
       contractId: ev.contractId,
       payload,
-      createdEventBlob: ev.createdEventBlob,
+      createdEventBlob: ev.createdEventBlob
     });
   }
-  console.log(`${TAG} getHoldings returning ${out.length} holdings for partyId=${partyId.slice(0,40)}...`);
+  console.log(
+    `${TAG} getHoldings returning ${out.length} holdings for partyId=${partyId.slice(0, 40)}...`
+  );
   return out;
 }
 
 /** POST /v2/state/active-contracts filtered to TransferInstruction interface. */
-export async function getPendingTransfers(partyId: string): Promise<Transfer[]> {
+export async function getPendingTransfers(
+  partyId: string
+): Promise<Transfer[]> {
   console.log(`${TAG} getPendingTransfers partyId=${partyId.slice(0, 40)}...`);
   const activeAtOffset = await getLedgerEnd();
   console.log(`${TAG} getPendingTransfers activeAtOffset=${activeAtOffset}`);
   const body = buildInterfaceFilterRequest(
     partyId,
     TRANSFER_INSTRUCTION_INTERFACE_ID,
-    activeAtOffset,
+    activeAtOffset
   );
 
   const resp = await ledgerFetch<ActiveContractsResponse>(
     "/v2/state/active-contracts",
-    { method: "POST", jsonBody: body },
+    { method: "POST", jsonBody: body }
   );
 
   const allEntries = unwrapContracts(resp);
-  console.log(`${TAG} getPendingTransfers raw entries count=${allEntries.length}`);
+  console.log(
+    `${TAG} getPendingTransfers raw entries count=${allEntries.length}`
+  );
 
   const out: Transfer[] = [];
   for (const entry of allEntries) {
     const ev = entry.JsActiveContract.createdEvent;
     const payload = pickInterfaceView<Transfer["payload"]>(
       ev,
-      TRANSFER_INSTRUCTION_INTERFACE_ID,
+      TRANSFER_INSTRUCTION_INTERFACE_ID
     );
     if (!payload) {
-      console.log(`${TAG} getPendingTransfers skipping contractId=${ev.contractId} (no interface view)`);
+      console.log(
+        `${TAG} getPendingTransfers skipping contractId=${ev.contractId} (no interface view)`
+      );
       continue;
     }
     if (payload.receiver !== partyId) {
-      console.log(`${TAG} getPendingTransfers skipping contractId=${ev.contractId} receiver=${String(payload.receiver).slice(0,30)}... (not our party)`);
+      console.log(
+        `${TAG} getPendingTransfers skipping contractId=${ev.contractId} receiver=${String(payload.receiver).slice(0, 30)}... (not our party)`
+      );
       continue;
     }
-    console.log(`${TAG} getPendingTransfers including contractId=${ev.contractId}`);
+    console.log(
+      `${TAG} getPendingTransfers including contractId=${ev.contractId}`
+    );
     out.push({
       contractId: ev.contractId,
       payload,
-      createdEventBlob: ev.createdEventBlob,
+      createdEventBlob: ev.createdEventBlob
     });
   }
-  console.log(`${TAG} getPendingTransfers returning ${out.length} transfers for partyId=${partyId.slice(0,40)}...`);
+  console.log(
+    `${TAG} getPendingTransfers returning ${out.length} transfers for partyId=${partyId.slice(0, 40)}...`
+  );
   return out;
 }
 
@@ -352,7 +407,7 @@ export async function submitCommand(
     disclosedContracts?: SubmitAndWaitRequest["disclosedContracts"];
     commandId?: string;
     workflowId?: string;
-  },
+  }
 ): Promise<TransactionTree> {
   const body: SubmitAndWaitRequest = {
     commands: [command],
@@ -361,12 +416,12 @@ export async function submitCommand(
     workflowId: opts.workflowId ?? `cbtc-${randomUUID()}`,
     actAs: opts.actAs,
     readAs: opts.readAs,
-    disclosedContracts: opts.disclosedContracts,
+    disclosedContracts: opts.disclosedContracts
   };
 
   return ledgerFetch<TransactionTree>(
     "/v2/commands/submit-and-wait-for-transaction-tree",
-    { method: "POST", jsonBody: body },
+    { method: "POST", jsonBody: body }
   );
 }
 
@@ -376,5 +431,5 @@ export const CantonTemplateIds = {
   transferFactory: TRANSFER_FACTORY_TEMPLATE_ID,
   transferInstruction: TRANSFER_INSTRUCTION_TEMPLATE_ID,
   holdingInterface: HOLDING_INTERFACE_ID,
-  transferInstructionInterface: TRANSFER_INSTRUCTION_INTERFACE_ID,
+  transferInstructionInterface: TRANSFER_INSTRUCTION_INTERFACE_ID
 } as const;

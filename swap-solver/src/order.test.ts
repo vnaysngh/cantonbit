@@ -23,7 +23,7 @@ import {
   toIdentifier,
   cantonPartyToRecipient,
   verifyCantonParty,
-  type SwapRequest,
+  type SwapRequest
 } from "./order.js";
 import { randomNonce } from "./api.js";
 
@@ -39,7 +39,7 @@ function cfg() {
     originChainId: 84532, // base sepolia
     escrow: ESCROW,
     oracle: ORACLE,
-    wbtc: WBTC,
+    wbtc: WBTC
   });
 }
 
@@ -50,7 +50,7 @@ function req(): SwapRequest {
     cbtcAmount: 5_00_000_000n,
     cantonParty: "cbtc-user-test::1220abcdef0123456789",
     cbtcToken: pad("0xc87c", { size: 32 }) as Hex,
-    nonce: 1n,
+    nonce: 1n
   };
 }
 
@@ -62,16 +62,27 @@ test("FEE: the fee-reduced cbtcAmount is bound into output.amount (the signed or
   // fee can't be bypassed: what the user signs == what is delivered == cbtcAmount.
   const feeBps = 20;
   const wbtcAmount = 1_00_000_000n; // 1 WBTC
-  const cbtcAmount = (wbtcAmount * BigInt(10000 - feeBps)) / 10000n; // 0.998 cBTC
+  const cbtcAmount = (wbtcAmount * BigInt(10000 - feeBps)) / 10000n; // 0.998 CBTC
   const built = buildOrder(cfg(), { ...req(), wbtcAmount, cbtcAmount }, NOW);
-  // output.amount IS the fee-reduced cBTC the user signs and the solver delivers.
-  assert.equal(BigInt(built.output.amount), cbtcAmount, "output.amount must equal the fee-reduced cbtcAmount");
+  // output.amount IS the fee-reduced CBTC the user signs and the solver delivers.
+  assert.equal(
+    BigInt(built.output.amount),
+    cbtcAmount,
+    "output.amount must equal the fee-reduced cbtcAmount"
+  );
   // The input WBTC is the gross amount (the solver collects this).
-  assert.equal(BigInt(built.order.inputs[0]![1]), wbtcAmount, "input WBTC is the gross amount");
+  assert.equal(
+    BigInt(built.order.inputs[0]![1]),
+    wbtcAmount,
+    "input WBTC is the gross amount"
+  );
   // Fee = collected − delivered, and the solver NEVER overpays (delivered <= collected).
   const fee = wbtcAmount - cbtcAmount;
   assert.equal(fee, 200_000n, "0.2% of 1 WBTC = 0.002 BTC fee");
-  assert.ok(cbtcAmount <= wbtcAmount, "solver must never deliver more than it collects");
+  assert.ok(
+    cbtcAmount <= wbtcAmount,
+    "solver must never deliver more than it collects"
+  );
 });
 
 test("NONCE: randomNonce is unique and full-width (no same-second collision)", () => {
@@ -90,7 +101,10 @@ test("NONCE: randomNonce is unique and full-width (no same-second collision)", (
   assert.equal(seen.size, N, "all nonces must be distinct");
   // uint256 capacity: nonce must be able to use the high bits (proves we didn't
   // accidentally cap it at a small width like a timestamp).
-  assert.ok(maxBits > 200, `nonce should span the uint256 range, got max ${maxBits} bits`);
+  assert.ok(
+    maxBits > 200,
+    `nonce should span the uint256 range, got max ${maxBits} bits`
+  );
 });
 
 test("NONCE: two orders with identical params get DIFFERENT orderIds (CoW parity)", () => {
@@ -101,7 +115,11 @@ test("NONCE: two orders with identical params get DIFFERENT orderIds (CoW parity
   const base = req();
   const a = buildOrder(cfg(), { ...base, nonce: randomNonce() }, NOW);
   const b = buildOrder(cfg(), { ...base, nonce: randomNonce() }, NOW);
-  assert.notEqual(a.orderId, b.orderId, "identical-param orders must get distinct orderIds");
+  assert.notEqual(
+    a.orderId,
+    b.orderId,
+    "identical-param orders must get distinct orderIds"
+  );
   // Sanity: the ONLY difference is the nonce.
   assert.notEqual(a.order.nonce, b.order.nonce);
   assert.equal(a.order.user, b.order.user);
@@ -116,7 +134,10 @@ test("inputOracle equals output.oracle id (the core invariant)", () => {
   // the hex casing may differ from the raw fixture while the BYTES are equal.
   assert.equal(built.order.inputOracle.toLowerCase(), ORACLE.toLowerCase());
   assert.equal(built.output.oracle, oracleId(c));
-  assert.equal(built.output.oracle.toLowerCase(), pad(ORACLE, { size: 32 }).toLowerCase());
+  assert.equal(
+    built.output.oracle.toLowerCase(),
+    pad(ORACLE, { size: 32 }).toLowerCase()
+  );
 });
 
 test("attestTuple mirrors the output exactly", () => {
@@ -147,22 +168,28 @@ test("INVARIANT: fill window comfortably exceeds the solver delivery margin", ()
   const fillWindow = built.order.fillDeadline - NOW;
   assert.ok(
     fillWindow > DELIVERY_MARGIN_SECONDS,
-    `fill window ${fillWindow}s must exceed delivery margin ${DELIVERY_MARGIN_SECONDS}s`,
+    `fill window ${fillWindow}s must exceed delivery margin ${DELIVERY_MARGIN_SECONDS}s`
   );
   // Keep healthy slack (margin <= fill/3) so brief solver downtime can't make
   // orders unfillable.
   assert.ok(
     DELIVERY_MARGIN_SECONDS <= fillWindow / 3,
-    `delivery margin ${DELIVERY_MARGIN_SECONDS}s should be <= fill window / 3 (${fillWindow / 3}s)`,
+    `delivery margin ${DELIVERY_MARGIN_SECONDS}s should be <= fill window / 3 (${fillWindow / 3}s)`
   );
 });
 
 test("canton chainId is a high non-colliding sentinel, per-network distinct", () => {
   const tn = buildOrder(cfg(), req(), NOW).output.chainId;
   const mn = buildOrder(
-    makeNetworkConfig({ network: "mainnet", originChainId: 8453, escrow: ESCROW, oracle: ORACLE, wbtc: WBTC }),
+    makeNetworkConfig({
+      network: "mainnet",
+      originChainId: 8453,
+      escrow: ESCROW,
+      oracle: ORACLE,
+      wbtc: WBTC
+    }),
     req(),
-    NOW,
+    NOW
   ).output.chainId;
   assert.ok(tn > 1_000_000_000_000_000n);
   assert.notEqual(tn, mn); // a proof for testnet can't satisfy mainnet
@@ -179,13 +206,18 @@ test("proofDataHash is deterministic for the same inputs", () => {
   const built = buildOrder(cfg(), req(), NOW);
   const solverId = toIdentifier(SOLVER);
   const ts = built.order.fillDeadline - 10;
-  assert.equal(proofDataHash(built, solverId, ts), proofDataHash(built, solverId, ts));
+  assert.equal(
+    proofDataHash(built, solverId, ts),
+    proofDataHash(built, solverId, ts)
+  );
 });
 
 test("proofDataHash rejects a timestamp past the fillDeadline", () => {
   const built = buildOrder(cfg(), req(), NOW);
   const solverId = toIdentifier(SOLVER);
-  assert.throws(() => proofDataHash(built, solverId, built.order.fillDeadline + 1));
+  assert.throws(() =>
+    proofDataHash(built, solverId, built.order.fillDeadline + 1)
+  );
 });
 
 test("different fill timestamps produce different payload hashes", () => {
@@ -204,7 +236,9 @@ test("recipient = keccak256(cantonParty), and verify round-trips", () => {
   assert.equal(built.cantonParty, party);
   // verify accepts the real party, rejects any other.
   assert.ok(verifyCantonParty(party, built.output.recipient));
-  assert.ok(!verifyCantonParty("cbtc-user-evil::1220ffff", built.output.recipient));
+  assert.ok(
+    !verifyCantonParty("cbtc-user-evil::1220ffff", built.output.recipient)
+  );
 });
 
 test("config accepts mixed-case (checksummed) addresses without throwing", () => {
@@ -214,7 +248,7 @@ test("config accepts mixed-case (checksummed) addresses without throwing", () =>
     originChainId: 84532,
     escrow: "0x5FbDB2315678afecb367f032d93F642f64180aa3",
     oracle: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
-    wbtc: "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+    wbtc: "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0"
   });
   // building an order must not throw (encodePacked would reject bad checksums).
   const built = buildOrder(checksummed, req(), NOW);

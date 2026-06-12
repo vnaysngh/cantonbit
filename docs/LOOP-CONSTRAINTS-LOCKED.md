@@ -10,9 +10,9 @@ re-investigate, do not run another probe to "confirm," do not ask the user again
 **LOOP CANNOT AND WILL NEVER VET OUR DAR. PERIOD.**
 
 > "the package can't currently be vetted on Loop's participant. The Loop SDK only
->  supports DAML transactions from the built-in Splice DARs and the Utility app
->  DARs. There is no third-party DAR upload, and no current plan to support it.
->  So a Loop user cannot exercise Claim on cbtc-htlc today, full stop."
+> supports DAML transactions from the built-in Splice DARs and the Utility app
+> DARs. There is no third-party DAR upload, and no current plan to support it.
+> So a Loop user cannot exercise Claim on cbtc-htlc today, full stop."
 
 ### What this rule MEANS in practice (all proven on-node, do not re-test):
 
@@ -29,7 +29,7 @@ re-investigate, do not run another probe to "confirm," do not ask the user again
 3. **Disclosure does NOT help.** createdEventBlob + synchronizerId solves VISIBILITY,
    not INTERPRETATION. Disclosure cannot route around vetting. Do not propose it.
 
-4. The cBTC registry's concrete `DvpLegAllocation` requires BOTH executor AND receiver
+4. The CBTC registry's concrete `DvpLegAllocation` requires BOTH executor AND receiver
    to authorize `Allocation_ExecuteTransfer`. For a cross-participant Loop receiver our
    node CANNOT supply the receiver authority. (Error: `DAML_AUTHORIZATION_ERROR`,
    proven 2026-06-11 with probe-xparticipant-execute.mts.)
@@ -37,20 +37,20 @@ re-investigate, do not run another probe to "confirm," do not ask the user again
 ## THE ONLY DESIGN THAT WORKS (Loop team's Option 1 — BUILD EXACTLY THIS)
 
 > "Restructure so the Loop user only exercises standard choices. Keep the HTLC logic
->  on your participant: your party is the controller of the custom choices, and the
->  Loop user's role is reduced to standard CIP-56 transfer/allocation steps the Loop
->  user accepts in their wallet. The secret-reveal/claim logic executes on your node;
->  the Loop user signs only what's in the installed DARs."
+> on your participant: your party is the controller of the custom choices, and the
+> Loop user's role is reduced to standard CIP-56 transfer/allocation steps the Loop
+> user accepts in their wallet. The secret-reveal/claim logic executes on your node;
+> the Loop user signs only what's in the installed DARs."
 
-Concretely, for EVM→Canton (Loop user receives cBTC):
+Concretely, for EVM→Canton (Loop user receives CBTC):
 
-| Step | Who | What | Package |
-|------|-----|------|---------|
-| 1 | Loop user | Lock WBTC on EVM | standard (MetaMask) |
-| 2 | OUR node | keccak gate + reveal preimage (LoopHtlcGate.RevealPreimage) | OUR DAR, **only our party on it** |
-| 3 | OUR node | Send cBTC via a **STANDARD** TransferFactory_Transfer | standard Splice |
-| 4 | Loop user | **Accept** the cBTC (standard TransferInstruction_Accept) | standard Splice, on their node |
-| 5 | OUR node | Claim WBTC on EVM with the revealed secret | our solver |
+| Step | Who       | What                                                        | Package                           |
+| ---- | --------- | ----------------------------------------------------------- | --------------------------------- |
+| 1    | Loop user | Lock WBTC on EVM                                            | standard (MetaMask)               |
+| 2    | OUR node  | keccak gate + reveal preimage (LoopHtlcGate.RevealPreimage) | OUR DAR, **only our party on it** |
+| 3    | OUR node  | Send CBTC via a **STANDARD** TransferFactory_Transfer       | standard Splice                   |
+| 4    | Loop user | **Accept** the CBTC (standard TransferInstruction_Accept)   | standard Splice, on their node    |
+| 5    | OUR node  | Claim WBTC on EVM with the revealed secret                  | our solver                        |
 
 ### HARD INVARIANTS (violating any = back to the wall):
 
@@ -63,16 +63,16 @@ Concretely, for EVM→Canton (Loop user receives cBTC):
 ## TRUST REALITY (state honestly, don't pretend otherwise)
 
 For Loop users the keccak gate is on-ledger on OUR node, but the BINDING between
-"gate passed" and "cBTC delivered" is enforced by OUR ORCHESTRATOR (we only send the
-standard cBTC transfer after RevealPreimage fired). The cBTC delivery itself is a
+"gate passed" and "CBTC delivered" is enforced by OUR ORCHESTRATOR (we only send the
+standard CBTC transfer after RevealPreimage fired). The CBTC delivery itself is a
 standard transfer — it cannot reference our custom contract (rule #2). So:
 
 - **Loop users = trust-MINIMIZED** on the Canton leg (atomicity via EVM HTLC + our
-  ordering, not an on-ledger Canton hash gate binding the cBTC).
+  ordering, not an on-ledger Canton hash gate binding the CBTC).
 - **Email / participant-managed users = FULLY TRUSTLESS** both legs (their party is
   LOCAL on warpx → our DAR is installed there → THE USER CLICKS CLAIM and reveals the
   secret BY claiming the HtlcLock, exactly like Cancore's UI "Claim Counter — You" step.
-  Reveal-secret and unlock-cBTC are ONE ledger-enforced action. NOT silently backend-
+  Reveal-secret and unlock-CBTC are ONE ledger-enforced action. NOT silently backend-
   signed — the user acts. THIS IS DONE, PROVEN, AND FROZEN — never touch it.)
   (See [[htlc-swap-mental-model]] for the full plain-English model.)
 
@@ -90,12 +90,12 @@ Loop fully trustless — it is physically impossible under Loop's policy.
 
 **The Loop path uses NO custom Canton DAR at all.** A custom Canton gate (LoopHtlcGate)
 would only RE-check a hash that the EVM contract ALREADY checks, and it does NOT gate the
-cBTC (which is a plain transfer) — so it's pure ceremony, zero added security. Dropped.
+CBTC (which is a plain transfer) — so it's pure ceremony, zero added security. Dropped.
 
 The Loop flow's hash gate lives on **EVM** (HTLCEscrow.claim re-computes keccak256(preimage)
 and rejects a wrong one — mandatory, on-chain). That IS "our participant's custom logic"
 per the Loop team; it just happens to be on the EVM side, which is also ours. The Loop user
-only signs standard choices (EVM lock + standard cBTC accept). Satisfies Option 1 fully.
+only signs standard choices (EVM lock + standard CBTC accept). Satisfies Option 1 fully.
 
 - Email path: `CbtcHtlc:HtlcLock` remains the participant-managed/trustless path.
   Use the hardened `cbtc-htlc-hardened` v0.1.0 package (`1b2397fd…`) after
@@ -106,4 +106,5 @@ only signs standard choices (EVM lock + standard cBTC accept). Satisfies Option 
   recordCounterClaimed (browser hands us the secret → we claim WBTC on EVM).
 
 ## IF YOU ARE READING THIS BECAUSE YOU'RE ABOUT TO RE-DERIVE THE WALL: don't.
+
 The user has explained this many times. The rules above are final. Build Option 1.

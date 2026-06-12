@@ -30,8 +30,8 @@ export default function MintPage() {
   const { provider } = useLoopWallet();
   const { total, refetch: refetchBalance } = useBalance();
 
-  // Reads the user's unlocked cBTC balance from their Loop wallet. Used to
-  // snapshot a baseline and observe cBTC landing after a deposit. Returns "0"
+  // Reads the user's unlocked CBTC balance from their Loop wallet. Used to
+  // snapshot a baseline and observe CBTC landing after a deposit. Returns "0"
   // if the Loop wallet isn't connected.
   const readBalance = useCallback(async (): Promise<string> => {
     if (!provider) return "0";

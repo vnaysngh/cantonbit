@@ -77,6 +77,13 @@ const LoopContext = createContext<LoopState>({
 });
 
 const APP_NAME = "OranjSwap";
+const LOOP_CONNECT_KEY = "loop_connect";
+
+/** Drop a stale Loop browser session so autoConnect does not 404 on every reload. */
+function clearStaleLoopSession(loop: { logout: () => void } | null): void {
+  try { loop?.logout(); } catch { /* ignore */ }
+  try { localStorage.removeItem(LOOP_CONNECT_KEY); } catch { /* ignore */ }
+}
 
 export function LoopWalletProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
@@ -85,7 +92,7 @@ export function LoopWalletProvider({ children }: { children: ReactNode }) {
   // stored session exists (checked synchronously below) so there is never a frame
   // where ready=true, restoring=false, party="" on a logged-in reload.
   const [restoring, setRestoring] = useState<boolean>(() => {
-    try { return typeof window !== "undefined" && !!localStorage.getItem("loop_connect"); }
+    try { return typeof window !== "undefined" && !!localStorage.getItem(LOOP_CONNECT_KEY); }
     catch { return false; }
   });
   const [provider, setProvider] = useState<LoopProvider | null>(null);
@@ -123,16 +130,15 @@ export function LoopWalletProvider({ children }: { children: ReactNode }) {
         });
         loopRef.current = loop;
         setReady(true);
-        // Restore a prior session — but ONLY if one exists. The SDK stores its
-        // session under "loop_connect"; calling autoConnect() with no stored
-        // session makes the SDK hit its backend and log a 404 to the console.
-        // Gate on the key so a fresh visitor sees no error noise.
+        // Restore a prior Loop session only when loop_connect exists. Stale tokens
+        // (404 from Loop verify) are cleared so email-only users don't error every load.
         let hasSession = false;
-        try { hasSession = !!localStorage.getItem("loop_connect"); } catch { /* ignore */ }
+        try { hasSession = !!localStorage.getItem(LOOP_CONNECT_KEY); } catch { /* ignore */ }
         if (hasSession) {
-          try { await loop.autoConnect(); } catch { /* session expired/invalid — fine */ }
+          await loop.autoConnect().catch(() => {
+            clearStaleLoopSession(loop);
+          });
         }
-        // Restore settled (success → onAccept set the provider; failure → logged out).
         if (!cancelled) setRestoring(false);
       } catch (e) {
         if (!cancelled) {
@@ -154,7 +160,7 @@ export function LoopWalletProvider({ children }: { children: ReactNode }) {
     // handshake → "ticket invalid or expired" on the wallet side. A user click
     // means "connect fresh", so start clean.
     try { loop.logout(); } catch { /* ignore */ }
-    try { localStorage.removeItem("loop_connect"); } catch { /* ignore */ }
+    clearStaleLoopSession(loop);
     try {
       await loop.connect(); // opens the wallet popup; onAccept fires with the provider
     } catch (e) {
@@ -164,8 +170,7 @@ export function LoopWalletProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback(() => {
-    try { loopRef.current?.logout(); } catch { /* ignore */ }
-    try { localStorage.removeItem("loop_connect"); } catch { /* ignore */ }
+    clearStaleLoopSession(loopRef.current);
     setProvider(null);
     setError(null);
   }, []);

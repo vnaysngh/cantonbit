@@ -1,8 +1,12 @@
 "use client";
 
 import {
-  createContext, useCallback, useContext, useEffect, useState,
-  type ReactNode,
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+  type ReactNode
 } from "react";
 
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
@@ -38,7 +42,7 @@ interface WalletState {
   loopError: string | null;
   /**
    * The live Loop SDK provider — for screens that need USER-SIGNED reads/actions
-   * (e.g. signing the "Exchange API Key" message to check the cBTC auto-accept
+   * (e.g. signing the "Exchange API Key" message to check the CBTC auto-accept
    * gate and read delivery history). Null until connected. Every action through
    * it is approved by the user in their Loop wallet (no private key leaves the
    * wallet, no server authority over the user).
@@ -47,10 +51,16 @@ interface WalletState {
 }
 
 const WalletContext = createContext<WalletState>({
-  isConnected: false, partyId: "", email: null, isLoading: true,
-  connectLoop: async () => {}, logoutLoop: () => {},
-  loopReady: false, loopConnecting: false, loopError: null,
-  provider: null,
+  isConnected: false,
+  partyId: "",
+  email: null,
+  isLoading: true,
+  connectLoop: async () => {},
+  logoutLoop: () => {},
+  loopReady: false,
+  loopConnecting: false,
+  loopError: null,
+  provider: null
 });
 
 export function WalletProvider({ children }: { children: ReactNode }) {
@@ -60,8 +70,12 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   // Track the Supabase session email (app still uses Supabase for login/session).
   useEffect(() => {
     const supabase = createSupabaseBrowserClient();
-    void supabase.auth.getUser().then(({ data }) => setSessionEmail(data.user?.email ?? null));
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_e, session) => {
+    void supabase.auth
+      .getUser()
+      .then(({ data }) => setSessionEmail(data.user?.email ?? null));
+    const {
+      data: { subscription }
+    } = supabase.auth.onAuthStateChange((_e, session) => {
       setSessionEmail(session?.user?.email ?? null);
     });
     return () => subscription.unsubscribe();
@@ -99,10 +113,12 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     loopReady: loop.ready,
     loopConnecting: loop.connecting,
     loopError: loop.error,
-    provider: loop.provider,
+    provider: loop.provider
   };
 
-  return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>;
+  return (
+    <WalletContext.Provider value={value}>{children}</WalletContext.Provider>
+  );
 }
 
 export function useWallet(): WalletState {

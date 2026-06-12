@@ -1,12 +1,12 @@
 /**
- * Helpers for reading the user's cBTC from their connected Loop wallet.
+ * Helpers for reading the user's CBTC from their connected Loop wallet.
  *
  * The Loop SDK gives two views:
  *  - provider.getHolding()         → per-instrument AGGREGATE (unlocked/locked totals)
  *  - provider.getActiveContracts() → per-CONTRACT (each holding's contract_id)
  *
  * Balance display uses the aggregate; redeem (which must pick specific UTXOs to
- * burn) uses the per-contract view. Both filter to the network's cBTC instrument.
+ * burn) uses the per-contract view. Both filter to the network's CBTC instrument.
  */
 
 import { NETWORK } from "@/lib/constants";
@@ -29,7 +29,10 @@ export interface LoopActiveContract {
 
 interface ProviderLike {
   getHolding: () => Promise<unknown[]>;
-  getActiveContracts: (params?: { templateId?: string; interfaceId?: string }) => Promise<unknown[]>;
+  getActiveContracts: (params?: {
+    templateId?: string;
+    interfaceId?: string;
+  }) => Promise<unknown[]>;
 }
 
 function isOurCbtc(h: LoopHolding): boolean {
@@ -39,9 +42,9 @@ function isOurCbtc(h: LoopHolding): boolean {
   );
 }
 
-/** Unlocked + locked cBTC totals (BTC decimal strings) from the Loop aggregate. */
+/** Unlocked + locked CBTC totals (BTC decimal strings) from the Loop aggregate. */
 export async function readLoopCbtcBalance(
-  provider: ProviderLike,
+  provider: ProviderLike
 ): Promise<{ total: string; locked: string; count: number }> {
   const all = (await provider.getHolding()) as unknown as LoopHolding[];
   const cbtc = all.filter(isOurCbtc);
@@ -51,34 +54,48 @@ export async function readLoopCbtcBalance(
   return { total, locked, count: cbtc.length };
 }
 
-/** LOOP SELLER: the user's individual UNLOCKED cBTC holding contract-ids, read
+/** LOOP SELLER: the user's individual UNLOCKED CBTC holding contract-ids, read
  *  through THEIR wallet connection (we can't see a Loop party cross-participant).
  *  Defensive shape-matching — the SDK returns per-contract records whose payload
  *  layout varies; we match Holding templates carrying our CBTC instrument id and
  *  skip anything that looks locked. */
 export async function listLoopCbtcHoldingCids(
-  provider: Pick<ProviderLike, "getActiveContracts">,
+  provider: Pick<ProviderLike, "getActiveContracts">
 ): Promise<string[]> {
-  const HOLDING_IFACE = "#splice-api-token-holding-v1:Splice.Api.Token.HoldingV1:Holding";
-  // The cBTC registry's CONCRETE holding template (same FQN lib/transfer.ts uses).
-  const HOLDING_TPL = "8107899ac4723ce986bf7d27416534e576e54b92161e46150a595fb78ff3d3a1:Utility.Registry.Holding.V0.Holding:Holding";
+  const HOLDING_IFACE =
+    "#splice-api-token-holding-v1:Splice.Api.Token.HoldingV1:Holding";
+  // The CBTC registry's CONCRETE holding template (same FQN lib/transfer.ts uses).
+  const HOLDING_TPL =
+    "8107899ac4723ce986bf7d27416534e576e54b92161e46150a595fb78ff3d3a1:Utility.Registry.Holding.V0.Holding:Holding";
 
   // Loop's backend may or may not support interface filtering — fall through
   // filtered → template → UNFILTERED until something returns contracts.
   let raw: unknown[] = [];
-  for (const params of [{ interfaceId: HOLDING_IFACE }, { templateId: HOLDING_TPL }, undefined] as const) {
+  for (const params of [
+    { interfaceId: HOLDING_IFACE },
+    { templateId: HOLDING_TPL },
+    undefined
+  ] as const) {
     try {
-      raw = await provider.getActiveContracts(params as { interfaceId?: string } | undefined);
-      console.debug(`[loop-holdings] getActiveContracts(${JSON.stringify(params)}) → ${raw.length} item(s)`);
+      raw = await provider.getActiveContracts(
+        params as { interfaceId?: string } | undefined
+      );
+      console.debug(
+        `[loop-holdings] getActiveContracts(${JSON.stringify(params)}) → ${raw.length} item(s)`
+      );
       if (raw.length > 0) break;
     } catch (e) {
-      console.debug(`[loop-holdings] getActiveContracts(${JSON.stringify(params)}) threw:`, e);
+      console.debug(
+        `[loop-holdings] getActiveContracts(${JSON.stringify(params)}) threw:`,
+        e
+      );
     }
   }
   if (raw.length === 0) return [];
 
   const out: string[] = [];
-  for (const item of raw as Array<Record<string, any>>) { // eslint-disable-line @typescript-eslint/no-explicit-any
+  for (const item of raw as Array<Record<string, any>>) {
+    // eslint-disable-line @typescript-eslint/no-explicit-any
     // REAL shape (observed live, contradicts the SDK typings): a raw JSON Ledger
     // API ACS entry — { contractEntry: { JsActiveContract: { createdEvent: {
     // contractId, templateId, ... } } } }. Tolerate the flat shape too.
@@ -87,21 +104,33 @@ export async function listLoopCbtcHoldingCids(
     const tpl = String(ev?.templateId ?? ev?.template_id ?? "");
     if (!cid) continue;
     // Loop IGNORES the interface filter (Amulets came back) — filter by template:
-    // the cBTC registry's concrete Holding template (Utility.Registry...:Holding).
-    if (!/Utility\.Registry.*:Holding$/.test(tpl) && !tpl.startsWith("8107899ac4723ce986bf7d27416534e576e54b92161e46150a595fb78ff3d3a1")) continue;
+    // the CBTC registry's concrete Holding template (Utility.Registry...:Holding).
+    if (
+      !/Utility\.Registry.*:Holding$/.test(tpl) &&
+      !tpl.startsWith(
+        "8107899ac4723ce986bf7d27416534e576e54b92161e46150a595fb78ff3d3a1"
+      )
+    )
+      continue;
     const json = JSON.stringify(ev);
     // If the payload is present, require our instrument id and skip locked holdings
     // ("lock":null is fine). If only the blob is present, the template match above
-    // is the discriminator (the cBTC registry template carries only CBTC).
-    const hasPayload = json.includes("createArgument") || json.includes("interfaceViews");
+    // is the discriminator (the CBTC registry template carries only CBTC).
+    const hasPayload =
+      json.includes("createArgument") || json.includes("interfaceViews");
     if (hasPayload && !json.includes(NETWORK.instrumentId.id)) continue;
     if (/"lock"\s*:\s*\{/.test(json)) continue;
     out.push(cid);
   }
-  console.debug(`[loop-holdings] matched ${out.length} unlocked cBTC holding(s) of ${raw.length} contract(s)`);
+  console.debug(
+    `[loop-holdings] matched ${out.length} unlocked CBTC holding(s) of ${raw.length} contract(s)`
+  );
   if (out.length === 0 && raw.length > 0) {
     // Diagnostics for the next failure: show what the wallet actually returned.
-    console.debug("[loop-holdings] first item for diagnosis:", JSON.stringify(raw[0]).slice(0, 600));
+    console.debug(
+      "[loop-holdings] first item for diagnosis:",
+      JSON.stringify(raw[0]).slice(0, 600)
+    );
   }
   return out;
 }
@@ -123,6 +152,9 @@ export function btcToSats(btc: string): bigint {
 
 export function satsToBtc(sats: bigint): string {
   const whole = sats / 100_000_000n;
-  const frac = (sats % 100_000_000n).toString().padStart(8, "0").replace(/0+$/, "");
+  const frac = (sats % 100_000_000n)
+    .toString()
+    .padStart(8, "0")
+    .replace(/0+$/, "");
   return frac ? `${whole}.${frac}` : `${whole}`;
 }

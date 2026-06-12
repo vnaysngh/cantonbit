@@ -1,6 +1,6 @@
 # HTLC Security Audit - 2026-06-12
 
-This document records the security audit and fixes for the cBTC HTLC swap flows:
+This document records the security audit and fixes for the CBTC HTLC swap flows:
 
 - EVM -> Canton email: trustless, on-ledger keccak HTLC
 - Canton -> EVM email: trustless, on-ledger keccak HTLC
@@ -35,7 +35,7 @@ This DAR uses package name `cbtc-htlc-hardened` instead of `cbtc-htlc`. The earl
 
 ## Findings And Fixes
 
-### 1. Critical/P0 - Reverse Email Route Could Lock Victim cBTC
+### 1. Critical/P0 - Reverse Email Route Could Lock Victim CBTC
 
 Affected flows:
 
@@ -154,7 +154,7 @@ Implemented approach:
 
 - Added `amount` and `instrumentId` fields to `HtlcLock`.
 - `Claim` and `Refund` now fetch the allocation view and assert sender, receiver, executor, amount, instrument id, and settlement window.
-- App-side HTLC creation now passes `amountBtc` and the configured cBTC instrument id.
+- App-side HTLC creation now passes `amountBtc` and the configured CBTC instrument id.
 - Daml tests cover mismatched allocation rejection.
 
 Status: Fixed.
@@ -267,7 +267,7 @@ Affected flows:
 
 Risk:
 
-The Loop reveal path (`claimCounter`) called `verifyEvmLock()` before delivering cBTC, ensuring the solver had enough time to claim WBTC after reveal. The managed path did not. A user could reveal near `userTimelock`, receive cBTC, and still `retake` WBTC after the solver ran out of time.
+The Loop reveal path (`claimCounter`) called `verifyEvmLock()` before delivering CBTC, ensuring the solver had enough time to claim WBTC after reveal. The managed path did not. A user could reveal near `userTimelock`, receive CBTC, and still `retake` WBTC after the solver ran out of time.
 
 Implemented approach:
 

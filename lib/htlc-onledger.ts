@@ -1,19 +1,19 @@
 /**
- * ON-LEDGER cBTC HTLC (the real DAR path) — G1/G2.
+ * ON-LEDGER CBTC HTLC (the real DAR path) — G1/G2.
  *
- * Drives our uploaded `cbtc-htlc` DAR (HtlcLock template) so the cBTC hash check
+ * Drives our uploaded `cbtc-htlc` DAR (HtlcLock template) so the CBTC hash check
  * is enforced ON THE DAML LEDGER, not in the backend. Three steps:
  *
- *   1. allocate()   — lock the solver's cBTC in a Splice Allocation, naming the
+ *   1. allocate()   — lock the solver's CBTC in a Splice Allocation, naming the
  *                     SOLVER as executor (pre-delegation: sender+receiver consent
  *                     is granted to the executor at allocation creation, so the
  *                     executor fires Allocation_ExecuteTransfer ALONE — confirmed
  *                     in Splice AllocationV1 source lines 126-129).
  *   2. createHtlcLock() — wrap that Allocation in our HtlcLock (records hashLock,
- *                     unlockTime). The cBTC is now locked on-ledger.
+ *                     unlockTime). The CBTC is now locked on-ledger.
  *   3. claimHtlcLock(preimage) — exercise HtlcLock.Claim. The DAML LEDGER checks
  *                     keccak256(preimage)==hashLock (CbtcHtlc.daml), then fires
- *                     Allocation_ExecuteTransfer → cBTC moves to the receiver and
+ *                     Allocation_ExecuteTransfer → CBTC moves to the receiver and
  *                     the preimage is revealed on-ledger.
  *
  * Ported from the PROVEN swap-solver/src/probe-htlc-spike.mts + canton.ts allocate().
@@ -31,7 +31,9 @@ const TAG = "[htlc-onledger]";
 function htlcTemplateId(): string {
   const pkg = process.env.CBTC_HTLC_PKG_ID;
   if (!pkg) {
-    throw new Error("CBTC_HTLC_PKG_ID must be set to the hardened cbtc-htlc package id");
+    throw new Error(
+      "CBTC_HTLC_PKG_ID must be set to the hardened cbtc-htlc package id"
+    );
   }
   return `${pkg}:CbtcHtlc:HtlcLock`;
 }
@@ -56,15 +58,27 @@ async function submit(
   jwt: string,
   actAs: string[],
   commands: unknown[],
-  disclosed: DisclosedContract[] = [],
-): Promise<{ updateId: string; createdCids: string[]; created: { contractId: string; templateId: string; createdEventBlob: string }[]; tree: any }> {
+  disclosed: DisclosedContract[] = []
+): Promise<{
+  updateId: string;
+  createdCids: string[];
+  created: {
+    contractId: string;
+    templateId: string;
+    createdEventBlob: string;
+  }[];
+  tree: any;
+}> {
   const commandId =
     "htlc-" + Math.random().toString(16).slice(2) + Date.now().toString(16);
   const res = await fetch(
     `${NETWORK.ledgerHost}/v2/commands/submit-and-wait-for-transaction-tree`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${jwt}`
+      },
       cache: "no-store",
       body: JSON.stringify({
         applicationId: "cbtc-htlc",
@@ -73,30 +87,44 @@ async function submit(
         actAs,
         readAs: actAs,
         commands,
-        disclosedContracts: disclosed,
-      }),
-    },
+        disclosedContracts: disclosed
+      })
+    }
   );
   const text = await res.text();
   if (!res.ok) throw new Error(`submit failed (${res.status}): ${text}`);
   const tree = JSON.parse(text);
   const events = tree?.transactionTree?.eventsById ?? {};
   const createdCids: string[] = [];
-  const created: { contractId: string; templateId: string; createdEventBlob: string }[] = [];
+  const created: {
+    contractId: string;
+    templateId: string;
+    createdEventBlob: string;
+  }[] = [];
   for (const ev of Object.values(events) as any[]) {
     const c = ev?.CreatedTreeEvent?.value;
     if (!c?.contractId) continue;
     const tpl = c.templateId ?? "";
-    created.push({ contractId: c.contractId, templateId: tpl, createdEventBlob: c.createdEventBlob ?? "" });
-    // Skip plain Holding change-outputs (the leftover cBTC from an allocation) —
+    created.push({
+      contractId: c.contractId,
+      templateId: tpl,
+      createdEventBlob: c.createdEventBlob ?? ""
+    });
+    // Skip plain Holding change-outputs (the leftover CBTC from an allocation) —
     // otherwise createdCids[0] would be a Holding, not the Allocation, and the
     // registry's execute-transfer choice-context can't decode it ("Unknown field
     // registrar"). Match the entity name, since the Allocation path also contains
     // "Holding" (…Holding.Allocation:DvpLegAllocation).
-    const isPlainHolding = tpl.endsWith(":Holding") || tpl.includes("Holding.V0.Holding:Holding");
+    const isPlainHolding =
+      tpl.endsWith(":Holding") || tpl.includes("Holding.V0.Holding:Holding");
     if (!isPlainHolding) createdCids.push(c.contractId);
   }
-  return { updateId: tree?.transactionTree?.updateId ?? "", createdCids, created, tree };
+  return {
+    updateId: tree?.transactionTree?.updateId ?? "",
+    createdCids,
+    created,
+    tree
+  };
 }
 
 const ALLOCATION_INTERFACE =
@@ -105,37 +133,66 @@ const ALLOCATION_INTERFACE =
 /**
  * CLEANUP — withdraw an Allocation directly (Allocation_Withdraw, sender-alone).
  * For orphaned allocations (no HtlcLock) left by a failed/retried lock. Returns the
- * solver's cBTC to the solver. Safe: sender-only, no receiver co-sign needed.
+ * solver's CBTC to the solver. Safe: sender-only, no receiver co-sign needed.
  */
-export async function withdrawAllocation(solverParty: string, allocationCid: string): Promise<{ updateId: string }> {
+export async function withdrawAllocation(
+  solverParty: string,
+  allocationCid: string
+): Promise<{ updateId: string }> {
   const jwt = await getLedgerJwt();
   const ctx = await allocationChoiceContext(allocationCid, "withdraw");
   const { updateId } = await submit(
     jwt,
     [solverParty],
-    [{
-      ExerciseCommand: {
-        templateId: ALLOCATION_INTERFACE,
-        contractId: allocationCid,
-        choice: "Allocation_Withdraw",
-        choiceArgument: { extraArgs: { context: ctx.data, meta: { values: {} } } },
-      },
-    }],
-    ctx.disclosed,
+    [
+      {
+        ExerciseCommand: {
+          templateId: ALLOCATION_INTERFACE,
+          contractId: allocationCid,
+          choice: "Allocation_Withdraw",
+          choiceArgument: {
+            extraArgs: { context: ctx.data, meta: { values: {} } }
+          }
+        }
+      }
+    ],
+    ctx.disclosed
   );
-  console.log(`${TAG} withdrew orphan allocation ${allocationCid.slice(0, 16)}… → cBTC recovered. update ${updateId.slice(0, 16)}…`);
+  console.log(
+    `${TAG} withdrew orphan allocation ${allocationCid.slice(0, 16)}… → CBTC recovered. update ${updateId.slice(0, 16)}…`
+  );
   return { updateId };
 }
 
 /** List the solver's active Allocation contract ids (to find orphans to clean up). */
-export async function listSolverAllocations(solverParty: string): Promise<string[]> {
+export async function listSolverAllocations(
+  solverParty: string
+): Promise<string[]> {
   const jwt = await getLedgerJwt();
-  const endRes = await fetch(`${NETWORK.ledgerHost}/v2/state/ledger-end`, { headers: { Authorization: `Bearer ${jwt}` } });
+  const endRes = await fetch(`${NETWORK.ledgerHost}/v2/state/ledger-end`, {
+    headers: { Authorization: `Bearer ${jwt}` }
+  });
   const offset = ((await endRes.json()) as { offset: number }).offset;
-  const wildcard = { cumulative: [{ identifierFilter: { WildcardFilter: { value: { includeCreatedEventBlob: false } } } }] };
+  const wildcard = {
+    cumulative: [
+      {
+        identifierFilter: {
+          WildcardFilter: { value: { includeCreatedEventBlob: false } }
+        }
+      }
+    ]
+  };
   const r = await fetch(`${NETWORK.ledgerHost}/v2/state/active-contracts`, {
-    method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
-    body: JSON.stringify({ filter: { filtersByParty: { [solverParty]: wildcard } }, verbose: false, activeAtOffset: offset }),
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${jwt}`
+    },
+    body: JSON.stringify({
+      filter: { filtersByParty: { [solverParty]: wildcard } },
+      verbose: false,
+      activeAtOffset: offset
+    })
   });
   if (!r.ok) return [];
   const entries = (await r.json()) as any[];
@@ -144,7 +201,8 @@ export async function listSolverAllocations(solverParty: string): Promise<string
     const c = e?.contractEntry?.JsActiveContract?.createdEvent;
     const tpl = c?.templateId ?? "";
     // Allocation template path contains "Allocation:DvpLegAllocation" (not plain Holding).
-    if (c?.contractId && /Allocation/i.test(tpl) && !/:Holding$/.test(tpl)) out.push(c.contractId);
+    if (c?.contractId && /Allocation/i.test(tpl) && !/:Holding$/.test(tpl))
+      out.push(c.contractId);
   }
   return out;
 }
@@ -152,25 +210,34 @@ export async function listSolverAllocations(solverParty: string): Promise<string
 /** Registry choice-context for an Allocation lifecycle choice. */
 async function allocationChoiceContext(
   allocationCid: string,
-  kind: "execute-transfer" | "withdraw",
+  kind: "execute-transfer" | "withdraw"
 ): Promise<{ data: unknown; disclosed: DisclosedContract[] }> {
   const url = reg(
-    `/registry/allocations/v1/${encodeURIComponent(allocationCid)}/choice-contexts/${kind}`,
+    `/registry/allocations/v1/${encodeURIComponent(allocationCid)}/choice-contexts/${kind}`
   );
   const r = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}), // this registry version wants an empty body, not {meta:{}}
+    body: JSON.stringify({}) // this registry version wants an empty body, not {meta:{}}
   });
-  if (!r.ok) throw new Error(`choice-context ${kind} failed (${r.status}): ${await r.text()}`);
-  const ctx = (await r.json()) as { choiceContextData: unknown; disclosedContracts: DisclosedContract[] };
+  if (!r.ok)
+    throw new Error(
+      `choice-context ${kind} failed (${r.status}): ${await r.text()}`
+    );
+  const ctx = (await r.json()) as {
+    choiceContextData: unknown;
+    disclosedContracts: DisclosedContract[];
+  };
   return {
     data: ctx.choiceContextData,
-    disclosed: (ctx.disclosedContracts ?? []).map((d) => ({ ...d, synchronizerId: d.synchronizerId ?? "" })),
+    disclosed: (ctx.disclosedContracts ?? []).map((d) => ({
+      ...d,
+      synchronizerId: d.synchronizerId ?? ""
+    }))
   };
 }
 
-/** STEP 1 — lock cBTC in an Allocation.
+/** STEP 1 — lock CBTC in an Allocation.
  *  EVM→Canton (default): solver = sender = executor (locks its own float).
  *  Canton→EVM (reverse): senderParty = the USER's hosted party (backend CanActAs
  *  signs as them — Cancore's "platform auto-locks"); executor stays the solver so
@@ -198,7 +265,7 @@ export async function allocate(params: {
       requestedAt: now,
       allocateBefore: params.allocateBefore.toISOString(),
       settleBefore: params.settleBefore.toISOString(),
-      meta: { values: {} },
+      meta: { values: {} }
     },
     transferLegId: "leg-0",
     transferLeg: {
@@ -206,63 +273,82 @@ export async function allocate(params: {
       receiver: params.receiverParty,
       amount: params.amountBtc,
       instrumentId: NETWORK.instrumentId,
-      meta: { values: {} },
-    },
+      meta: { values: {} }
+    }
   };
 
-  const factoryRes = await fetch(reg(`/registry/allocation-instruction/v1/allocation-factory`), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      choiceArguments: {
-        expectedAdmin: NETWORK.decentralizedPartyId,
-        allocation,
-        requestedAt: now,
-        inputHoldingCids: params.inputHoldingCids,
-        extraArgs: { context: { values: {} }, meta: { values: {} } },
-      },
-    }),
-  });
-  if (!factoryRes.ok) throw new Error(`AllocationFactory failed (${factoryRes.status}): ${await factoryRes.text()}`);
+  const factoryRes = await fetch(
+    reg(`/registry/allocation-instruction/v1/allocation-factory`),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        choiceArguments: {
+          expectedAdmin: NETWORK.decentralizedPartyId,
+          allocation,
+          requestedAt: now,
+          inputHoldingCids: params.inputHoldingCids,
+          extraArgs: { context: { values: {} }, meta: { values: {} } }
+        }
+      })
+    }
+  );
+  if (!factoryRes.ok)
+    throw new Error(
+      `AllocationFactory failed (${factoryRes.status}): ${await factoryRes.text()}`
+    );
   const factory = (await factoryRes.json()) as {
     factoryId: string;
-    choiceContext: { choiceContextData: unknown; disclosedContracts: DisclosedContract[] };
+    choiceContext: {
+      choiceContextData: unknown;
+      disclosedContracts: DisclosedContract[];
+    };
   };
 
   const disclosed: DisclosedContract[] = [
-    ...factory.choiceContext.disclosedContracts.map((dc) => ({ ...dc, synchronizerId: dc.synchronizerId ?? "" })),
+    ...factory.choiceContext.disclosedContracts.map((dc) => ({
+      ...dc,
+      synchronizerId: dc.synchronizerId ?? ""
+    })),
     ...params.inputHoldings
       .filter((h) => params.inputHoldingCids.includes(h.contractId))
       .map((h) => ({
         templateId: HOLDING_TEMPLATE_FQN,
         contractId: h.contractId,
         createdEventBlob: h.createdEventBlob ?? "",
-        synchronizerId: "",
-      })),
+        synchronizerId: ""
+      }))
   ];
 
   const { updateId, createdCids } = await submit(
     jwt,
     [sender], // sender authority locks the holdings (CanActAs covers hosted users)
-    [{
-      ExerciseCommand: {
-        templateId: ALLOCATION_FACTORY_INTERFACE,
-        contractId: factory.factoryId,
-        choice: "AllocationFactory_Allocate",
-        choiceArgument: {
-          expectedAdmin: NETWORK.decentralizedPartyId,
-          allocation,
-          requestedAt: now,
-          inputHoldingCids: params.inputHoldingCids,
-          extraArgs: { context: factory.choiceContext.choiceContextData, meta: { values: {} } },
-        },
-      },
-    }],
-    disclosed,
+    [
+      {
+        ExerciseCommand: {
+          templateId: ALLOCATION_FACTORY_INTERFACE,
+          contractId: factory.factoryId,
+          choice: "AllocationFactory_Allocate",
+          choiceArgument: {
+            expectedAdmin: NETWORK.decentralizedPartyId,
+            allocation,
+            requestedAt: now,
+            inputHoldingCids: params.inputHoldingCids,
+            extraArgs: {
+              context: factory.choiceContext.choiceContextData,
+              meta: { values: {} }
+            }
+          }
+        }
+      }
+    ],
+    disclosed
   );
   const allocationCid = createdCids[0] ?? "";
   if (!allocationCid) throw new Error("allocate: no Allocation created");
-  console.log(`${TAG} allocated ${params.amountBtc} cBTC → alloc ${allocationCid.slice(0, 20)}…`);
+  console.log(
+    `${TAG} allocated ${params.amountBtc} CBTC → alloc ${allocationCid.slice(0, 20)}…`
+  );
   return { updateId, allocationCid };
 }
 
@@ -281,21 +367,29 @@ export async function createHtlcLock(params: {
 }): Promise<{ htlcCid: string; htlcBlob: string }> {
   const locker = params.lockerParty ?? params.solverParty;
   const jwt = await getLedgerJwt();
-  const { created } = await submit(jwt, [locker], [{
-    CreateCommand: {
-      templateId: htlcTemplateId(),
-      createArguments: {
-        locker,
-        receiver: params.receiverParty,
-        executor: params.solverParty,
-        allocationCid: params.allocationCid,
-        amount: params.amountBtc,
-        instrumentId: NETWORK.instrumentId,
-        hashLock: params.hashLock.startsWith("0x") ? params.hashLock.slice(2) : params.hashLock,
-        unlockTime: params.unlockTime.toISOString(),
-      },
-    },
-  }]);
+  const { created } = await submit(
+    jwt,
+    [locker],
+    [
+      {
+        CreateCommand: {
+          templateId: htlcTemplateId(),
+          createArguments: {
+            locker,
+            receiver: params.receiverParty,
+            executor: params.solverParty,
+            allocationCid: params.allocationCid,
+            amount: params.amountBtc,
+            instrumentId: NETWORK.instrumentId,
+            hashLock: params.hashLock.startsWith("0x")
+              ? params.hashLock.slice(2)
+              : params.hashLock,
+            unlockTime: params.unlockTime.toISOString()
+          }
+        }
+      }
+    ]
+  );
   const htlc = created.find((c) => c.templateId.includes("HtlcLock"));
   if (!htlc) throw new Error("createHtlcLock: no HtlcLock created");
   console.log(`${TAG} HtlcLock created ${htlc.contractId.slice(0, 20)}…`);
@@ -315,9 +409,18 @@ export async function prepareClaimCommand(params: {
   allocationCid: string;
   solverParty: string; // to read the Allocation blob from the solver's ACS for disclosure
   preimageHex: string; // lowercase hex of the raw secret bytes, no 0x
-}): Promise<{ command: unknown; disclosedContracts: DisclosedContract[]; synchronizerId: string }> {
-  const ctx = await allocationChoiceContext(params.allocationCid, "execute-transfer");
-  const preimage = params.preimageHex.startsWith("0x") ? params.preimageHex.slice(2) : params.preimageHex;
+}): Promise<{
+  command: unknown;
+  disclosedContracts: DisclosedContract[];
+  synchronizerId: string;
+}> {
+  const ctx = await allocationChoiceContext(
+    params.allocationCid,
+    "execute-transfer"
+  );
+  const preimage = params.preimageHex.startsWith("0x")
+    ? params.preimageHex.slice(2)
+    : params.preimageHex;
   const command = {
     ExerciseCommand: {
       templateId: htlcTemplateId(),
@@ -325,9 +428,9 @@ export async function prepareClaimCommand(params: {
       choice: "Claim",
       choiceArgument: {
         preimage,
-        allocationContext: { context: ctx.data, meta: { values: {} } },
-      },
-    },
+        allocationContext: { context: ctx.data, meta: { values: {} } }
+      }
+    }
   };
   // The receiver must SEE both the HtlcLock and the Allocation (which Claim fetches).
   // The HtlcLock they observe comes from the hardened CBTC_HTLC_PKG_ID DAR. The Allocation is
@@ -340,15 +443,27 @@ export async function prepareClaimCommand(params: {
   let syncId = disclosed.find((d) => d.synchronizerId)?.synchronizerId ?? "";
   const hasAlloc = disclosed.some((d) => d.contractId === params.allocationCid);
   if (!hasAlloc) {
-    const allocBlob = await fetchContractBlob(params.allocationCid, params.solverParty);
-    if (allocBlob) { disclosed.push(allocBlob); if (!syncId) syncId = allocBlob.synchronizerId; }
+    const allocBlob = await fetchContractBlob(
+      params.allocationCid,
+      params.solverParty
+    );
+    if (allocBlob) {
+      disclosed.push(allocBlob);
+      if (!syncId) syncId = allocBlob.synchronizerId;
+    }
   }
   // Disclose the HtlcLock so the receiver can SEE it (they're NOT a static observer —
   // disclosure avoids needing their participant to vet our DAR). Fetch from ACS (the
   // tx-tree blob is empty) — this also gives us the real synchronizerId.
   if (!disclosed.some((d) => d.contractId === params.htlcCid)) {
-    const htlcBlob = await fetchContractBlob(params.htlcCid, params.solverParty);
-    if (htlcBlob) { disclosed.push(htlcBlob); if (!syncId) syncId = htlcBlob.synchronizerId; }
+    const htlcBlob = await fetchContractBlob(
+      params.htlcCid,
+      params.solverParty
+    );
+    if (htlcBlob) {
+      disclosed.push(htlcBlob);
+      if (!syncId) syncId = htlcBlob.synchronizerId;
+    }
   }
   // Stamp the resolved synchronizerId on every disclosed contract that lacks one.
   for (const d of disclosed) if (!d.synchronizerId) d.synchronizerId = syncId;
@@ -356,14 +471,35 @@ export async function prepareClaimCommand(params: {
 }
 
 /** Fetch a contract's createdEventBlob + templateId from the solver's ACS (for disclosure). */
-async function fetchContractBlob(contractId: string, party: string): Promise<DisclosedContract | null> {
+async function fetchContractBlob(
+  contractId: string,
+  party: string
+): Promise<DisclosedContract | null> {
   const jwt = await getLedgerJwt();
-  const endRes = await fetch(`${NETWORK.ledgerHost}/v2/state/ledger-end`, { headers: { Authorization: `Bearer ${jwt}` } });
+  const endRes = await fetch(`${NETWORK.ledgerHost}/v2/state/ledger-end`, {
+    headers: { Authorization: `Bearer ${jwt}` }
+  });
   const offset = ((await endRes.json()) as { offset: number }).offset;
-  const wildcard = { cumulative: [{ identifierFilter: { WildcardFilter: { value: { includeCreatedEventBlob: true } } } }] };
+  const wildcard = {
+    cumulative: [
+      {
+        identifierFilter: {
+          WildcardFilter: { value: { includeCreatedEventBlob: true } }
+        }
+      }
+    ]
+  };
   const r = await fetch(`${NETWORK.ledgerHost}/v2/state/active-contracts`, {
-    method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
-    body: JSON.stringify({ filter: { filtersByParty: { [party]: wildcard } }, verbose: false, activeAtOffset: offset }),
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${jwt}`
+    },
+    body: JSON.stringify({
+      filter: { filtersByParty: { [party]: wildcard } },
+      verbose: false,
+      activeAtOffset: offset
+    })
   });
   if (!r.ok) return null;
   const entries = (await r.json()) as any[];
@@ -373,7 +509,12 @@ async function fetchContractBlob(contractId: string, party: string): Promise<Dis
     if (c?.contractId === contractId) {
       // Capture the REAL synchronizerId — the Loop SDK needs it to route the submission.
       const synchronizerId = ac?.synchronizerId ?? c?.synchronizerId ?? "";
-      return { templateId: c.templateId, contractId, createdEventBlob: c.createdEventBlob ?? "", synchronizerId };
+      return {
+        templateId: c.templateId,
+        contractId,
+        createdEventBlob: c.createdEventBlob ?? "",
+        synchronizerId
+      };
     }
   }
   return null;
@@ -402,15 +543,22 @@ export async function claimAsReceiver(params: {
     htlcBlob: params.htlcBlob,
     allocationCid: params.allocationCid,
     solverParty: params.solverParty,
-    preimageHex: params.preimageHex,
+    preimageHex: params.preimageHex
   });
-  const { updateId } = await submit(jwt, [params.receiverParty], [command as unknown], disclosedContracts);
-  console.log(`${TAG} HtlcLock.Claim by receiver — on-ledger keccak check passed, cBTC released. update ${updateId.slice(0, 16)}…`);
+  const { updateId } = await submit(
+    jwt,
+    [params.receiverParty],
+    [command as unknown],
+    disclosedContracts
+  );
+  console.log(
+    `${TAG} HtlcLock.Claim by receiver — on-ledger keccak check passed, CBTC released. update ${updateId.slice(0, 16)}…`
+  );
   return { updateId };
 }
 
 // ===================== LOOP SELLERS (canton-to-evm, external wallet) =====================
-// The Loop user locks their cBTC via the STANDARD AllocationFactory_Allocate signed in
+// The Loop user locks their CBTC via the STANDARD AllocationFactory_Allocate signed in
 // THEIR wallet (sender=user, receiver=executor=solver, settleBefore=long timelock).
 // No custom contract ever touches the Loop party. The solver later executes the
 // allocation (receiver+executor = solver alone — the proven authority shape), and the
@@ -422,14 +570,18 @@ export async function claimAsReceiver(params: {
  *  participant (no disclosure needed for them); the registry's rule/config contracts
  *  are disclosed via the factory choice-context. */
 export async function prepareAllocateCommand(params: {
-  senderParty: string;     // the Loop user (locks their cBTC)
-  solverParty: string;     // receiver AND executor
+  senderParty: string; // the Loop user (locks their CBTC)
+  solverParty: string; // receiver AND executor
   amountBtc: string;
   inputHoldingCids: string[]; // read in the BROWSER via provider.getActiveContracts
   settlementId: string;
   settleBefore: Date;
   allocateBefore: Date;
-}): Promise<{ command: unknown; disclosedContracts: DisclosedContract[]; synchronizerId: string }> {
+}): Promise<{
+  command: unknown;
+  disclosedContracts: DisclosedContract[];
+  synchronizerId: string;
+}> {
   const now = new Date().toISOString();
   const allocation = {
     settlement: {
@@ -438,7 +590,7 @@ export async function prepareAllocateCommand(params: {
       requestedAt: now,
       allocateBefore: params.allocateBefore.toISOString(),
       settleBefore: params.settleBefore.toISOString(),
-      meta: { values: {} },
+      meta: { values: {} }
     },
     transferLegId: "leg-0",
     transferLeg: {
@@ -446,31 +598,44 @@ export async function prepareAllocateCommand(params: {
       receiver: params.solverParty,
       amount: params.amountBtc,
       instrumentId: NETWORK.instrumentId,
-      meta: { values: {} },
-    },
+      meta: { values: {} }
+    }
   };
-  const factoryRes = await fetch(reg(`/registry/allocation-instruction/v1/allocation-factory`), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      choiceArguments: {
-        expectedAdmin: NETWORK.decentralizedPartyId,
-        allocation,
-        requestedAt: now,
-        inputHoldingCids: params.inputHoldingCids,
-        extraArgs: { context: { values: {} }, meta: { values: {} } },
-      },
-    }),
-  });
-  if (!factoryRes.ok) throw new Error(`AllocationFactory failed (${factoryRes.status}): ${await factoryRes.text()}`);
+  const factoryRes = await fetch(
+    reg(`/registry/allocation-instruction/v1/allocation-factory`),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        choiceArguments: {
+          expectedAdmin: NETWORK.decentralizedPartyId,
+          allocation,
+          requestedAt: now,
+          inputHoldingCids: params.inputHoldingCids,
+          extraArgs: { context: { values: {} }, meta: { values: {} } }
+        }
+      })
+    }
+  );
+  if (!factoryRes.ok)
+    throw new Error(
+      `AllocationFactory failed (${factoryRes.status}): ${await factoryRes.text()}`
+    );
   const factory = (await factoryRes.json()) as {
     factoryId: string;
-    choiceContext: { choiceContextData: unknown; disclosedContracts: DisclosedContract[] };
+    choiceContext: {
+      choiceContextData: unknown;
+      disclosedContracts: DisclosedContract[];
+    };
   };
-  const disclosedContracts = factory.choiceContext.disclosedContracts.map((dc) => ({
-    ...dc, synchronizerId: dc.synchronizerId ?? "",
-  }));
-  const synchronizerId = disclosedContracts.find((d) => d.synchronizerId)?.synchronizerId ?? "";
+  const disclosedContracts = factory.choiceContext.disclosedContracts.map(
+    (dc) => ({
+      ...dc,
+      synchronizerId: dc.synchronizerId ?? ""
+    })
+  );
+  const synchronizerId =
+    disclosedContracts.find((d) => d.synchronizerId)?.synchronizerId ?? "";
   const command = {
     ExerciseCommand: {
       templateId: ALLOCATION_FACTORY_INTERFACE,
@@ -481,9 +646,12 @@ export async function prepareAllocateCommand(params: {
         allocation,
         requestedAt: now,
         inputHoldingCids: params.inputHoldingCids,
-        extraArgs: { context: factory.choiceContext.choiceContextData, meta: { values: {} } },
-      },
-    },
+        extraArgs: {
+          context: factory.choiceContext.choiceContextData,
+          meta: { values: {} }
+        }
+      }
+    }
   };
   return { command, disclosedContracts, synchronizerId };
 }
@@ -499,30 +667,62 @@ export async function findAllocationBySettlement(params: {
   minSettleBefore: Date; // must cover the order's long timelock
 }): Promise<{ cid: string } | { cid: null; reason: string }> {
   const jwt = await getLedgerJwt();
-  const endRes = await fetch(`${NETWORK.ledgerHost}/v2/state/ledger-end`, { headers: { Authorization: `Bearer ${jwt}` } });
+  const endRes = await fetch(`${NETWORK.ledgerHost}/v2/state/ledger-end`, {
+    headers: { Authorization: `Bearer ${jwt}` }
+  });
   const offset = ((await endRes.json()) as { offset: number }).offset;
-  const wildcard = { cumulative: [{ identifierFilter: { WildcardFilter: { value: { includeCreatedEventBlob: false } } } }] };
+  const wildcard = {
+    cumulative: [
+      {
+        identifierFilter: {
+          WildcardFilter: { value: { includeCreatedEventBlob: false } }
+        }
+      }
+    ]
+  };
   const r = await fetch(`${NETWORK.ledgerHost}/v2/state/active-contracts`, {
-    method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
-    body: JSON.stringify({ filter: { filtersByParty: { [params.solverParty]: wildcard } }, verbose: false, activeAtOffset: offset }),
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${jwt}`
+    },
+    body: JSON.stringify({
+      filter: { filtersByParty: { [params.solverParty]: wildcard } },
+      verbose: false,
+      activeAtOffset: offset
+    })
   });
   if (!r.ok) return { cid: null, reason: `ACS read failed (${r.status})` };
   const entries = (await r.json()) as any[];
   for (const e of entries) {
     const c = e?.contractEntry?.JsActiveContract?.createdEvent;
     const tpl = c?.templateId ?? "";
-    if (!c?.contractId || !/Allocation/i.test(tpl) || /:Holding$/.test(tpl)) continue;
+    if (!c?.contractId || !/Allocation/i.test(tpl) || /:Holding$/.test(tpl))
+      continue;
     const a = c.createArgument ?? {};
     const settlement = a.settlement ?? a.allocation?.settlement;
     const leg = a.transferLeg ?? a.allocation?.transferLeg;
     if (settlement?.settlementRef?.id !== params.settlementId) continue;
     // Terms check — the user signed OUR prepared command, but verify on-ledger anyway.
-    if (leg?.sender !== params.senderParty) return { cid: null, reason: "allocation sender mismatch" };
-    if (leg?.receiver !== params.solverParty) return { cid: null, reason: "allocation receiver is not the solver" };
-    if (settlement?.executor !== params.solverParty) return { cid: null, reason: "allocation executor is not the solver" };
-    if (parseFloat(leg?.amount ?? "0") + 1e-9 < parseFloat(params.minAmountBtc)) return { cid: null, reason: `allocation amount too small (${leg?.amount})` };
-    if (new Date(settlement?.settleBefore ?? 0).getTime() < params.minSettleBefore.getTime()) {
-      return { cid: null, reason: "allocation settleBefore is earlier than the order timelock" };
+    if (leg?.sender !== params.senderParty)
+      return { cid: null, reason: "allocation sender mismatch" };
+    if (leg?.receiver !== params.solverParty)
+      return { cid: null, reason: "allocation receiver is not the solver" };
+    if (settlement?.executor !== params.solverParty)
+      return { cid: null, reason: "allocation executor is not the solver" };
+    if (parseFloat(leg?.amount ?? "0") + 1e-9 < parseFloat(params.minAmountBtc))
+      return {
+        cid: null,
+        reason: `allocation amount too small (${leg?.amount})`
+      };
+    if (
+      new Date(settlement?.settleBefore ?? 0).getTime() <
+      params.minSettleBefore.getTime()
+    ) {
+      return {
+        cid: null,
+        reason: "allocation settleBefore is earlier than the order timelock"
+      };
     }
     return { cid: c.contractId };
   }
@@ -538,20 +738,28 @@ export async function executeAllocationAsSolver(params: {
   allocationCid: string;
 }): Promise<{ updateId: string }> {
   const jwt = await getLedgerJwt();
-  const ctx = await allocationChoiceContext(params.allocationCid, "execute-transfer");
-  const ALLOCATION_INTERFACE = "#splice-api-token-allocation-v1:Splice.Api.Token.AllocationV1:Allocation";
+  const ctx = await allocationChoiceContext(
+    params.allocationCid,
+    "execute-transfer"
+  );
+  const ALLOCATION_INTERFACE =
+    "#splice-api-token-allocation-v1:Splice.Api.Token.AllocationV1:Allocation";
   const { updateId } = await submit(
     jwt,
     [params.solverParty],
-    [{
-      ExerciseCommand: {
-        templateId: ALLOCATION_INTERFACE,
-        contractId: params.allocationCid,
-        choice: "Allocation_ExecuteTransfer",
-        choiceArgument: { extraArgs: { context: ctx.data, meta: { values: {} } } },
-      },
-    }],
-    ctx.disclosed,
+    [
+      {
+        ExerciseCommand: {
+          templateId: ALLOCATION_INTERFACE,
+          contractId: params.allocationCid,
+          choice: "Allocation_ExecuteTransfer",
+          choiceArgument: {
+            extraArgs: { context: ctx.data, meta: { values: {} } }
+          }
+        }
+      }
+    ],
+    ctx.disclosed
   );
   return { updateId };
 }
@@ -560,20 +768,28 @@ export async function executeAllocationAsSolver(params: {
  *  sign in their wallet (sender-alone, their unilateral on-ledger exit). */
 export async function prepareWithdrawCommand(params: {
   allocationCid: string;
-}): Promise<{ command: unknown; disclosedContracts: DisclosedContract[]; synchronizerId: string }> {
+}): Promise<{
+  command: unknown;
+  disclosedContracts: DisclosedContract[];
+  synchronizerId: string;
+}> {
   const ctx = await allocationChoiceContext(params.allocationCid, "withdraw");
-  const synchronizerId = ctx.disclosed.find((d) => d.synchronizerId)?.synchronizerId ?? "";
+  const synchronizerId =
+    ctx.disclosed.find((d) => d.synchronizerId)?.synchronizerId ?? "";
   return {
     command: {
       ExerciseCommand: {
-        templateId: "#splice-api-token-allocation-v1:Splice.Api.Token.AllocationV1:Allocation",
+        templateId:
+          "#splice-api-token-allocation-v1:Splice.Api.Token.AllocationV1:Allocation",
         contractId: params.allocationCid,
         choice: "Allocation_Withdraw",
-        choiceArgument: { extraArgs: { context: ctx.data, meta: { values: {} } } },
-      },
+        choiceArgument: {
+          extraArgs: { context: ctx.data, meta: { values: {} } }
+        }
+      }
     },
     disclosedContracts: ctx.disclosed,
-    synchronizerId,
+    synchronizerId
   };
 }
 
@@ -591,15 +807,19 @@ export async function refundHtlcLock(params: {
   const { updateId } = await submit(
     jwt,
     [params.lockerParty ?? params.solverParty],
-    [{
-      ExerciseCommand: {
-        templateId: htlcTemplateId(),
-        contractId: params.htlcCid,
-        choice: "Refund",
-        choiceArgument: { allocationContext: { context: ctx.data, meta: { values: {} } } },
-      },
-    }],
-    ctx.disclosed,
+    [
+      {
+        ExerciseCommand: {
+          templateId: htlcTemplateId(),
+          contractId: params.htlcCid,
+          choice: "Refund",
+          choiceArgument: {
+            allocationContext: { context: ctx.data, meta: { values: {} } }
+          }
+        }
+      }
+    ],
+    ctx.disclosed
   );
   return { updateId };
 }

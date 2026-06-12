@@ -18,7 +18,14 @@
  *     digest. So we pass the hex form of `s` to the Canton claim; both produce H.
  */
 
-import { keccak256, toHex, type Account, type Address, type Hex, type TypedDataDomain } from "viem";
+import {
+  keccak256,
+  toHex,
+  type Account,
+  type Address,
+  type Hex,
+  type TypedDataDomain
+} from "viem";
 
 /** A user-generated secret and its hashlock. The user keeps `secret` private
  *  until they claim the Canton leg; only `hashLock` goes into the signed order. */
@@ -36,7 +43,7 @@ export interface SwapSecret {
  * `randomBytes` is injected for testability; defaults to Web Crypto.
  */
 export function generateSecret(
-  randomBytes: (n: number) => Uint8Array = defaultRandom,
+  randomBytes: (n: number) => Uint8Array = defaultRandom
 ): SwapSecret {
   const raw = randomBytes(32);
   const secret = toHex(raw); // 0x + 64 hex chars
@@ -48,7 +55,9 @@ export function generateSecret(
  *  what the Canton (Daml) claim takes as its `preimage` (BytesHex). Hashing this
  *  hex string in Daml yields the same H as keccak over the raw bytes on EVM. */
 export function secretToCantonPreimage(secret: Hex): string {
-  return secret.startsWith("0x") ? secret.slice(2).toLowerCase() : secret.toLowerCase();
+  return secret.startsWith("0x")
+    ? secret.slice(2).toLowerCase()
+    : secret.toLowerCase();
 }
 
 /** Verify a revealed secret matches a committed hashlock (used by the solver
@@ -77,7 +86,7 @@ export interface Timelocks {
 export function buildTimelocks(
   nowSeconds: number,
   totalWindowSeconds: number,
-  gapSeconds: number,
+  gapSeconds: number
 ): Timelocks {
   if (totalWindowSeconds < 2 * 60 * 60) {
     throw new Error("HTLC window must be >= 2h (Cancore minimum)");
@@ -97,9 +106,9 @@ export interface HtlcSwapRequest {
   user: Address;
   /** WBTC amount to lock (origin token base units, 8dp). */
   wbtcAmount: bigint;
-  /** cBTC amount to receive (base units). */
+  /** CBTC amount to receive (base units). */
   cbtcAmount: bigint;
-  /** User's full Canton party id (the cBTC receiver). */
+  /** User's full Canton party id (the CBTC receiver). */
   cantonParty: string;
   /** H = keccak256(secret). The user generated the secret; only H is shared. */
   hashLock: Hex;
@@ -125,12 +134,14 @@ export function buildHtlcOrder(req: HtlcSwapRequest): BuiltHtlcOrder {
   const packed = keccak256(
     toHex(
       `${req.user.toLowerCase()}|${req.wbtcAmount}|${req.cbtcAmount}|${req.cantonParty}|` +
-        `${req.hashLock.toLowerCase()}|${req.timelocks.userTimelock}|${req.timelocks.solverTimelock}|${req.nonce}`,
-    ),
+        `${req.hashLock.toLowerCase()}|${req.timelocks.userTimelock}|${req.timelocks.solverTimelock}|${req.nonce}`
+    )
   );
   // sanity: timelock ladder must hold.
   if (!(req.timelocks.solverTimelock < req.timelocks.userTimelock)) {
-    throw new Error("timelock ladder violated: solverTimelock must be < userTimelock");
+    throw new Error(
+      "timelock ladder violated: solverTimelock must be < userTimelock"
+    );
   }
   return { request: req, swapId: packed };
 }
@@ -146,8 +157,16 @@ export function buildHtlcOrder(req: HtlcSwapRequest): BuiltHtlcOrder {
 
 /** EIP-712 domain for the off-chain HTLC swap order. `chainId` = the EVM origin
  *  chain; `verifyingContract` = the HTLCEscrow (binds the order to our escrow). */
-export function htlcOrderDomain(chainId: number, escrow: Address): TypedDataDomain {
-  return { name: "OranjHtlcSwap", version: "1", chainId, verifyingContract: escrow };
+export function htlcOrderDomain(
+  chainId: number,
+  escrow: Address
+): TypedDataDomain {
+  return {
+    name: "OranjHtlcSwap",
+    version: "1",
+    chainId,
+    verifyingContract: escrow
+  };
 }
 
 export const HTLC_ORDER_TYPES = {
@@ -159,8 +178,8 @@ export const HTLC_ORDER_TYPES = {
     { name: "hashLock", type: "bytes32" },
     { name: "userTimelock", type: "uint64" },
     { name: "solverTimelock", type: "uint64" },
-    { name: "nonce", type: "uint256" },
-  ],
+    { name: "nonce", type: "uint256" }
+  ]
 } as const;
 
 /** Build the EIP-712 typed data the user signs to commit to an HTLC swap order. */
@@ -182,8 +201,8 @@ export function buildHtlcOrderTypedData(params: {
       hashLock: req.hashLock,
       userTimelock: BigInt(req.timelocks.userTimelock),
       solverTimelock: BigInt(req.timelocks.solverTimelock),
-      nonce: req.nonce,
-    },
+      nonce: req.nonce
+    }
   };
 }
 
@@ -196,7 +215,9 @@ export async function signHtlcOrder(params: {
 }): Promise<Hex> {
   const typed = buildHtlcOrderTypedData(params);
   if (!params.account.signTypedData) {
-    throw new Error("account cannot signTypedData (use a wallet/private-key account)");
+    throw new Error(
+      "account cannot signTypedData (use a wallet/private-key account)"
+    );
   }
   return params.account.signTypedData(typed as never);
 }
@@ -213,6 +234,7 @@ function defaultRandom(n: number): Uint8Array {
 function hexToBytes(hex: Hex): Uint8Array {
   const h = hex.startsWith("0x") ? hex.slice(2) : hex;
   const out = new Uint8Array(h.length / 2);
-  for (let i = 0; i < out.length; i++) out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
+  for (let i = 0; i < out.length; i++)
+    out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
   return out;
 }

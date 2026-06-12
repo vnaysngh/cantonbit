@@ -20,16 +20,16 @@ import {
   fillDescriptionHash,
   orderId as computeOrderId,
   type MandateOutput,
-  type StandardOrder,
+  type StandardOrder
 } from "./encoding.js";
 
-/** A request to swap WBTC (on the origin chain) for cBTC (on Canton). */
+/** A request to swap WBTC (on the origin chain) for CBTC (on Canton). */
 export interface SwapRequest {
   /** The user's EVM address (locks WBTC, signs the order). */
   user: Address;
   /** Amount of WBTC to lock, in token base units (8dp). */
   wbtcAmount: bigint;
-  /** Amount of cBTC to deliver, in its base units. */
+  /** Amount of CBTC to deliver, in its base units. */
   cbtcAmount: bigint;
   /**
    * The user's FULL Canton destination party id (e.g. "cbtc-user-...::1220...").
@@ -39,7 +39,7 @@ export interface SwapRequest {
    * other party produces a payloadHash that won't satisfy the signed order.
    */
   cantonParty: string;
-  /** cBTC instrument identifier as bytes32 (opaque on the EVM side). */
+  /** CBTC instrument identifier as bytes32 (opaque on the EVM side). */
   cbtcToken: Hex; // bytes32
   /** Unique per-user nonce for this order. */
   nonce: bigint;
@@ -55,11 +55,17 @@ export function cantonPartyToRecipient(cantonParty: string): Hex {
  * genuine preimage of the on-chain recipient commitment. The Open event only
  * carries keccak256(party); the solver gets the full party from a side channel
  * (the user's swap request) and MUST check it here before delivering — else it
- * could be tricked into sending cBTC to an attacker's party. Returns true only
+ * could be tricked into sending CBTC to an attacker's party. Returns true only
  * if keccak256(party) exactly equals the order's committed recipient hash.
  */
-export function verifyCantonParty(cantonParty: string, committedRecipient: Hex): boolean {
-  return cantonPartyToRecipient(cantonParty).toLowerCase() === committedRecipient.toLowerCase();
+export function verifyCantonParty(
+  cantonParty: string,
+  committedRecipient: Hex
+): boolean {
+  return (
+    cantonPartyToRecipient(cantonParty).toLowerCase() ===
+    committedRecipient.toLowerCase()
+  );
 }
 
 /** Everything needed to act on an order, kept together so build & attest agree. */
@@ -90,7 +96,7 @@ export interface BuiltOrder {
 export function buildOrder(
   cfg: SwapNetworkConfig,
   req: SwapRequest,
-  nowSeconds: number,
+  nowSeconds: number
 ): BuiltOrder {
   const ourOracleId = oracleId(cfg);
 
@@ -102,13 +108,15 @@ export function buildOrder(
     amount: req.cbtcAmount,
     recipient: cantonPartyToRecipient(req.cantonParty), // keccak256(party)
     callbackData: "0x",
-    context: "0x",
+    context: "0x"
   };
 
   const fillDeadline = nowSeconds + cfg.fillDeadlineSeconds;
   const expires = nowSeconds + cfg.expiresSeconds;
   if (!(fillDeadline < expires)) {
-    throw new Error("config invariant violated: fillDeadline must be < expires");
+    throw new Error(
+      "config invariant violated: fillDeadline must be < expires"
+    );
   }
 
   const order: StandardOrder = {
@@ -119,7 +127,7 @@ export function buildOrder(
     fillDeadline,
     inputOracle: cfg.oracle, // escrow staticcalls THIS oracle
     inputs: [[addressToUint(cfg.wbtc), req.wbtcAmount]],
-    outputs: [output],
+    outputs: [output]
   };
 
   const orderId = computeOrderId(order, cfg.escrow);
@@ -133,8 +141,8 @@ export function buildOrder(
     attestTuple: {
       remoteChainId: cfg.cantonChainId,
       remoteOracle: ourOracleId,
-      application: cfg.cantonSettlerId,
-    },
+      application: cfg.cantonSettlerId
+    }
   };
 }
 
@@ -144,20 +152,25 @@ export function buildOrder(
  * escrow's _validateFills recomputes — keep `fillTimestamp` identical in both.
  *
  * @param solver The solver's identifier (its EVM address as bytes32).
- * @param fillTimestamp The Canton ledger record-time of the cBTC delivery,
+ * @param fillTimestamp The Canton ledger record-time of the CBTC delivery,
  *   truncated to a uint32 (seconds). MUST be <= order.fillDeadline.
  */
 export function proofDataHash(
   built: BuiltOrder,
   solver: Hex, // bytes32 solver id
-  fillTimestamp: number,
+  fillTimestamp: number
 ): Hex {
   if (fillTimestamp > built.order.fillDeadline) {
     throw new Error(
-      `fill timestamp ${fillTimestamp} is after fillDeadline ${built.order.fillDeadline}`,
+      `fill timestamp ${fillTimestamp} is after fillDeadline ${built.order.fillDeadline}`
     );
   }
-  return fillDescriptionHash(solver, built.orderId, fillTimestamp, built.output);
+  return fillDescriptionHash(
+    solver,
+    built.orderId,
+    fillTimestamp,
+    built.output
+  );
 }
 
 /** Address (20 bytes) → uint256 for the inputs[] encoding. */

@@ -11,7 +11,7 @@ Related: [HTLC Security Audit (2026-06-12)](./HTLC-SECURITY-AUDIT-2026-06-12.md)
 Every HTLC swap uses a random 32-byte **secret** (preimage) generated in the browser. Its hash (**hashLock**) is committed in the order and on-chain locks. The user reveals the secret only at **claim** time. Until then:
 
 - The solver must not learn the secret (or they could claim the user's locked funds).
-- Our server must not learn the secret pre-claim (same reason — we host claims for email users via `CanActAs`, but the user still controls *when* to reveal).
+- Our server must not learn the secret pre-claim (same reason — we host claims for email users via `CanActAs`, but the user still controls _when_ to reveal).
 
 The secret is created in `generateSecret()` (`lib/htlc-client.ts`) and must survive long enough for the user to complete the swap after refresh, tab close, or navigation to `/orders`.
 
@@ -29,12 +29,12 @@ The current vault (`lib/secret-vault.ts`, key `oranj.htlc.secrets.v1`) stores:
 
 That works for recovery UX but has real weaknesses:
 
-| Risk | What v1 plaintext did | What v3 improves |
-|------|----------------------|-------------------|
-| DevTools / unlocked device | Anyone reads all secrets | Wrong session/wallet cannot decrypt; paste fallback remains |
-| No identity binding | Any same-origin code with swap id reads secret | Bound to Supabase session + party, or Loop party + public_key, or EVM address (reverse) |
-| No expiry | Secrets linger after timelock | Purged after timelock (+ buffer); direction-aware on reverse |
-| Incomplete cleanup | Partial `forgetSecret` coverage | Cleared after claim/retake on swap + orders |
+| Risk                       | What v1 plaintext did                          | What v3 improves                                                                        |
+| -------------------------- | ---------------------------------------------- | --------------------------------------------------------------------------------------- |
+| DevTools / unlocked device | Anyone reads all secrets                       | Wrong session/wallet cannot decrypt; paste fallback remains                             |
+| No identity binding        | Any same-origin code with swap id reads secret | Bound to Supabase session + party, or Loop party + public_key, or EVM address (reverse) |
+| No expiry                  | Secrets linger after timelock                  | Purged after timelock (+ buffer); direction-aware on reverse                            |
+| Incomplete cleanup         | Partial `forgetSecret` coverage                | Cleared after claim/retake on swap + orders                                             |
 
 **Honest ceiling (Tier 1):** v3 is **identity-bound obfuscation + UX gates**, not at-rest crypto against same-origin script. KDF inputs for both anchors live beside the ciphertext in `localStorage` (managed: user id from the auth session; loop: `public_key` stored in the entry). A content script or XSS on our origin can derive the key and decrypt without user interaction. The Loop `signMessage` step is a **consent gate before recall**, not key protection — and we do not verify the signature bytes.
 
@@ -50,10 +50,10 @@ What v3 **does** deliver vs v1:
 
 This app has **two Canton identity paths**, not one:
 
-| Model | Party | Auth | `counterMode` | Typical claim |
-|-------|-------|------|---------------|---------------|
-| **Email / participant-managed** | warpx-hosted party from `/api/parties/me` | Supabase OTP session | `managed` | Forward: backend `claim-managed` (POST preimage only). Reverse: MetaMask claim. |
-| **Loop wallet** | External Loop party | Loop JWT (Exchange API Key sign) | `loop` | Forward: `claim-counter` + optional Loop accept. Reverse: MetaMask claim. |
+| Model                           | Party                                     | Auth                             | `counterMode` | Typical claim                                                                   |
+| ------------------------------- | ----------------------------------------- | -------------------------------- | ------------- | ------------------------------------------------------------------------------- |
+| **Email / participant-managed** | warpx-hosted party from `/api/parties/me` | Supabase OTP session             | `managed`     | Forward: backend `claim-managed` (POST preimage only). Reverse: MetaMask claim. |
+| **Loop wallet**                 | External Loop party                       | Loop JWT (Exchange API Key sign) | `loop`        | Forward: `claim-counter` + optional Loop accept. Reverse: MetaMask claim.       |
 
 A vault design that derives its encryption key from **only MetaMask** or **only Loop** breaks one of these paths:
 
@@ -107,10 +107,10 @@ Cancore’s current app (bundle inspected 2026-06) tends toward **server-assiste
 
 Encrypt each secret with AES-GCM. Choose an **anchor** at store time based on `counterMode`:
 
-| Anchor | Used when | Key material | Unlock at recall |
-|--------|-----------|--------------|------------------|
-| `managed-session` | `counterMode === "managed"` | `SHA-256(domain + supabaseUserId + cantonParty)` | Active Supabase session; party must match entry |
-| `loop-wallet` | `counterMode === "loop"` | `SHA-256(domain + party_id + public_key)` — **deterministic** | Connected Loop party + `public_key` match; explicit `signMessage` unlock gate (30 min cache) |
+| Anchor            | Used when                   | Key material                                                  | Unlock at recall                                                                             |
+| ----------------- | --------------------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `managed-session` | `counterMode === "managed"` | `SHA-256(domain + supabaseUserId + cantonParty)`              | Active Supabase session; party must match entry                                              |
+| `loop-wallet`     | `counterMode === "loop"`    | `SHA-256(domain + party_id + public_key)` — **deterministic** | Connected Loop party + `public_key` match; explicit `signMessage` unlock gate (30 min cache) |
 
 **Threat-model note:** KDF inputs are stored alongside the ciphertext (or derivable from the same `localStorage`). This binds secrets to the correct identity and prevents casual DevTools copy-paste, but **does not** stop a same-origin extension or XSS from calling the exported `derive*VaultKey` helpers. Treat as obfuscation + UX gate; see Tier 2 for extractable-key-free storage.
 
@@ -135,16 +135,16 @@ What this does **not** fix (inherent browser ceiling):
 
 ### Files touched
 
-| File | Change |
-|------|--------|
-| `docs/HTLC-SECRET-VAULT.md` | This document |
-| `lib/secret-vault.ts` | v3 vault, dual anchors, TTL, v1 lazy migration, test-only Loop unlock bypass |
-| `lib/secret-vault.test.ts` | Crypto round-trip + anchor selection + v1 migration tests |
-| `lib/htlc-order-logic.ts` | `isSwapClaimable` (Loop forward at `main_locked`) |
-| `lib/htlc-claim-http.ts` | Claim-route HTTP status mapping (400/409 vs 500) |
-| `hooks/useVaultContext.ts` | Shared vault recall context for swap + orders |
-| `app/swap/page.tsx` | Persist throws if vault save fails; resume without auto Loop sign |
-| `app/orders/page.tsx` | Merged history fetch; claim UI + paste fallback |
+| File                        | Change                                                                       |
+| --------------------------- | ---------------------------------------------------------------------------- |
+| `docs/HTLC-SECRET-VAULT.md` | This document                                                                |
+| `lib/secret-vault.ts`       | v3 vault, dual anchors, TTL, v1 lazy migration, test-only Loop unlock bypass |
+| `lib/secret-vault.test.ts`  | Crypto round-trip + anchor selection + v1 migration tests                    |
+| `lib/htlc-order-logic.ts`   | `isSwapClaimable` (Loop forward at `main_locked`)                            |
+| `lib/htlc-claim-http.ts`    | Claim-route HTTP status mapping (400/409 vs 500)                             |
+| `hooks/useVaultContext.ts`  | Shared vault recall context for swap + orders                                |
+| `app/swap/page.tsx`         | Persist throws if vault save fails; resume without auto Loop sign            |
+| `app/orders/page.tsx`       | Merged history fetch; claim UI + paste fallback                              |
 
 ### Vault entry shape (v3)
 
@@ -188,9 +188,9 @@ See `lib/secret-vault.ts` (v3) and `clearLoopVaultSession()` on Loop logout.
 
 ### Issue B — Managed reveal missing EVM claim-margin gate (solver robbery)
 
-**Problem:** Forward **managed** swaps (`POST /api/htlc/{id}/claim-managed`) exercised on-ledger cBTC claim via `claimCounterAsBackend` **without** calling `verifyEvmLock()`. The Loop path (`claimCounter`) already checked that the WBTC lock exists, matches amount/receiver, and has at least **10 minutes** left before `userTimelock`.
+**Problem:** Forward **managed** swaps (`POST /api/htlc/{id}/claim-managed`) exercised on-ledger CBTC claim via `claimCounterAsBackend` **without** calling `verifyEvmLock()`. The Loop path (`claimCounter`) already checked that the WBTC lock exists, matches amount/receiver, and has at least **10 minutes** left before `userTimelock`.
 
-**Attack:** User waits until ~1 minute before `userTimelock`, reveals preimage → receives cBTC → solver cannot claim WBTC in time → user `retake`s WBTC after timelock. Both legs taken; solver float drained.
+**Attack:** User waits until ~1 minute before `userTimelock`, reveals preimage → receives CBTC → solver cannot claim WBTC in time → user `retake`s WBTC after timelock. Both legs taken; solver float drained.
 
 **Implemented solution:** Call `verifyEvmLock(o)` at the start of `claimCounterAsBackend` when `direction === "evm-to-canton"` — same guard as `claimCounter`. Late reveals are rejected with `"EVM lock expires too soon for the solver to claim safely"`.
 
@@ -221,19 +221,19 @@ The claim **API and on-chain steps are unchanged**. Only storage/recall/gating c
 
 Implemented in this repo (2026-06-12, v3 loop key fix):
 
-| Item | Location |
-|------|----------|
-| v3 encrypted vault (dual anchors, TTL, v1 migration) | `lib/secret-vault.ts` |
-| Integration tests (managed + loop cold recall, EVM gate) | `lib/secret-vault.test.ts` |
-| Persist throws if vault save fails (before lock proceeds) | `app/swap/page.tsx` |
-| `forgetSecret` after claim / retake | `app/swap/page.tsx` |
-| Session + Loop merged orders history | `fetchMergedSwapHistory` in `lib/htlc-client.ts` |
-| Claim UI for `counter_locked` + Loop `main_locked` | `isSwapClaimable` in `lib/htlc-order-logic.ts` |
-| Paste fallback always visible on claim drawer | `app/orders/page.tsx` |
-| v1 lazy migration (no plaintext bypass) | `recallSecret` + `orderMeta` in `lib/secret-vault.ts` |
-| Resume claim without auto Loop sign | `htlc-resume` / `rev-resume` stages in `app/swap/page.tsx` |
-| Claim API 409 for EVM margin / state errors | `lib/htlc-claim-http.ts`, claim-* routes |
-| Managed EVM claim-margin on reveal | `lib/htlc-service-singleton.ts` (`claimCounterAsBackend`) |
+| Item                                                      | Location                                                   |
+| --------------------------------------------------------- | ---------------------------------------------------------- |
+| v3 encrypted vault (dual anchors, TTL, v1 migration)      | `lib/secret-vault.ts`                                      |
+| Integration tests (managed + loop cold recall, EVM gate)  | `lib/secret-vault.test.ts`                                 |
+| Persist throws if vault save fails (before lock proceeds) | `app/swap/page.tsx`                                        |
+| `forgetSecret` after claim / retake                       | `app/swap/page.tsx`                                        |
+| Session + Loop merged orders history                      | `fetchMergedSwapHistory` in `lib/htlc-client.ts`           |
+| Claim UI for `counter_locked` + Loop `main_locked`        | `isSwapClaimable` in `lib/htlc-order-logic.ts`             |
+| Paste fallback always visible on claim drawer             | `app/orders/page.tsx`                                      |
+| v1 lazy migration (no plaintext bypass)                   | `recallSecret` + `orderMeta` in `lib/secret-vault.ts`      |
+| Resume claim without auto Loop sign                       | `htlc-resume` / `rev-resume` stages in `app/swap/page.tsx` |
+| Claim API 409 for EVM margin / state errors               | `lib/htlc-claim-http.ts`, claim-\* routes                  |
+| Managed EVM claim-margin on reveal                        | `lib/htlc-service-singleton.ts` (`claimCounterAsBackend`)  |
 
 Legacy v1 plaintext (`oranj.htlc.secrets.v1`) is migrated on recall when order metadata is available; it is never returned without passing v3 gates. v2 loop entries used a broken signature-based KDF and are cleared when v3 writes.
 
