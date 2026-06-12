@@ -999,6 +999,15 @@ export default function SwapPage() {
               counter. You’ll claim your cBTC next.
             </p>
             <p className="mt-2 break-all text-xs text-foreground/40">lock tx {stage.lockTx.slice(0, 18)}…</p>
+            {/* ESCAPE HATCH: if the solver never locks the counter, the user can
+                always retake their WBTC after the EVM timelock (the contract enforces
+                TooEarly before then). Surfaced here so a stuck swap is self-serve. */}
+            <button
+              onClick={() => handleRetake(stage.swapId)}
+              className="mt-4 w-full rounded-2xl border border-foreground/15 px-4 py-2.5 text-sm hover:bg-foreground/5"
+            >
+              Solver not responding? Retake my WBTC (after timelock)
+            </button>
           </div>
         )}
 

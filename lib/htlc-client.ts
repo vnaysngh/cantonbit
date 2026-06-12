@@ -76,9 +76,6 @@ export const htlcApi = {
   // there is NOTHING to accept — skip the wallet popup entirely.
   claimCounter: (id: string, preimage: string): Promise<{ order: unknown; updateId: string; delivered: boolean }> =>
     jpost(`/api/htlc/${id}/claim-counter`, { preimage }),
-  // On-ledger DAR claim (user signs via Loop): prepare the command, then record the result.
-  prepareClaim: (id: string, preimage: string): Promise<{ command: unknown; disclosedContracts: unknown[]; synchronizerId: string }> =>
-    jpost(`/api/htlc/${id}/claim-prepare`, { preimage }),
   // LOOP standard accept (user signs a STANDARD TransferInstruction_Accept in their
   // wallet — no custom DAR). Then record the revealed preimage so the solver claims WBTC.
   prepareAccept: (id: string): Promise<{ command: unknown; disclosedContracts: unknown[]; synchronizerId: string }> =>

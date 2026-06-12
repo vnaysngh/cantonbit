@@ -8,6 +8,8 @@
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
 import { NETWORK } from "@/lib/constants";
+import { assertValidTimelocks } from "@/lib/htlc-timelock";
+import { assertOrderAmounts, QuoteUnavailableError, DepegError } from "@/lib/htlc-quote";
 
 export async function POST(req: Request) {
   try {
@@ -20,6 +22,15 @@ export async function POST(req: Request) {
     for (const k of required) {
       if (body[k] === undefined) return NextResponse.json({ error: `missing ${k}` }, { status: 400 });
     }
+    // SECURITY — never trust client timelocks. The party who reveals the secret
+    // SECOND must have the longer window; userTimelock is the longer leg in BOTH
+    // directions. A hostile client that inverts the ladder (or skips the gap) is
+    // rejected here, closing the "claim-then-refund both legs" robbery.
+    assertValidTimelocks(Math.floor(Date.now() / 1000), Number(body.userTimelock), Number(body.solverTimelock));
+    // SECURITY — re-quote NOW and reject a manipulated/stale amount ratio. The
+    // client can't submit an output more favorable than a fresh quote (+tolerance).
+    const cbtcUnits = BigInt(Math.round(parseFloat(String(body.cbtcAmount)) * 1e8));
+    await assertOrderAmounts(body.direction, BigInt(body.wbtcAmount), cbtcUnits);
     // AUTHORITATIVE counterMode — derived from WHERE the receiver party lives, not
     // from the client (a UI race once sent "loop" for a warpx-hosted party). A party
     // in OUR warpx namespace → managed (on-ledger HtlcLock, backend CanActAs claim);
@@ -30,6 +41,10 @@ export async function POST(req: Request) {
     const order = await htlcService().createOrder(body);
     return NextResponse.json({ order });
   } catch (e) {
+    // Price unavailable / de-pegged → 503 so the page shows "swaps paused" not a hard error.
+    if (e instanceof QuoteUnavailableError || e instanceof DepegError) {
+      return NextResponse.json({ error: e.message }, { status: 503 });
+    }
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 400 });
   }
 }

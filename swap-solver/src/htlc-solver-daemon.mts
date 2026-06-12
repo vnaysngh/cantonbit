@@ -36,6 +36,17 @@ function reqEnv(k: string): string { const v = process.env[k]; if (!v) throw new
 const norm = (k: string) => (k.startsWith("0x") ? k : `0x${k}`) as Hex;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Fire-and-forget operational alert to ALERT_WEBHOOK_URL (Slack/Discord). Never
+ *  throws. Mirrors lib/alert.ts but inline (the daemon has its own dep tree). */
+const ALERT_WEBHOOK = process.env.ALERT_WEBHOOK_URL;
+async function alert(title: string, fields: Record<string, string | number> = {}): Promise<void> {
+  const text = `🔴 *${title}*\n` + Object.entries(fields).map(([k, v]) => `• ${k}: \`${v}\``).join("\n");
+  console.error(`[alert] ${title}`, fields);
+  if (!ALERT_WEBHOOK) return;
+  try { await fetch(ALERT_WEBHOOK, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }), signal: AbortSignal.timeout(5000) }); }
+  catch { /* monitoring must not break the loop */ }
+}
+
 interface Order {
   id: string; status: string; hashLock: Hex;
   wbtcAmount: string; userEvmAddress: string; solverEvmAddress: string;
@@ -46,7 +57,29 @@ interface Order {
 const ERC20_ABI = [
   { type: "function", name: "approve", stateMutability: "nonpayable", inputs: [{ name: "s", type: "address" }, { name: "a", type: "uint256" }], outputs: [{ type: "bool" }] },
   { type: "function", name: "allowance", stateMutability: "view", inputs: [{ name: "o", type: "address" }, { name: "s", type: "address" }], outputs: [{ type: "uint256" }] },
+  { type: "function", name: "balanceOf", stateMutability: "view", inputs: [{ name: "o", type: "address" }], outputs: [{ type: "uint256" }] },
 ] as const;
+
+const ESCROW_START_BLOCK = BigInt(process.env.ESCROW_START_BLOCK ?? "42371722");
+
+/** Recover the tx hash of the Locked event for a hashLock (chunked; RPC 2000-block
+ *  cap). Used when counterLockTx wasn't persisted, so the reverse watchtower never
+ *  goes blind (M3 — would otherwise risk losing both legs). */
+async function findLockTx(
+  pub: ReturnType<typeof createPublicClient>,
+  hashLock: Hex,
+): Promise<Hex | undefined> {
+  const tip = await pub.getBlockNumber();
+  for (let from = ESCROW_START_BLOCK; from <= tip; from += 1990n) {
+    const to = from + 1989n > tip ? tip : from + 1989n;
+    const logs = await pub.getContractEvents({
+      address: ESCROW, abi: HTLC_ESCROW_ABI, eventName: "Locked",
+      args: { hashValue: hashLock }, fromBlock: from, toBlock: to,
+    });
+    if (logs.length) return (logs[logs.length - 1] as { transactionHash?: Hex }).transactionHash;
+  }
+  return undefined;
+}
 
 async function jget(path: string) {
   const r = await fetch(`${API_BASE}${path}`);
@@ -104,6 +137,10 @@ async function main() {
             const existing = (await escrow.read.locks([o.hashLock])) as readonly [bigint, bigint, Address, Address, Address];
             if (existing[1] === 0n) {
               const wbtc = reqEnv("WBTC_ADDRESS") as Address;
+              // SOLVENCY (M1): don't lock if the solver's WBTC balance is short — the
+              // user's cBTC is already custodied/locked, so it auto-refunds cleanly.
+              const balance = (await pub.readContract({ address: wbtc, abi: ERC20_ABI, functionName: "balanceOf", args: [account.address] })) as bigint;
+              if (balance < amount) { void alert("Solver WBTC balance too low — cannot fill reverse swap", { order: o.id.slice(0, 18), have: String(balance), need: String(amount) }); continue; }
               const allowance = (await pub.readContract({ address: wbtc, abi: ERC20_ABI, functionName: "allowance", args: [account.address, ESCROW] })) as bigint;
               if (allowance < amount) {
                 const atx = await wallet.writeContract({ address: wbtc, abi: ERC20_ABI, functionName: "approve", args: [ESCROW, amount * 100n], account, chain: null });
@@ -114,7 +151,12 @@ async function main() {
               await pub.waitForTransactionReceipt({ hash: tx });
               await jpost(`/api/htlc/${o.id}/counter-lock`, { counterLockTx: tx });
             } else {
-              await jpost(`/api/htlc/${o.id}/counter-lock`, { counterLockTx: "already-locked" }).catch(() => {});
+              // Lock already on-chain (e.g. daemon crashed after lock, before the POST).
+              // Recover the REAL lock tx hash from the Locked event — NEVER record the
+              // string "already-locked", which has no 0x prefix and would blind the
+              // watchtower's claim-event scan → solver could lose both legs (M3).
+              const realTx = await findLockTx(pub, o.hashLock);
+              await jpost(`/api/htlc/${o.id}/counter-lock`, { counterLockTx: realTx ?? "0x" }).catch(() => {});
             }
             lockedCounter.add(o.id);
             continue;
@@ -141,13 +183,18 @@ async function main() {
               // Lock is gone → the user claimed. Find the Claimed event → preimage.
               // Public RPC caps eth_getLogs at 2000 blocks → scan in chunks from the
               // counter-lock tx's block (the claim can only be after the lock).
-              let fromBlock = (await pub.getBlockNumber()) - 49_999n;
-              if (o.counterLockTx && o.counterLockTx.startsWith("0x")) {
-                try {
-                  const rcpt = await pub.getTransactionReceipt({ hash: o.counterLockTx as Hex });
-                  fromBlock = rcpt.blockNumber;
-                } catch { /* fall back to the recent window */ }
+              // Scan from the counter-lock tx's block if we have it; else from the
+              // Locked event for this hashLock (recovered), so a missing/short
+              // counterLockTx can never make the reveal invisible (M3).
+              let fromBlock: bigint | undefined;
+              if (o.counterLockTx && o.counterLockTx.startsWith("0x") && o.counterLockTx.length === 66) {
+                try { fromBlock = (await pub.getTransactionReceipt({ hash: o.counterLockTx as Hex })).blockNumber; } catch { /* recover below */ }
               }
+              if (fromBlock === undefined) {
+                const lockTx = await findLockTx(pub, o.hashLock);
+                if (lockTx) { try { fromBlock = (await pub.getTransactionReceipt({ hash: lockTx })).blockNumber; } catch { /* below */ } }
+              }
+              if (fromBlock === undefined) fromBlock = (await pub.getBlockNumber()) - 49_999n;
               if (fromBlock < 0n) fromBlock = 0n;
               const tip = await pub.getBlockNumber();
               let found: { args?: { preImage?: Hex } } | undefined;
@@ -176,6 +223,17 @@ async function main() {
           const amount = BigInt(o.wbtcAmount);
           if (lock[1] !== amount) { console.log(`[solver] ${o.id.slice(0,12)} lock not on-chain yet (have ${lock[1]})`); continue; }
           if (lock[4].toLowerCase() !== o.solverEvmAddress.toLowerCase()) { console.log(`[solver] ${o.id.slice(0,12)} lock receiver != solver — skip`); continue; }
+          // ROBBERY GUARD: the WBTC lock must have enough time left for the solver to
+          // claim AFTER the user reveals. Without this, a user can lock WBTC with a
+          // near-immediate unlockTime, take the cBTC, then retake the WBTC before we
+          // can claim it. (Mirrors verifyEvmLock's EVM_CLAIM_MARGIN.) settleBefore
+          // ladder is also enforced server-side at createOrder, but verify on-chain.
+          const nowSec = Math.floor(Date.now() / 1000);
+          const CLAIM_MARGIN = 10 * 60;
+          if (Number(lock[0]) - nowSec < CLAIM_MARGIN) {
+            console.log(`[solver] ${o.id.slice(0,12)} WBTC lock expires too soon (${Number(lock[0]) - nowSec}s) — REFUSING to lock cBTC`);
+            continue;
+          }
           console.log(`[solver] ${o.id.slice(0,12)} WBTC lock verified on-chain → locking cBTC counter`);
           await jpost(`/api/htlc/${o.id}/lock-counter`);
           lockedCounter.add(o.id);
@@ -190,11 +248,20 @@ async function main() {
           const lock = (await escrow.read.locks([o.hashLock])) as readonly [bigint, bigint, Address, Address, Address];
           if (lock[1] === 0n) { console.log(`[solver] ${o.id.slice(0,12)} lock already claimed/empty`); claimedMain.add(o.id); await jpost(`/api/htlc/${o.id}/main-claim`, { mainClaimTx: "already-claimed" }).catch(()=>{}); continue; }
           console.log(`[solver] ${o.id.slice(0,12)} preimage revealed → claiming WBTC on EVM…`);
-          const tx = await escrow.write.claim([preimage], { account, chain: null });
-          await pub.waitForTransactionReceipt({ hash: tx });
-          console.log(`[solver] ${o.id.slice(0,12)} ✓ WBTC claimed tx=${tx.slice(0,14)}`);
-          await jpost(`/api/htlc/${o.id}/main-claim`, { mainClaimTx: tx });
-          claimedMain.add(o.id);
+          try {
+            const tx = await escrow.write.claim([preimage], { account, chain: null });
+            await pub.waitForTransactionReceipt({ hash: tx });
+            console.log(`[solver] ${o.id.slice(0,12)} ✓ WBTC claimed tx=${tx.slice(0,14)}`);
+            await jpost(`/api/htlc/${o.id}/main-claim`, { mainClaimTx: tx });
+            claimedMain.add(o.id);
+          } catch (e) {
+            // CRITICAL: the user revealed the secret but we failed to claim the WBTC
+            // we're owed. It retries next loop, but the operator must know NOW (the
+            // EVM timelock is ticking — if it lapses the user could retake).
+            void alert("Solver FAILED to claim WBTC after reveal — manual check needed", {
+              order: o.id.slice(0, 18), error: e instanceof Error ? e.message.slice(0, 100) : String(e),
+            });
+          }
         }
       }
     } catch (e) {

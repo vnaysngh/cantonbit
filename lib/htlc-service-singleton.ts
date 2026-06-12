@@ -14,6 +14,7 @@
 import { keccak_256 } from "@noble/hashes/sha3";
 
 import { getHoldings } from "./canton";
+import { alert } from "./alert";
 import { SWAP_CHAIN } from "./swap-evm";
 import {
   createTransfer, findOfferFromSender, prepareAcceptCommand,
@@ -21,7 +22,7 @@ import {
 } from "./transfer";
 import { NETWORK } from "./constants";
 import {
-  allocate, createHtlcLock, prepareClaimCommand, claimAsReceiver, refundHtlcLock,
+  allocate, createHtlcLock, claimAsReceiver, refundHtlcLock,
   prepareWithdrawCommand,
 } from "./htlc-onledger";
 import { SupabaseSwapStore, type SwapStore } from "./htlc-order-store";
@@ -108,6 +109,23 @@ class HtlcService {
   async accept(id: string) {
     const o = await this.must(id);
     if (o.status !== "open") throw new Error(`order not open (${o.status})`);
+    // SOLVENCY GATE (M1): refuse BEFORE the user locks anything if the solver can't
+    // fill its leg. Forward (evm→canton): the solver must have the cBTC float.
+    // Reverse (canton→evm): the solver must have the WBTC — but that check lives in
+    // the daemon (it holds the EVM key) which refuses to lock if its balance is short;
+    // the user's cBTC there auto-refunds, so the worst case is a clean abort.
+    if (o.direction === "evm-to-canton") {
+      const holdings = await getHoldings(o.solverCantonParty);
+      const floatSats = holdings.reduce((s, h) => s + BigInt(Math.round(parseFloat(h.payload.amount ?? "0") * 1e8)), 0n);
+      const needSats = BigInt(Math.round(parseFloat(o.cbtcAmount) * 1e8));
+      if (floatSats < needSats) {
+        o.status = "failed"; await this.store.put(o);
+        void alert("error", "Solver cBTC float too low — order rejected", {
+          order: o.id.slice(0, 18), have: Number(floatSats) / 1e8, need: o.cbtcAmount,
+        });
+        throw new Error(`solver cBTC float too low (have ${Number(floatSats) / 1e8}, need ${o.cbtcAmount}) — order rejected before you lock`);
+      }
+    }
     o.status = "accepted"; await this.store.put(o); return o;
   }
 
@@ -279,19 +297,6 @@ class HtlcService {
       await this.store.put(o);
     }
     return prepareAcceptCommand({ offerContractId: o.counterTransferOfferCid });
-  }
-
-  /** STEP 6a — PREPARE the user's Claim command. The Claim is controller=receiver,
-   *  so the USER submits it from their Loop wallet (backend CANNOT). Returns the
-   *  command + disclosed contracts for the browser's provider.submitTransaction. */
-  async prepareClaim(id: string, preimageHex: string): Promise<{ command: unknown; disclosedContracts: unknown[]; synchronizerId: string }> {
-    const o = await this.must(id);
-    if (o.status !== "counter_locked") throw new Error(`counter not locked (${o.status})`);
-    if (!o.htlcCid || !o.allocationCid) throw new Error("on-ledger HtlcLock not present");
-    // Backend pre-check so a bad preimage fails fast. The AUTHORITATIVE gate is the
-    // ledger's keccak check inside HtlcLock.Claim.
-    if (!preimageMatches(preimageHex, o.hashLock)) throw new Error("invalid preimage");
-    return prepareClaimCommand({ htlcCid: o.htlcCid, htlcBlob: o.htlcBlob, allocationCid: o.allocationCid, solverParty: o.solverCantonParty, preimageHex });
   }
 
   /** STEP 6 (PARTICIPANT-MANAGED) — the BACKEND claims the cBTC AS the hosted
@@ -487,13 +492,16 @@ class HtlcService {
       throw new Error(`not refundable (${o.status})`);
     }
     if (Date.now() / 1000 < o.userTimelock) throw new Error("Canton timelock not reached yet");
+    // REFUND-vs-CLAIM RACE GUARD (both modes): once the secret is public the swap
+    // MUST settle (the user has, or can, claim the WBTC). Refunding the cBTC then
+    // would let the user keep both legs. The on-ledger HtlcLock.Refund timelock is a
+    // backstop, but never even attempt a refund once revealed.
+    if (o.revealedPreimage) throw new Error("preimage revealed — swap must settle, not refund");
     let updateId: string;
     if (o.counterMode === "loop") {
       // LOOP SELLER custody refund — fully automatable on OUR side: send the
       // custodied cBTC straight back (direct transfer; the user's preapproval
-      // auto-accepts). Guard: the secret must NOT be revealed (a revealed swap
-      // settles via claim-main, never refunds).
-      if (o.revealedPreimage) throw new Error("preimage revealed — swap must settle, not refund");
+      // auto-accepts).
       if (!o.counterTransferUpdateId) throw new Error("no custody transfer recorded — nothing to refund");
       const holdings = await getHoldings(o.solverCantonParty);
       ({ updateId } = await createTransfer({
@@ -518,6 +526,13 @@ class HtlcService {
    *  provider.submitTransaction succeeds. Stores the preimage for the solver's EVM claim. */
   async recordCounterClaimed(id: string, preimageHex: string, updateId: string): Promise<SwapOrder> {
     const o = await this.must(id);
+    // GUARD: a forward MANAGED order must settle via claimCounterAsBackend (which
+    // ACTUALLY claims the cBTC on-ledger), NOT this record-only endpoint — else a
+    // client could mark it counter_claimed without the cBTC moving, then the daemon
+    // pays out the WBTC. Only Loop-buyer (forward) and reverse orders use this path.
+    if (o.direction === "evm-to-canton" && o.counterMode === "managed") {
+      throw new Error("forward managed orders settle via claim-managed, not claim-record");
+    }
     if (o.status !== "counter_locked" && o.status !== "counter_claimed") {
       throw new Error(`unexpected status ${o.status}`);
     }
@@ -565,6 +580,13 @@ class HtlcService {
   /** Record that the user retook (refunded) their WBTC on EVM after the timelock. */
   async recordMainRetake(id: string, retakeTx: string): Promise<SwapOrder> {
     const o = await this.must(id);
+    // GUARD: this records the user's EVM WBTC retake (forward direction only) and is
+    // bookkeeping. Reject reverse orders and any settled/terminal state so a stray
+    // or stale POST can't knock a live/completed order out of the active set.
+    if (o.direction !== "evm-to-canton") throw new Error("retake-main is forward-only");
+    if (o.status === "main_claimed" || o.status === "refunded" || o.status === "cancelled") {
+      throw new Error(`order already terminal (${o.status})`);
+    }
     o.status = "refunded"; o.mainClaimTx = retakeTx; await this.store.put(o); return o;
   }
 
@@ -593,16 +615,19 @@ class HtlcService {
       forwardCounter: counterLocked.filter(
         (o) => o.direction === "evm-to-canton" && o.counterMode !== "loop" && !!o.htlcCid && now >= o.solverTimelock,
       ),
+      // Exclude revealed orders — once the secret is public the swap settles, never
+      // refunds (refund-vs-claim race guard).
       reverseMain: [...mainLocked, ...counterLocked].filter(
-        (o) => o.direction === "canton-to-evm" && o.counterMode !== "loop" && !!o.htlcCid && now >= o.userTimelock,
+        (o) => o.direction === "canton-to-evm" && o.counterMode !== "loop" && !!o.htlcCid && !o.revealedPreimage && now >= o.userTimelock,
       ),
       staleForwardMain: mainLocked.filter(
         (o) => o.direction === "evm-to-canton" && now >= o.userTimelock,
       ),
       // LOOP SELLERS (Variant A custody): WE hold the cBTC → the sweep sends it
-      // straight back after the timelock (refundMainCanton, fully automated).
+      // straight back after the timelock (refundMainCanton, fully automated). Skip
+      // revealed (settled) orders.
       staleLoopSeller: [...mainLocked, ...counterLocked].filter(
-        (o) => o.direction === "canton-to-evm" && o.counterMode === "loop" && now >= o.userTimelock,
+        (o) => o.direction === "canton-to-evm" && o.counterMode === "loop" && !o.revealedPreimage && now >= o.userTimelock,
       ),
       // EARLY refund (hardening): custody taken but the WBTC counter-lock never
       // happened within the grace window — return the custody NOW instead of

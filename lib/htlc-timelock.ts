@@ -16,7 +16,7 @@ const EVM_FINALITY_SECONDS = 15 * 60;
 /** Execution buffer (read reveal + submit EVM claim + mine). */
 const EXEC_BUFFER_SECONDS = 5 * 60;
 /** The minimum safe gap between the two legs. */
-const MIN_GAP = CANTON_SKEW_MAX_SECONDS + EVM_FINALITY_SECONDS + EXEC_BUFFER_SECONDS; // ~20m
+export const MIN_GAP = CANTON_SKEW_MAX_SECONDS + EVM_FINALITY_SECONDS + EXEC_BUFFER_SECONDS; // ~20m
 /** Default gap — 1h, comfortably > MIN_GAP. */
 const DEFAULT_GAP = 60 * 60;
 
@@ -39,6 +39,36 @@ export const DEFAULT_EXPIRATION_SECONDS = 4 * 60 * 60; // 4h (Cancore-style defa
 export interface Timelocks {
   userTimelock: number;   // EVM unlock (unix seconds), the longer leg
   solverTimelock: number; // Canton unlock (unix seconds), the shorter leg
+}
+
+/**
+ * SERVER-SIDE ladder validation (SECURITY — never trust the client's timelocks).
+ * The party who reveals the secret SECOND must have the longer window. By
+ * construction userTimelock is the LONGER leg in both directions:
+ *   evm-to-canton: userTimelock = EVM (user retakes WBTC); solverTimelock = Canton.
+ *   canton-to-evm: userTimelock = Canton (user's cBTC HtlcLock); solverTimelock = EVM.
+ * Throws if the ladder is inverted, the gap is too small, or either leg is in the
+ * past / unreasonably far out. A hostile client that skips timelocksFromExpiration
+ * (or inverts the legs) is rejected here.
+ */
+export function assertValidTimelocks(
+  nowSeconds: number,
+  userTimelock: number,
+  solverTimelock: number,
+): void {
+  if (!Number.isFinite(userTimelock) || !Number.isFinite(solverTimelock)) {
+    throw new Error("timelocks must be finite unix seconds");
+  }
+  if (solverTimelock <= nowSeconds + 60) {
+    throw new Error("solverTimelock is in the past / too soon");
+  }
+  if (userTimelock - solverTimelock < MIN_GAP) {
+    throw new Error(`timelock ladder invalid: userTimelock must exceed solverTimelock by at least ${MIN_GAP}s (got ${userTimelock - solverTimelock}s)`);
+  }
+  // Sanity upper bound — reject absurd far-future locks (≤ 7 days).
+  if (userTimelock > nowSeconds + 7 * 24 * 60 * 60) {
+    throw new Error("userTimelock is unreasonably far in the future");
+  }
 }
 
 /**

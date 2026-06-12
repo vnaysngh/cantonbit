@@ -89,3 +89,36 @@ function finish(inUnits: bigint, gross: bigint, price8: bigint): QuoteResult {
     expiresAt: Math.floor(Date.now() / 1000) + QUOTE_TTL_SECONDS,
   };
 }
+
+/** Slack the server allows between the order's claimed amounts and a FRESH quote.
+ *  Covers price drift between the user's quote and order submission, plus the
+ *  solver giving the user a slightly better rate. 1% — tight enough to block a
+ *  manipulated ratio, loose enough for honest price movement in the TTL window. */
+const ORDER_AMOUNT_TOLERANCE_BPS = 100;
+
+/**
+ * SERVER-SIDE order-amount validation (SECURITY): the user submits cbtcAmount +
+ * wbtcAmount on the order. Re-quote NOW and reject if the user's output is more
+ * favorable than a fresh quote by more than the tolerance — so a client can't
+ * submit a manipulated/stale ratio that the solver then fills. The input side is
+ * what the user actually locks; we check the OUTPUT (what the solver pays) isn't
+ * inflated. Throws QuoteUnavailableError/DepegError (→ 503) on price failure.
+ */
+export async function assertOrderAmounts(
+  direction: "evm-to-canton" | "canton-to-evm",
+  wbtcUnits: bigint,
+  cbtcUnits: bigint,
+): Promise<void> {
+  // out = what the solver pays the user; in = what the user locks.
+  const reverse = direction === "canton-to-evm";
+  const inUnits = reverse ? cbtcUnits : wbtcUnits;
+  const claimedOut = reverse ? wbtcUnits : cbtcUnits;
+  if (inUnits <= 0n || claimedOut <= 0n) throw new Error("order amounts must be > 0");
+  const fresh = reverse ? await quoteCbtcToWbtc(inUnits) : await quoteWbtcToCbtc(inUnits);
+  // Allow the solver to be GENEROUS (claimedOut <= fresh is always fine); only
+  // reject when the user demands MORE than a fresh quote + tolerance.
+  const maxOut = fresh.outUnits + (fresh.outUnits * BigInt(ORDER_AMOUNT_TOLERANCE_BPS)) / 10000n;
+  if (claimedOut > maxOut) {
+    throw new Error(`order output ${claimedOut} exceeds a fresh quote ${fresh.outUnits} (+${ORDER_AMOUNT_TOLERANCE_BPS}bps) — re-quote and retry`);
+  }
+}

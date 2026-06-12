@@ -84,6 +84,55 @@ EXACTLY this — transfer-to-venue, venue runs the HTLC, custody-during-swap. We
       user signs client-side, we can censor but never move funds). User creates a new
       party + moves funds off Loop. Real UX cost; best trust available.
 
+## 🛡️ SECURITY AUDIT 2026-06-12 (3 adversarial reviewers) — fixes applied
+
+PROVEN CORRECT: keccak parity EVM↔Daml (verified empirically), both HTLC primitives
+(Solidity escrow claim/retake timing, Daml Claim/Refund partition), timelock-leg
+assignment both directions, quote math.
+
+FIXED (this session):
+- [x] CRITICAL: server-side timelock-ladder validation (assertValidTimelocks in
+      createOrder) — was trusting client timelocks → inverted-ladder robbery. CLOSED.
+- [x] CRITICAL: daemon forward branch now checks WBTC lock remaining-time
+      (CLAIM_MARGIN) before locking cBTC — was robbable via near-expiry WBTC lock.
+- [x] HIGH: refund-vs-claim race — refundMainCanton + the sweep now skip any order
+      with revealedPreimage (both modes), so a settled swap can't also refund.
+- [x] HIGH (M3): reverse watchtower no longer records "already-locked" (blinded the
+      claim-event scan → both-legs loss); recovers the real Locked tx via findLockTx.
+- [x] M1: solver SOLVENCY gate — accept() refuses forward orders if cBTC float short
+      (before the user locks); daemon refuses reverse lock if WBTC balance short.
+- [x] MED: direction guards on recordCounterClaimed (reject forward-managed) +
+      recordMainRetake (forward-only, non-terminal).
+
+TIER 2 FIXES (applied 2026-06-12):
+- [x] Server-side quote re-validation: createOrder now re-quotes (assertOrderAmounts)
+      and rejects an output more favorable than a fresh quote +100bps. De-peg/price-
+      unavailable → 503. Verified: inflated 9.99 cBTC output rejected.
+- [x] Auto-refund as a cron (N4): /api/htlc/auto-refund now has a GET handler gated by
+      CRON_SECRET (Bearer) + vercel.json cron every 5min — refunds survive daemon
+      death. Daemon's POST path unchanged. Verified both.
+- [x] UI recovery (M4/N3): Retake button on the stuck htlc-locking stage; /orders is
+      now ACTIONABLE — per-order "Retake WBTC" (user EVM key) / "Refund cBTC" (backend)
+      for live orders past their user timelock (unrevealed only). recoveryAction() gates
+      which shows.
+- [x] /orders DETAIL + chain labels: each row shows the EVM↔Canton route + mode (Loop/
+      Account); click opens a detail modal (parties, txs, timelocks, secret-revealed).
+      recoveryAction hardened — only shows refund/retake when funds are ACTUALLY locked
+      (hasLockedFunds: mainLockTx for forward; htlcCid/transfer/alloc for reverse), so
+      'accepted' stubs that never locked no longer show a dead button. Audited 11/11
+      state×direction cases pass.
+
+- [x] Observability (M2): lib/alert.ts (+ inline in the daemon) → ALERT_WEBHOOK_URL
+      (Slack/Discord; logs to console when unset). Fires on: solver cBTC/WBTC
+      insolvency, forward WBTC-claim failure after reveal (critical), and auto-refund
+      sweep per-order failures. Documented in README §8.
+
+REMAINING (tracked, not blockers for the proven happy/failure paths):
+- [ ] DAR amount-binding: assertBoundTo binds parties+timelock but not amount/
+      instrumentId (MED, not a theft vector — backend always wraps the alloc it just
+      made; needs DAR rebuild+re-upload+new pkg id, so deferred to avoid risking the
+      proven stack mid-audit).
+
 ## 🔵 NEXT (real, not blocked)
 
 - [x] cBTC balance for the SESSION party in /swap — /api/parties/balance + useBalance

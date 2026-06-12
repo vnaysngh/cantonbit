@@ -150,6 +150,13 @@ always protected by the EVM HTLC + timeout refunds even if the solver misbehaves
 | Solver Canton party (devnet) | `warpx-devnet-1::1220231c1885f289…` |
 | Hosted test receiver (devnet) | `oranjswap::1220231c1885f289…` |
 
+### Operational env vars
+
+| Var | Purpose |
+|---|---|
+| `CRON_SECRET` | Bearer token gating the scheduled `GET /api/htlc/auto-refund` sweep (Vercel cron). Daemon's `POST` path needs no auth. |
+| `ALERT_WEBHOOK_URL` | Slack/Discord incoming-webhook for operational alerts (failed claims, solver insolvency, stuck-swap refund failures). Unset → alerts log to console only. |
+
 ---
 
 ## 9. Cancore parameters we adopt (from their docs)
