@@ -46,18 +46,20 @@ export function TopNav() {
 
   return (
     <header className="sticky top-0 z-50 border-b border-outline-variant bg-surface/80 backdrop-blur-md">
-      <div className="mx-auto flex h-16 w-full max-w-[1200px] items-center justify-between gap-4 px-container-padding">
-        {/* Brand */}
-        <Link
-          href="/swap"
-          aria-label="OranjSwap — home"
-          className="flex items-center text-[22px] font-semibold tracking-[-0.02em] transition-opacity hover:opacity-80"
-        >
-          <span className="text-primary">Oranj</span>
-          <span className="text-foreground">Swap</span>
-        </Link>
+      <div className="mx-auto flex h-16 w-full max-w-[1200px] items-center px-container-padding">
+        {/* Brand — takes up left third */}
+        <div className="flex flex-1 justify-start">
+          <Link
+            href="/swap"
+            aria-label="OranjSwap — home"
+            className="flex items-center text-[22px] font-semibold tracking-[-0.02em] transition-opacity hover:opacity-80"
+          >
+            <span className="text-primary">Oranj</span>
+            <span className="text-foreground">Swap</span>
+          </Link>
+        </div>
 
-        {/* Primary nav — hidden on small screens (the brand + wallets stay). */}
+        {/* Primary nav — absolutely centered in the header. */}
         <nav className="hidden items-center gap-1 sm:flex">
           {NAV_LINKS.map((link) => {
             const active =
@@ -82,8 +84,8 @@ export function TopNav() {
           })}
         </nav>
 
-        {/* Actions — wallets dropdown (Canton identity + EVM subset) + Log out */}
-        <div className="flex items-center gap-3">
+        {/* Actions — takes up right third, pushes to the right edge */}
+        <div className="flex flex-1 items-center justify-end gap-3">
           <WalletsMenu
             evm={evm}
             evmWrongChain={evmWrongChain}
