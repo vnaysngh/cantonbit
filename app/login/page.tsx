@@ -95,7 +95,6 @@ export default function LoginPage() {
   const [loopSessionChecking, setLoopSessionChecking] = useState(false);
   const [loopSessionProbe, setLoopSessionProbe] = useState<{ party: string; active: boolean } | null>(null);
 
-  const supabase = createSupabaseBrowserClient();
   const loop = useLoopWallet();
   const router = useRouter();
 
@@ -216,7 +215,7 @@ export default function LoginPage() {
     setEmailBusy("sending");
     setEmailError(null);
 
-    const { error } = await supabase.auth.signInWithOtp({
+    const { error } = await createSupabaseBrowserClient().auth.signInWithOtp({
       email: target,
       options: {
         shouldCreateUser: true,
@@ -246,7 +245,7 @@ export default function LoginPage() {
     setEmailBusy("verifying");
     setEmailError(null);
 
-    const { error } = await supabase.auth.verifyOtp({
+    const { error } = await createSupabaseBrowserClient().auth.verifyOtp({
       email: emailStage.email,
       token: otp.trim(),
       type: "email",
@@ -259,7 +258,7 @@ export default function LoginPage() {
     }
 
     for (let i = 0; i < 20; i++) {
-      const { data } = await supabase.auth.getSession();
+      const { data } = await createSupabaseBrowserClient().auth.getSession();
       if (data.session) break;
       await new Promise((r) => setTimeout(r, 100));
     }
