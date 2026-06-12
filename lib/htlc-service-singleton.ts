@@ -26,6 +26,7 @@ import {
   prepareWithdrawCommand,
 } from "./htlc-onledger";
 import { SupabaseSwapStore, type SwapStore } from "./htlc-order-store";
+import { resolveCreateOrder } from "./htlc-order-logic";
 import type { SwapOrder, SwapStatus, SwapDirection } from "./htlc-types";
 
 export type { SwapOrder, SwapStatus, SwapDirection };
@@ -96,8 +97,10 @@ class HtlcService {
   constructor(private store: SwapStore) {}
 
   async createOrder(o: Omit<SwapOrder, "status" | "createdAt">): Promise<SwapOrder> {
-    const order: SwapOrder = { ...o, status: "open", createdAt: Math.floor(Date.now() / 1000) };
-    await this.store.put(order);
+    // No-overwrite + idempotent (audit 2026-06-12) — see resolveCreateOrder.
+    const existing = await this.store.get(o.id);
+    const { order, isNew } = resolveCreateOrder(existing, o, Math.floor(Date.now() / 1000));
+    if (isNew) await this.store.put(order);
     return order;
   }
   async getOrder(id: string) { return this.store.get(id); }
