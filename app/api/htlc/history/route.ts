@@ -8,10 +8,15 @@
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
 import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
+import { requirePartyOwner } from "@/lib/htlc-auth";
 
 export async function GET(req: Request) {
   try {
     let party = new URL(req.url).searchParams.get("party") ?? "";
+    if (party) {
+      const auth = await requirePartyOwner(party);
+      if (auth.error) return auth.error;
+    }
     if (!party) {
       const supabase = await createSupabaseServerClient();
       const { data: { user } } = await supabase.auth.getUser();

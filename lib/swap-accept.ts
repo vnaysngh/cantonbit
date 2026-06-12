@@ -29,7 +29,7 @@ import type { LoopProvider } from "@/hooks/useLoopWallet";
  * CORS-blocked + JWT-only from the browser). The signature proves wallet
  * ownership; no private key leaves the wallet. Returns null if the user declines.
  */
-async function signExchange(
+export async function signExchange(
   provider: LoopProvider,
 ): Promise<{ public_key: string; signature: string; epoch: number } | null> {
   const epoch = Date.now();
@@ -45,9 +45,12 @@ async function signExchange(
  * Is there a valid server-side JWT session right now? Pure probe — NO signature,
  * NO minting. Use it to decide whether to show the "sign to continue" gate.
  */
-export async function swapSessionActive(): Promise<boolean> {
+export async function swapSessionActive(partyId?: string): Promise<boolean> {
   try {
-    const probe = await fetch("/api/swap/session", { method: "GET" });
+    const url = partyId
+      ? `/api/swap/session?party=${encodeURIComponent(partyId)}`
+      : "/api/swap/session";
+    const probe = await fetch(url, { method: "GET" });
     if (!probe.ok) return false;
     const { active } = (await probe.json()) as { active?: boolean };
     return active === true;

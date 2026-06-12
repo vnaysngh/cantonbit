@@ -97,7 +97,10 @@ and rejects a wrong one — mandatory, on-chain). That IS "our participant's cus
 per the Loop team; it just happens to be on the EVM side, which is also ours. The Loop user
 only signs standard choices (EVM lock + standard cBTC accept). Satisfies Option 1 fully.
 
-- Email path (FROZEN): `791eb59c…` (v0.1.3), `CbtcHtlc:HtlcLock`. Already uploaded. DO NOT CHANGE.
+- Email path: `CbtcHtlc:HtlcLock` remains the participant-managed/trustless path.
+  Use the hardened `cbtc-htlc-hardened` v0.1.0 package (`1b2397fd…`) after
+  uploading it and setting `CBTC_HTLC_PKG_ID`; older package ids remain
+  historical only.
 - Loop path: NO new DAR. v0.1.5/v0.1.6 (LoopHtlcGate) were built then DROPPED as unnecessary.
   Loop = lockCounterLoop (standard transfer) + prepare-accept (standard accept) +
   recordCounterClaimed (browser hands us the secret → we claim WBTC on EVM).

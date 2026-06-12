@@ -10,6 +10,7 @@ import { htlcService } from "@/lib/htlc-service-singleton";
 import { NETWORK } from "@/lib/constants";
 import { assertValidTimelocks } from "@/lib/htlc-timelock";
 import { assertOrderAmounts, QuoteUnavailableError, DepegError } from "@/lib/htlc-quote";
+import { expectedSolverCanton, expectedSolverEvm, requirePartyOwner } from "@/lib/htlc-auth";
 
 export async function POST(req: Request) {
   try {
@@ -21,6 +22,19 @@ export async function POST(req: Request) {
     ];
     for (const k of required) {
       if (body[k] === undefined) return NextResponse.json({ error: `missing ${k}` }, { status: 400 });
+    }
+    if (body.direction !== "evm-to-canton" && body.direction !== "canton-to-evm") {
+      return NextResponse.json({ error: "invalid direction" }, { status: 400 });
+    }
+    const partyAuth = await requirePartyOwner(String(body.userCantonParty));
+    if (partyAuth.error) return partyAuth.error;
+    const solverCanton = expectedSolverCanton();
+    if (solverCanton && body.solverCantonParty !== solverCanton) {
+      return NextResponse.json({ error: "solver Canton party mismatch" }, { status: 403 });
+    }
+    const solverEvm = expectedSolverEvm();
+    if (solverEvm && String(body.solverEvmAddress).toLowerCase() !== solverEvm.toLowerCase()) {
+      return NextResponse.json({ error: "solver EVM address mismatch" }, { status: 403 });
     }
     // SECURITY — never trust client timelocks. The party who reveals the secret
     // SECOND must have the longer window; userTimelock is the longer leg in BOTH

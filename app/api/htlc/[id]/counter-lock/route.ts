@@ -4,10 +4,13 @@
  */
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
+import { requireDaemon } from "@/lib/htlc-auth";
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   try {
+    const auth = requireDaemon(req);
+    if (auth.error) return auth.error;
     const { counterLockTx } = await req.json();
     if (!counterLockTx) return NextResponse.json({ error: "missing counterLockTx" }, { status: 400 });
     const order = await htlcService().recordCounterLocked(id, counterLockTx);

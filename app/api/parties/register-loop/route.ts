@@ -25,6 +25,8 @@
 import { NextResponse } from "next/server";
 
 import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
+import { loopProfileParty } from "@/lib/htlc-auth";
+import { exchangeForJwt, loopApiBase, storeJwtCookie, type ExchangeSig } from "@/lib/swap-session";
 
 const TAG = "[parties/register-loop]";
 
@@ -35,11 +37,35 @@ function isPlausibleParty(p: unknown): p is string {
 
 export async function POST(req: Request) {
   try {
-    const body = (await req.json().catch(() => ({}))) as { partyId?: unknown };
+    const body = (await req.json().catch(() => ({}))) as { partyId?: unknown } & Partial<ExchangeSig>;
     const partyId = body.partyId;
     if (!isPlausibleParty(partyId)) {
       return NextResponse.json({ error: "Missing or invalid partyId" }, { status: 400 });
     }
+    if (!body.public_key || !body.signature || body.epoch == null) {
+      return NextResponse.json({ error: "Loop wallet signature required" }, { status: 401 });
+    }
+    const jwt = await exchangeForJwt({
+      public_key: body.public_key,
+      signature: body.signature,
+      epoch: body.epoch,
+    });
+    if (!jwt) return NextResponse.json({ error: "Loop signature exchange failed" }, { status: 401 });
+    const profileRes = await fetch(`${loopApiBase()}/api/v1/profile`, {
+      headers: { Authorization: `Bearer ${jwt}` },
+      cache: "no-store",
+    });
+    if (!profileRes.ok) {
+      return NextResponse.json({ error: "Loop profile verification failed" }, { status: 401 });
+    }
+    const profileParty = loopProfileParty(await profileRes.json().catch(() => ({})));
+    if (!profileParty) {
+      return NextResponse.json({ error: "Loop profile did not include a verifiable party" }, { status: 401 });
+    }
+    if (profileParty !== partyId) {
+      return NextResponse.json({ error: "Loop signature does not match requested party" }, { status: 403 });
+    }
+    await storeJwtCookie(jwt);
 
     // Identity now comes from the Loop wallet connection (no login gate). If a
     // legacy Supabase session exists, we still persist the mapping for it; if

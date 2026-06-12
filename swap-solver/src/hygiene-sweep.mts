@@ -20,6 +20,7 @@ const norm = (k: string): Hex => (k.startsWith("0x") ? k : `0x${k}`) as Hex;
 const RPC = process.env.ORIGIN_RPC_URL ?? "https://sepolia.base.org";
 const ESCROW = (process.env.HTLC_ESCROW_ADDRESS ?? "0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1") as Address;
 const API_BASE = process.env.API_BASE ?? "http://localhost:3000";
+const API_AUTH_TOKEN = process.env.HTLC_DAEMON_SECRET ?? process.env.CRON_SECRET ?? process.env.API_AUTH_TOKEN ?? "";
 
 async function main() {
   const account = privateKeyToAccount(norm(reqEnv("SOLVER_EVM_PK")));
@@ -61,11 +62,12 @@ async function main() {
   console.log(`  ✓ retook ${retaken} lock(s); ${skipped} foreign-sender events ignored.`);
 
   // ---- 2. Canton: refund expired counter-locked orders + orphan allocations ----
+  const headers = API_AUTH_TOKEN ? { Authorization: `Bearer ${API_AUTH_TOKEN}` } : undefined;
   console.log(`[2] auto-refund expired swaps via API…`);
-  const r1 = await fetch(`${API_BASE}/api/htlc/auto-refund`, { method: "POST" });
+  const r1 = await fetch(`${API_BASE}/api/htlc/auto-refund`, { method: "POST", headers });
   console.log(`  auto-refund:`, JSON.stringify(await r1.json()).slice(0, 200));
   console.log(`[3] cleanup orphan allocations…`);
-  const r2 = await fetch(`${API_BASE}/api/htlc/cleanup-allocations`, { method: "POST" });
+  const r2 = await fetch(`${API_BASE}/api/htlc/cleanup-allocations`, { method: "POST", headers });
   console.log(`  cleanup-allocations:`, JSON.stringify(await r2.json()).slice(0, 300));
   console.log(`\nDONE.`);
 }

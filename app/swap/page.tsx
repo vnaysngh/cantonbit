@@ -52,6 +52,7 @@ import {
   evmRetake,
 } from "@/lib/htlc-client";
 import { listLoopCbtcHoldingCids } from "@/lib/loop-holdings";
+import { rememberSecret } from "@/lib/secret-vault";
 import {
   timelocksFromExpiration,
   EXPIRATION_OPTIONS,
@@ -421,6 +422,9 @@ export default function SwapPage() {
       // 1. generate the secret (stays in the browser until the reveal) + create order
       const { secret, hashLock } = generateSecret();
       const id = hashLock; // swapId = hashLock
+      // Persist the secret per-browser so the swap is CLAIMABLE later (from /orders
+      // or after a refresh), not abandonable on tab close. Stays on-device only.
+      rememberSecret(id, secret);
       const now = Math.floor(Date.now() / 1000);
       // Derive the staggered timelocks from the chosen order expiration (Cancore §8):
       // userTimelock (EVM, = now + expiration) > solverTimelock (Canton, − gap).
@@ -591,6 +595,7 @@ export default function SwapPage() {
       const cbtcAmount = (Number(cbtcSats) / 1e8).toFixed(8);
       const { secret, hashLock } = generateSecret();
       const id = hashLock;
+      rememberSecret(id, secret); // claimable later from /orders / after refresh
       const now = Math.floor(Date.now() / 1000);
       // Ladder FLIPPED: userTimelock (LONG) = Canton HtlcLock; solverTimelock
       // (SHORT) = the solver's EVM lock.

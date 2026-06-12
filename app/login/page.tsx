@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { useLoopWallet } from "@/hooks/useLoopWallet";
+import { swapSessionActive } from "@/lib/swap-accept";
 import { cn } from "@/lib/utils";
 
 type Stage =
@@ -31,28 +32,107 @@ export default function LoginPage() {
   const [otp, setOtp] = useState("");
   const [resendCountdown, setResendCountdown] = useState(0);
   const [emailFocused, setEmailFocused] = useState(false);
+  const [loopLoginError, setLoopLoginError] = useState<string | null>(null);
+  const [loopLoginPending, setLoopLoginPending] = useState(false);
+  const [loopLoginInFlight, setLoopLoginInFlight] = useState(false);
+  const [loopSessionChecking, setLoopSessionChecking] = useState(false);
+  const [loopSessionProbe, setLoopSessionProbe] = useState<{ party: string; active: boolean } | null>(null);
 
   const supabase = createSupabaseBrowserClient();
   const loop = useLoopWallet();
   const router = useRouter();
 
+  // If the Loop SDK silently restored a wallet session, first check whether our
+  // server-side Loop API-key cookie is still active. This is a no-signature
+  // probe; if it succeeds, the user should not see the Exchange API Key prompt.
+  useEffect(() => {
+    if (!loop.connected || !loop.party || !loop.provider) {
+      setLoopSessionProbe(null);
+      setLoopSessionChecking(false);
+      return;
+    }
+    let cancelled = false;
+    setLoopSessionChecking(true);
+    setLoopSessionProbe(null);
+    void swapSessionActive(loop.party)
+      .then((active) => {
+        if (cancelled) return;
+        setLoopSessionProbe({ party: loop.party, active });
+        if (active) router.replace("/swap");
+      })
+      .finally(() => {
+        if (!cancelled) setLoopSessionChecking(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [loop.connected, loop.party, loop.provider, router]);
+
   // Loop login: the Loop wallet IS the user's identity (it carries their email +
   // Canton party). On connect, register the party (loop-wallet mode) → go to swap.
   // Use client-side nav (router.replace) NOT a full reload, so the in-memory Loop
   // provider survives — a full reload drops it and races the /swap gate into a loop.
-  const [navigated, setNavigated] = useState(false);
   useEffect(() => {
-    if (loop.connected && loop.party && !navigated) {
-      setNavigated(true);
-      void fetch("/api/parties/register-loop", {
+    if (!loopLoginPending || loopLoginInFlight || !loop.connected || !loop.party || !loop.provider) return;
+    if (loopSessionChecking) return;
+    if (loopSessionProbe?.party !== loop.party) return;
+    if (loopSessionProbe.active) {
+      setLoopLoginPending(false);
+      router.replace("/swap");
+      return;
+    }
+    setLoopLoginInFlight(true);
+    void (async () => {
+      setLoopLoginError(null);
+      const { signExchange } = await import("@/lib/swap-accept");
+      const exchange = await signExchange(loop.provider!);
+      if (!exchange) throw new Error("Loop wallet signature rejected");
+      const res = await fetch("/api/parties/register-loop", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ partyId: loop.party }),
+        body: JSON.stringify({ partyId: loop.party, ...exchange }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error ?? "Loop wallet registration failed");
+      }
+      setLoopLoginPending(false);
+      router.replace("/swap");
+    })()
+      .catch((err) => {
+        setLoopLoginError(err instanceof Error ? err.message : String(err));
+        setLoopLoginPending(false);
       })
-        .catch(() => {})
-        .finally(() => { router.replace("/swap"); });
+      .finally(() => {
+        setLoopLoginInFlight(false);
+      });
+  }, [
+    loop.connected,
+    loop.party,
+    loop.provider,
+    loopLoginInFlight,
+    loopLoginPending,
+    loopSessionChecking,
+    loopSessionProbe,
+    router,
+  ]);
+
+  useEffect(() => {
+    if (loopLoginPending && loop.error && (!loop.connected || !loop.provider)) {
+      setLoopLoginError(loop.error);
+      setLoopLoginPending(false);
+      setLoopLoginInFlight(false);
     }
-  }, [loop.connected, loop.party, navigated, router]);
+  }, [loop.connected, loop.error, loop.provider, loopLoginPending]);
+
+  const startLoopLogin = () => {
+    const shouldRefreshLoop = !!loopLoginError || !loop.connected || !loop.provider;
+    setLoopLoginError(null);
+    setLoopLoginPending(true);
+    if (shouldRefreshLoop) {
+      void loop.connect();
+    }
+  };
 
   useEffect(() => {
     if (stage.kind !== "otp") return;
@@ -311,12 +391,25 @@ export default function LoginPage() {
               </div>
               <button
                 type="button"
-                onClick={() => loop.connect()}
-                disabled={!loop.ready || loop.connecting}
+                onClick={startLoopLogin}
+                disabled={!loop.ready || loop.restoring || loop.connecting || loopSessionChecking || loopLoginInFlight}
                 className="flex h-14 w-full items-center justify-center gap-sm rounded-lg border border-outline-variant bg-surface-container-low font-headline-md text-headline-md text-on-surface transition-all hover:border-primary/40 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {loop.connecting ? "Connecting…" : "Continue with Loop Wallet"}
+                {loop.restoring || loopSessionChecking
+                  ? "Checking Loop session…"
+                  : loop.connecting
+                  ? "Connecting…"
+                  : loopLoginInFlight
+                    ? "Signing…"
+                    : loop.connected
+                      ? "Sign with Loop Wallet"
+                      : "Continue with Loop Wallet"}
               </button>
+              {loopLoginError && (
+                <p className="rounded-lg bg-error-container px-md py-sm font-label-sm text-label-sm text-on-error-container">
+                  {loopLoginError}
+                </p>
+              )}
             </>
           )}
         </div>

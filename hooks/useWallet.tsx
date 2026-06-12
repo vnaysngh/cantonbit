@@ -1,7 +1,7 @@
 "use client";
 
 import {
-  createContext, useCallback, useContext, useEffect, useRef, useState,
+  createContext, useCallback, useContext, useEffect, useState,
   type ReactNode,
 } from "react";
 
@@ -55,9 +55,6 @@ const WalletContext = createContext<WalletState>({
 export function WalletProvider({ children }: { children: ReactNode }) {
   const loop = useLoopWallet();
   const [sessionEmail, setSessionEmail] = useState<string | null>(null);
-  const [registeredParty, setRegisteredParty] = useState<string>("");
-  const [registering, setRegistering] = useState(false);
-  const registeredFor = useRef<string>(""); // guard: register each party once
 
   // Track the Supabase session email (app still uses Supabase for login/session).
   useEffect(() => {
@@ -69,50 +66,10 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     return () => subscription.unsubscribe();
   }, []);
 
-  // When the Loop wallet connects, register its party against the session.
-  useEffect(() => {
-    if (!loop.connected || !loop.party) {
-      setRegisteredParty("");
-      registeredFor.current = "";
-      return;
-    }
-    if (registeredFor.current === loop.party) return; // already registered this party
-    registeredFor.current = loop.party;
-    setRegistering(true);
-    void (async () => {
-      try {
-        const res = await fetch("/api/parties/register-loop", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ partyId: loop.party }),
-        });
-        const data = (await res.json()) as { partyId?: string; error?: string };
-        if (res.ok && data.partyId) {
-          setRegisteredParty(data.partyId);
-        } else {
-          // Registration failed (e.g. not logged in, or party owned by another
-          // account). Still expose the Loop party for read-only client use, but
-          // mark as unregistered so server actAs routes can reject if needed.
-          console.error("[useWallet] loop party registration failed:", data.error);
-          setRegisteredParty(loop.party);
-        }
-      } catch (err) {
-        console.error("[useWallet] register-loop error:", err);
-        setRegisteredParty(loop.party);
-      } finally {
-        setRegistering(false);
-      }
-    })();
-  }, [loop.connected, loop.party]);
-
-  // NOTE: the swap's Loop JWT session is NOT minted here at connect — it's a
-  // prerequisite the SWAP SCREEN establishes (one "Exchange API Key" signature)
-  // when the user actually goes to swap. Minting at connect would prompt every
-  // user app-wide (dashboard/mint/redeem) for a signature they may not need. We
-  // only CLEAR the session here on logout (below), so a different account that
-  // connects next doesn't inherit the prior JWT cookie.
-
-  const partyId = registeredParty || loop.party;
+  // NOTE: Loop JWT/session registration is deliberately not minted here. Login
+  // and swap flows trigger the one wallet signature explicitly; this provider
+  // only exposes the connected wallet state so page loads never spam prompts.
+  const partyId = loop.party;
 
   // Logout: drop the Loop wallet AND clear the server-side swap JWT session, so
   // a different account that connects next doesn't inherit the prior JWT cookie.
@@ -134,7 +91,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     email: loop.email ?? sessionEmail,
     // restoring: a stored Loop session is still being silently re-established on
     // page load — callers (e.g. the /swap login gate) must wait, not redirect.
-    isLoading: !loop.ready || loop.connecting || loop.restoring || registering,
+    isLoading: !loop.ready || loop.connecting || loop.restoring,
     connectLoop: loop.connect,
     logoutLoop,
     loopReady: loop.ready,

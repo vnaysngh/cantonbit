@@ -150,3 +150,62 @@ export async function evmClaim(send: SendTx, escrow: string, preImage: string): 
 export async function evmRetake(send: SendTx, escrow: string, hashLock: string): Promise<string> {
   return send({ to: escrow, data: encodeRetake(hashLock) });
 }
+
+// --- Shared CLAIM (used by both /swap and /orders) ---
+
+/** Minimal Loop provider shape needed to sign a standard accept. */
+interface LoopLike {
+  party_id?: string;
+  submitAndWaitForTransaction: (payload: unknown, options?: unknown) => Promise<unknown>;
+}
+
+/**
+ * Complete a claimable swap from its preimage — the SAME logic the /swap page runs,
+ * extracted so /orders (and any tab) can claim a swap whose secret was persisted.
+ * Branches by direction + counterMode:
+ *   - canton-to-evm: the user claims the WBTC on EVM (MetaMask) — that reveals the
+ *     secret; the daemon then claims the cBTC. Needs `send` (evm.sendTransaction).
+ *   - evm-to-canton managed: backend signs the cBTC claim (CanActAs), no popup.
+ *   - evm-to-canton loop: reveal-first → standard transfer auto-accepts, or the user
+ *     signs a standard accept in their Loop wallet. Needs `loop` (the provider).
+ */
+export async function claimSwap(opts: {
+  order: { id: string; direction: string; counterMode?: string };
+  secret: string;
+  escrow: string;
+  send?: SendTx;                 // EVM sender (reverse claim)
+  loop?: LoopLike | null;        // Loop provider (forward loop accept)
+}): Promise<{ tx?: string }> {
+  const { order, secret, escrow } = opts;
+  const preimage = secretToPreimage(secret);
+
+  if (order.direction === "canton-to-evm") {
+    if (!opts.send) throw new Error("Connect your EVM wallet to claim your WBTC.");
+    const tx = await evmClaim(opts.send, escrow, preimage);
+    await htlcApi.recordClaim(order.id, preimage, tx).catch(() => {});
+    return { tx };
+  }
+
+  // evm-to-canton
+  if (order.counterMode === "managed") {
+    await htlcApi.claimManaged(order.id, preimage);
+    return {};
+  }
+  // loop buyer: reveal-first → deliver (auto-accept) or sign a standard accept.
+  const reveal = await htlcApi.claimCounter(order.id, preimage);
+  if (reveal.delivered) {
+    await htlcApi.recordClaim(order.id, preimage, reveal.updateId).catch(() => {});
+    return {};
+  }
+  const loop = opts.loop;
+  if (!loop) throw new Error("Connect your Loop wallet to accept your cBTC.");
+  const { command, disclosedContracts, synchronizerId } = await htlcApi.prepareAccept(order.id);
+  const userParty = loop.party_id ?? "";
+  const result = (await loop.submitAndWaitForTransaction(
+    { commands: [command], disclosedContracts, packageIdSelectionPreference: [], actAs: [userParty], readAs: [userParty], synchronizerId },
+    undefined,
+  )) as { updateId?: string; transactionTree?: { updateId?: string } };
+  const updateId = result?.updateId ?? result?.transactionTree?.updateId ?? "submitted";
+  await htlcApi.recordClaim(order.id, preimage, updateId);
+  return {};
+}

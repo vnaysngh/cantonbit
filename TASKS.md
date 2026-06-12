@@ -10,7 +10,9 @@
 - [x] EVM HTLC `HTLCEscrow.sol` — keccak, lock/claim/retake, hardened. 13/13 tests.
       Deployed Base Sepolia `0x1b19a764…8cf1`.
 - [x] On-ledger cBTC HTLC DAR `CbtcHtlc.daml` (HtlcLock) — on-ledger keccak gate +
-      Allocation. v0.1.4 (`0020dac2…`) uploaded. Tests pass.
+      Allocation, with amount/instrument binding. Hardened package
+      `cbtc-htlc-hardened` v0.1.0 (`1b2397fd…`) built and tested; upload this
+      DAR and set `CBTC_HTLC_PKG_ID`.
 - [x] keccak256 parity EVM↔Daml proven (`0x9427…9903`).
 - [x] On-ledger LOCK: allocate cBTC + create HtlcLock (lib/htlc-onledger.ts).
 - [x] **On-ledger CLAIM PROVEN on node**: receiver exercised HtlcLock.Claim → ledger

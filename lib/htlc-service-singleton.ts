@@ -157,7 +157,7 @@ class HtlcService {
       const hashLockHex0 = o.hashLock.startsWith("0x") ? o.hashLock.slice(2) : o.hashLock;
       const { htlcCid, htlcBlob } = await createHtlcLock({
         solverParty: o.solverCantonParty, receiverParty: o.userCantonParty,
-        allocationCid: o.allocationCid, hashLock: hashLockHex0,
+        allocationCid: o.allocationCid, amountBtc: o.cbtcAmount, hashLock: hashLockHex0,
         unlockTime: new Date(o.solverTimelock * 1000 - 60_000),
       });
       o.htlcCid = htlcCid; o.htlcBlob = htlcBlob; o.status = "counter_locked"; await this.store.put(o); return o;
@@ -193,6 +193,7 @@ class HtlcService {
       solverParty: o.solverCantonParty,
       receiverParty: o.userCantonParty,
       allocationCid,
+      amountBtc: o.cbtcAmount,
       hashLock: hashLockHex,
       unlockTime,
     });
@@ -346,7 +347,7 @@ class HtlcService {
       const { htlcCid, htlcBlob } = await createHtlcLock({
         solverParty: o.solverCantonParty, receiverParty: o.solverCantonParty,
         lockerParty: o.userCantonParty, allocationCid: o.allocationCid,
-        hashLock: hashLockHex, unlockTime: new Date(o.userTimelock * 1000 - 60_000),
+        amountBtc: o.cbtcAmount, hashLock: hashLockHex, unlockTime: new Date(o.userTimelock * 1000 - 60_000),
       });
       o.htlcCid = htlcCid; o.htlcBlob = htlcBlob; o.status = "main_locked"; await this.store.put(o); return o;
     }
@@ -370,6 +371,7 @@ class HtlcService {
     const { htlcCid, htlcBlob } = await createHtlcLock({
       solverParty: o.solverCantonParty, receiverParty: o.solverCantonParty,
       lockerParty: o.userCantonParty, allocationCid,
+      amountBtc: o.cbtcAmount,
       hashLock: hashLockHex, unlockTime: new Date(settleBeforeMs - 60_000),
     });
     o.htlcCid = htlcCid; o.htlcBlob = htlcBlob;

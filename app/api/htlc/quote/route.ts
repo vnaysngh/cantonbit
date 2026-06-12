@@ -14,6 +14,7 @@ import { NETWORK } from "@/lib/constants";
 import {
   quoteWbtcToCbtc, quoteCbtcToWbtc, QuoteUnavailableError, DepegError,
 } from "@/lib/htlc-quote";
+import { requirePartyOwner } from "@/lib/htlc-auth";
 
 export async function POST(req: Request) {
   try {
@@ -23,6 +24,8 @@ export async function POST(req: Request) {
     if (!user || !inRaw || !cantonParty) {
       return NextResponse.json({ error: "missing user / amount / cantonParty" }, { status: 400 });
     }
+    const partyAuth = await requirePartyOwner(String(cantonParty));
+    if (partyAuth.error) return partyAuth.error;
     const inUnits = BigInt(inRaw);
     if (inUnits <= 0n) return NextResponse.json({ error: "amount must be > 0" }, { status: 400 });
 

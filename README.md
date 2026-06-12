@@ -78,7 +78,8 @@ REFUND after timelock, locker exercises HtlcLock.Refund → Allocation_Withdraw
 ```
 
 ### Why the claim works for hosted (participant-managed) users — the three keys
-1. **DAR `observer receiver`** (v0.1.4): the receiver is a LOCAL party on our node where
+1. **DAR `observer receiver`** (`CBTC_HTLC_PKG_ID`, currently `cbtc-htlc-hardened` v0.1.0):
+   the receiver is a LOCAL party on our node where
    the DAR is vetted, so they can observe + exercise the choice. (A *cross-participant*
    observer would fail with `NO_SYNCHRONIZER_FOR_SUBMISSION` — which is why Loop-wallet
    users need a different path.)
@@ -145,7 +146,7 @@ always protected by the EVM HTLC + timeout refunds even if the solver misbehaves
 | Thing | Value |
 |---|---|
 | EVM HTLCEscrow (Base Sepolia) | `0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1` |
-| cBTC HTLC DAR (current) | `cbtc-htlc v0.1.4` — pkg `0020dac262caab99659564f3e3057ec039a79d36fb31a544974f8ff5fe4410cd` |
+| cBTC HTLC DAR (hardened) | `cbtc-htlc-hardened v0.1.0` — pkg `1b2397fd7dcf177d90785059d33780de50936804b145b0fe7275bcf73faf2d28` |
 | Canonical hashLock H | `0x94277b389401042e35f8709846050797955e2b321bee500555c2fbdc2f4e9903` |
 | Solver Canton party (devnet) | `warpx-devnet-1::1220231c1885f289…` |
 | Hosted test receiver (devnet) | `oranjswap::1220231c1885f289…` |
@@ -154,7 +155,9 @@ always protected by the EVM HTLC + timeout refunds even if the solver misbehaves
 
 | Var | Purpose |
 |---|---|
-| `CRON_SECRET` | Bearer token gating the scheduled `GET /api/htlc/auto-refund` sweep (Vercel cron). Daemon's `POST` path needs no auth. |
+| `CBTC_HTLC_PKG_ID` | Hardened `CbtcHtlc:HtlcLock` package id. Required; app fails closed if missing. |
+| `HTLC_DAEMON_SECRET` | Bearer token for solver/maintenance HTLC API routes. |
+| `CRON_SECRET` | Bearer token gating scheduled/daemon HTLC sweeps. |
 | `ALERT_WEBHOOK_URL` | Slack/Discord incoming-webhook for operational alerts (failed claims, solver insolvency, stuck-swap refund failures). Unset → alerts log to console only. |
 
 ---

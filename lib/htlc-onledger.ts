@@ -26,13 +26,15 @@ import type { Holding } from "./types";
 
 const TAG = "[htlc-onledger]";
 
-// Our uploaded cbtc-htlc DAR (v0.1.3 — Claim controller=receiver, observer=executor
-// ONLY). The receiver is NOT a static observer (that would force their participant to
-// vet our DAR → NO_SYNCHRONIZER for cross-participant Loop users). Instead the receiver
-// sees the HtlcLock via EXPLICIT DISCLOSURE (createdEventBlob) — no vetting needed.
-// This is how Cancore does it (works for both local and Loop receivers).
-const HTLC_PKG = "791eb59c536045c33cb33154498d6d28cf0b1538513a9edecdb97562db661734";
-const HTLC_TID = `${HTLC_PKG}:CbtcHtlc:HtlcLock`;
+// Uploaded hardened cbtc-htlc DAR. This package MUST contain the amount and
+// instrumentId fields added to HtlcLock; the older v0.1.4 package does not.
+function htlcTemplateId(): string {
+  const pkg = process.env.CBTC_HTLC_PKG_ID;
+  if (!pkg) {
+    throw new Error("CBTC_HTLC_PKG_ID must be set to the hardened cbtc-htlc package id");
+  }
+  return `${pkg}:CbtcHtlc:HtlcLock`;
+}
 
 const ALLOCATION_FACTORY_INTERFACE =
   "#splice-api-token-allocation-instruction-v1:Splice.Api.Token.AllocationInstructionV1:AllocationFactory";
@@ -271,6 +273,7 @@ export async function createHtlcLock(params: {
   solverParty: string;
   receiverParty: string;
   allocationCid: string;
+  amountBtc: string;
   hashLock: string; // lowercase hex, no 0x — keccak256 of the preimage hex
   unlockTime: Date;
   /** HtlcLock.locker + actAs party. Defaults to solverParty (forward direction). */
@@ -280,12 +283,14 @@ export async function createHtlcLock(params: {
   const jwt = await getLedgerJwt();
   const { created } = await submit(jwt, [locker], [{
     CreateCommand: {
-      templateId: HTLC_TID,
+      templateId: htlcTemplateId(),
       createArguments: {
         locker,
         receiver: params.receiverParty,
         executor: params.solverParty,
         allocationCid: params.allocationCid,
+        amount: params.amountBtc,
+        instrumentId: NETWORK.instrumentId,
         hashLock: params.hashLock.startsWith("0x") ? params.hashLock.slice(2) : params.hashLock,
         unlockTime: params.unlockTime.toISOString(),
       },
@@ -315,7 +320,7 @@ export async function prepareClaimCommand(params: {
   const preimage = params.preimageHex.startsWith("0x") ? params.preimageHex.slice(2) : params.preimageHex;
   const command = {
     ExerciseCommand: {
-      templateId: HTLC_TID,
+      templateId: htlcTemplateId(),
       contractId: params.htlcCid,
       choice: "Claim",
       choiceArgument: {
@@ -325,7 +330,7 @@ export async function prepareClaimCommand(params: {
     },
   };
   // The receiver must SEE both the HtlcLock and the Allocation (which Claim fetches).
-  // The HtlcLock they observe (DAR v0.1.4 observer=receiver). The Allocation is
+  // The HtlcLock they observe comes from the hardened CBTC_HTLC_PKG_ID DAR. The Allocation is
   // disclosed via the registry choice-context — but if the receiver still can't read
   // it (created by the solver, receiver reading at a different offset), disclose it
   // explicitly from the solver's ACS.
@@ -588,7 +593,7 @@ export async function refundHtlcLock(params: {
     [params.lockerParty ?? params.solverParty],
     [{
       ExerciseCommand: {
-        templateId: HTLC_TID,
+        templateId: htlcTemplateId(),
         contractId: params.htlcCid,
         choice: "Refund",
         choiceArgument: { allocationContext: { context: ctx.data, meta: { values: {} } } },

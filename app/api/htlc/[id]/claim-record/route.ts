@@ -5,10 +5,13 @@
  */
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
+import { requireOrderOwner } from "@/lib/htlc-auth";
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   try {
+    const auth = await requireOrderOwner(id);
+    if (auth.error) return auth.error;
     const { preimage, updateId } = await req.json();
     if (!preimage || !updateId) return NextResponse.json({ error: "missing preimage/updateId" }, { status: 400 });
     const order = await htlcService().recordCounterClaimed(id, preimage, updateId);

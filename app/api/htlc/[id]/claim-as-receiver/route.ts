@@ -8,10 +8,13 @@
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
 import { claimAsReceiver } from "@/lib/htlc-onledger";
+import { requireDaemon } from "@/lib/htlc-auth";
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   try {
+    const auth = requireDaemon(req);
+    if (auth.error) return auth.error;
     const { preimage } = await req.json();
     const order = await htlcService().getOrder(id);
     if (!order) return NextResponse.json({ error: "not found" }, { status: 404 });

@@ -47,6 +47,7 @@ contract HTLCEscrow is ReentrancyGuard {
     error NotReceiver();
     error NotSender();
     error BadPreimage();
+    error UnsupportedFeeOnTransferToken();
 
     /// Lock `amount` of `tokenAddress` under hashlock `hashValue` until `unlockTime`,
     /// claimable by `receiverAddress` with the preimage. Funder must approve first.
@@ -61,18 +62,20 @@ contract HTLCEscrow is ReentrancyGuard {
         if (amount == 0) revert ZeroAmount();
         if (unlockTime <= block.timestamp) revert BadUnlockTime();
 
+        uint256 beforeBalance = IERC20(tokenAddress).balanceOf(address(this));
+        IERC20(tokenAddress).safeTransferFrom(msg.sender, address(this), amount);
+        uint256 received = IERC20(tokenAddress).balanceOf(address(this)) - beforeBalance;
+        if (received != amount) revert UnsupportedFeeOnTransferToken();
+
         locks[hashValue] = Lock({
             unlockTime: unlockTime,
-            amount: amount,
+            amount: received,
             tokenAddress: tokenAddress,
             senderAddress: msg.sender,
             receiverAddress: receiverAddress
         });
 
-        // SafeERC20: supports non-bool-returning / fee-on-transfer tokens (USDT…).
-        IERC20(tokenAddress).safeTransferFrom(msg.sender, address(this), amount);
-
-        emit Locked(hashValue, block.timestamp, amount, tokenAddress, msg.sender, receiverAddress);
+        emit Locked(hashValue, block.timestamp, received, tokenAddress, msg.sender, receiverAddress);
     }
 
     /// Reveal `preImage` to release the locked tokens to the receiver. Anyone may

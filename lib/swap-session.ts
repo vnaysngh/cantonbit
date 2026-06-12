@@ -84,7 +84,11 @@ function jwtExpSeconds(jwt: string): number | null {
 export async function storeJwtSession(sig: ExchangeSig): Promise<boolean> {
   const jwt = await exchangeForJwt(sig);
   if (!jwt) return false;
+  return storeJwtCookie(jwt);
+}
 
+/** Store a freshly minted Loop JWT in the httpOnly session cookie. */
+export async function storeJwtCookie(jwt: string): Promise<boolean> {
   const exp = jwtExpSeconds(jwt);
   const nowSec = Math.floor(Date.now() / 1000);
   // Cookie lifetime: until the JWT expires, with a 60s safety skew. If we

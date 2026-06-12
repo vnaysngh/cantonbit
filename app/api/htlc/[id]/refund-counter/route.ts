@@ -5,10 +5,13 @@
  */
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
+import { requireDaemon } from "@/lib/htlc-auth";
 
-export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   try {
+    const auth = requireDaemon(req);
+    if (auth.error) return auth.error;
     const { order, updateId } = await htlcService().refundCounter(id);
     return NextResponse.json({ ok: true, updateId, status: order.status });
   } catch (e) {

@@ -31,6 +31,7 @@ const API_BASE = process.env.API_BASE ?? "http://localhost:3000";
 const RPC = process.env.ORIGIN_RPC_URL ?? "https://sepolia.base.org";
 const ESCROW = (process.env.HTLC_ESCROW_ADDRESS ?? "0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1") as Address;
 const POLL_MS = Number(process.env.SOLVER_POLL_MS ?? 4000);
+const API_AUTH_TOKEN = process.env.HTLC_DAEMON_SECRET ?? process.env.CRON_SECRET ?? process.env.API_AUTH_TOKEN ?? "";
 
 function reqEnv(k: string): string { const v = process.env[k]; if (!v) throw new Error(`missing env ${k}`); return v; }
 const norm = (k: string) => (k.startsWith("0x") ? k : `0x${k}`) as Hex;
@@ -82,12 +83,21 @@ async function findLockTx(
 }
 
 async function jget(path: string) {
-  const r = await fetch(`${API_BASE}${path}`);
+  const r = await fetch(`${API_BASE}${path}`, {
+    headers: API_AUTH_TOKEN ? { Authorization: `Bearer ${API_AUTH_TOKEN}` } : undefined,
+  });
   if (!r.ok) throw new Error(`GET ${path} ${r.status}`);
   return r.json();
 }
 async function jpost(path: string, body?: unknown) {
-  const r = await fetch(`${API_BASE}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+  const r = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(API_AUTH_TOKEN ? { Authorization: `Bearer ${API_AUTH_TOKEN}` } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error ?? `POST ${path} ${r.status}`);
   return j;

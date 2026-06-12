@@ -5,10 +5,13 @@
  */
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
+import { requireOrderOwner } from "@/lib/htlc-auth";
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   try {
+    const auth = await requireOrderOwner(id);
+    if (auth.error) return auth.error;
     const { mainLockTx } = await req.json();
     if (!mainLockTx) return NextResponse.json({ error: "missing mainLockTx" }, { status: 400 });
     const order = await htlcService().recordMainLock(id, mainLockTx);

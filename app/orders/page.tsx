@@ -13,7 +13,8 @@ import { createPortal } from "react-dom";
 
 import { useWallet } from "@/hooks/useWallet";
 import { useEvmWallet } from "@/hooks/useEvmWallet";
-import { evmRetake, htlcApi } from "@/lib/htlc-client";
+import { claimSwap, evmRetake, htlcApi } from "@/lib/htlc-client";
+import { recallSecret, forgetSecret } from "@/lib/secret-vault";
 import { SWAP_CHAIN } from "@/lib/swap-evm";
 import { cn } from "@/lib/utils";
 
@@ -47,6 +48,14 @@ interface HistoryOrder {
 function hasLockedFunds(o: HistoryOrder): boolean {
   if (o.direction === "evm-to-canton") return !!o.mainLockTx;            // user's WBTC on EVM
   return !!o.htlcCid || !!o.counterTransferUpdateId || !!o.allocationCid; // user's cBTC on Canton
+}
+
+/** Is this swap CLAIMABLE right now AND do we still have its secret in this
+ *  browser? counter_locked = both legs locked, not yet revealed. Without the
+ *  recalled secret the user can only claim from the original tab/device. */
+function canClaim(o: HistoryOrder): boolean {
+  if (o.status !== "counter_locked" || o.revealedPreimage) return false;
+  return !!recallSecret(o.id);
 }
 
 /** What recovery action (if any) the user can take on a stuck order, NOW. Only
@@ -171,6 +180,30 @@ export default function OrdersPage() {
     }
   }, [evm]);
 
+  // CLAIM a claimable swap from the secret persisted in this browser — same logic
+  // the /swap page runs, so a swap can be completed from /orders / after a refresh.
+  const doClaim = useCallback(async (o: HistoryOrder) => {
+    const secret = recallSecret(o.id);
+    if (!secret) { setError("This swap's secret isn't on this device — claim it from the tab where you started it."); return; }
+    setBusy(o.id); setError(null);
+    try {
+      await claimSwap({
+        order: { id: o.id, direction: o.direction, counterMode: o.counterMode },
+        secret,
+        escrow: HTLC_ESCROW,
+        send: evm.sendTransaction,
+        loop: wallet.provider as unknown as { party_id?: string; submitAndWaitForTransaction: (p: unknown, o?: unknown) => Promise<unknown> } | null,
+      });
+      forgetSecret(o.id);
+      setReload((n) => n + 1);
+      setOpenId(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }, [evm, wallet.provider]);
+
   const copy = useCallback((text: string) => {
     void navigator.clipboard.writeText(text);
     setCopied(text);
@@ -226,6 +259,7 @@ export default function OrdersPage() {
                 const pay = reverse ? `${fmtCbtc(o.cbtcAmount)} CBTC` : `${fmtWbtc(o.wbtcAmount)} WBTC`;
                 const recv = reverse ? `${fmtWbtc(o.wbtcAmount)} WBTC` : `${fmtCbtc(o.cbtcAmount)} CBTC`;
                 const action = recoveryAction(o);
+                const claimable = canClaim(o);
                 return (
                   <tr
                     key={o.id}
@@ -253,7 +287,15 @@ export default function OrdersPage() {
                     </td>
                     <td className="px-4 py-3.5">
                       <div className="flex items-center justify-end gap-2">
-                        {action && (
+                        {claimable ? (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); doClaim(o); }}
+                            disabled={busy === o.id}
+                            className="rounded-lg bg-[#b04a2a] px-3 py-1 text-xs font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                          >
+                            {busy === o.id ? "…" : "Claim"}
+                          </button>
+                        ) : action && (
                           <button
                             onClick={(e) => { e.stopPropagation(); doRecover(o, action); }}
                             disabled={busy === o.id}
@@ -282,6 +324,7 @@ export default function OrdersPage() {
           onCopy={copy}
           onClose={() => setOpenId(null)}
           onRecover={doRecover}
+          onClaim={doClaim}
           busy={busy === active.id}
         />,
         document.body,
@@ -291,7 +334,7 @@ export default function OrdersPage() {
 }
 
 function DetailDrawer({
-  o, explorer, copied, onCopy, onClose, onRecover, busy,
+  o, explorer, copied, onCopy, onClose, onRecover, onClaim, busy,
 }: {
   o: HistoryOrder;
   explorer: string;
@@ -299,10 +342,12 @@ function DetailDrawer({
   onCopy: (s: string) => void;
   onClose: () => void;
   onRecover: (o: HistoryOrder, a: "retake-wbtc" | "refund-cbtc") => void;
+  onClaim: (o: HistoryOrder) => void;
   busy: boolean;
 }) {
   const reverse = o.direction === "canton-to-evm";
   const action = recoveryAction(o);
+  const claimable = canClaim(o);
 
   const Row = ({ label, value, mono, copyText, href }: {
     label: string; value: string; mono?: boolean; copyText?: string; href?: string;
@@ -375,15 +420,27 @@ function DetailDrawer({
             {o.revealedPreimage ? <Row label="Secret" value="revealed ✓" /> : null}
           </div>
 
-          {action && (
+          {claimable ? (
             <button
-              onClick={() => onRecover(o, action)}
+              onClick={() => onClaim(o)}
               disabled={busy}
               className="mt-4 w-full rounded-xl bg-[#b04a2a] px-4 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
             >
+              {busy ? "Claiming…" : reverse ? "Claim my WBTC" : "Claim my CBTC"}
+            </button>
+          ) : action ? (
+            <button
+              onClick={() => onRecover(o, action)}
+              disabled={busy}
+              className="mt-4 w-full rounded-xl border border-foreground/15 px-4 py-2.5 text-sm font-semibold text-foreground/80 transition-colors hover:bg-foreground/5 disabled:opacity-50"
+            >
               {busy ? "Submitting…" : action === "retake-wbtc" ? "Retake my WBTC" : "Refund my cBTC"}
             </button>
-          )}
+          ) : o.status === "counter_locked" && !o.revealedPreimage ? (
+            <p className="mt-4 rounded-xl bg-amber-500/10 px-4 py-3 text-center text-xs text-amber-700">
+              This swap is claimable, but its secret isn’t saved on this device. Open it from the tab/device where you started it to claim.
+            </p>
+          ) : null}
         </div>
       </div>
     </div>

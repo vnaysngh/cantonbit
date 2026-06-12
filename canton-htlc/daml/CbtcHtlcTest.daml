@@ -36,6 +36,9 @@ t0 = time (date 2026 Jun 10) 0 0 0
 tUnlock : Time
 tUnlock = time (date 2026 Jun 10) 4 0 0  -- t0 + 4h
 
+testAmount : Decimal
+testAmount = 0.00001
+
 emptyExtraArgs : ExtraArgs
 emptyExtraArgs = ExtraArgs with
   context = ChoiceContext with values = mempty
@@ -64,7 +67,7 @@ template MockAllocation
             meta = Metadata with values = mempty
           transferLegId = "leg1"
           transferLeg = TransferLeg with
-            sender = locker; receiver; amount = 0.00001
+            sender = locker; receiver; amount = testAmount
             instrumentId = InstrumentId with admin; id = "CBTC"
             meta = Metadata with values = mempty
         holdingCids = []
@@ -98,6 +101,8 @@ setup = do
     createCmd HtlcLock with
       locker; receiver; executor
       allocationCid = allocICid
+      amount = testAmount
+      instrumentId = InstrumentId with admin; id = "CBTC"
       hashLock = h; unlockTime = tUnlock
   pure (locker, receiver, executor, htlcCid)
 
@@ -143,7 +148,10 @@ test_claim_success = do
   htlcCid <- submit p do
     createCmd HtlcLock with
       locker = p; receiver = p; executor = p
-      allocationCid = allocICid; hashLock = h; unlockTime = tUnlock
+      allocationCid = allocICid
+      amount = testAmount
+      instrumentId = InstrumentId with admin = p; id = "CBTC"
+      hashLock = h; unlockTime = tUnlock
   -- wrong preimage still fails even with full authority (the GATE works)
   submitMustFail p do
     exerciseCmd htlcCid Claim with preimage = "deadbeef"; allocationContext = emptyExtraArgs
@@ -167,7 +175,10 @@ test_binding_rejects_mismatched_allocation = do
   htlcCid <- submit p do
     createCmd HtlcLock with
       locker = p; receiver = p; executor = p   -- receiver = p, mismatched vs Allocation
-      allocationCid = allocICid; hashLock = h; unlockTime = tUnlock
+      allocationCid = allocICid
+      amount = testAmount
+      instrumentId = InstrumentId with admin = p; id = "CBTC"
+      hashLock = h; unlockTime = tUnlock
   -- correct preimage + correct controller, but the Allocation receiver != HtlcLock receiver
   submitMustFail p do
     exerciseCmd htlcCid Claim with preimage = secretHex; allocationContext = emptyExtraArgs

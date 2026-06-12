@@ -17,8 +17,29 @@ import {
   storeJwtSession,
   getJwtSession,
   clearJwtSession,
+  loopApiBase,
   type ExchangeSig,
 } from "@/lib/swap-session";
+
+function profileParty(profile: unknown): string | null {
+  const p = profile as Record<string, unknown>;
+  const account = (p.account ?? {}) as Record<string, unknown>;
+  const user = (p.user ?? {}) as Record<string, unknown>;
+  const wallet = (p.wallet ?? {}) as Record<string, unknown>;
+  const candidates = [
+    p.party_id,
+    p.partyId,
+    p.party,
+    p.canton_party_id,
+    account.party_id,
+    account.partyId,
+    user.party_id,
+    user.partyId,
+    wallet.party_id,
+    wallet.partyId,
+  ];
+  return candidates.find((x): x is string => typeof x === "string" && x.includes("::")) ?? null;
+}
 
 export async function POST(req: Request) {
   const { public_key, signature, epoch } = (await req.json().catch(() => ({}))) as Partial<ExchangeSig>;
@@ -32,9 +53,21 @@ export async function POST(req: Request) {
   return NextResponse.json({ active: true });
 }
 
-export async function GET() {
+export async function GET(req: Request) {
   const jwt = await getJwtSession();
-  return NextResponse.json({ active: jwt != null });
+  if (!jwt) return NextResponse.json({ active: false });
+
+  const expectedParty = new URL(req.url).searchParams.get("party");
+  if (!expectedParty) return NextResponse.json({ active: true });
+
+  const profileRes = await fetch(`${loopApiBase()}/api/v1/profile`, {
+    headers: { Authorization: `Bearer ${jwt}` },
+    cache: "no-store",
+  });
+  if (!profileRes.ok) return NextResponse.json({ active: false });
+
+  const party = profileParty(await profileRes.json().catch(() => ({})));
+  return NextResponse.json({ active: party === expectedParty });
 }
 
 export async function DELETE() {

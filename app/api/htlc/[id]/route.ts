@@ -3,13 +3,14 @@
  */
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
+import { requireOrderOwnerOrDaemon } from "@/lib/htlc-auth";
 
-export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   try {
-    const order = await htlcService().getOrder(id);
-    if (!order) return NextResponse.json({ error: "not found" }, { status: 404 });
-    return NextResponse.json({ order });
+    const auth = await requireOrderOwnerOrDaemon(req, id);
+    if (auth.error) return auth.error;
+    return NextResponse.json({ order: auth.order });
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 });
   }

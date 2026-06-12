@@ -38,6 +38,7 @@ module CbtcHtlc where
 import DA.Crypto.Text (keccak256, BytesHex)
 
 import Splice.Api.Token.AllocationV1
+import Splice.Api.Token.HoldingV1 (InstrumentId)
 import Splice.Api.Token.MetadataV1 (ExtraArgs)
 
 -- ENCODING CONTRACT (verified, T2) — both legs must hash IDENTICAL bytes:
@@ -54,17 +55,18 @@ import Splice.Api.Token.MetadataV1 (ExtraArgs)
 
 -- | BINDING CHECK (T5): the wrapped Allocation MUST match the HtlcLock, or the
 -- preimage gate is meaningless (a mismatched Allocation could be executed /
--- withdrawn through it). Asserts the Allocation's parties == ours, and that our
--- timelock does not outlive the Allocation's settle window (else our gate could
--- pass after the registry refuses to execute → stuck funds). Called at the start
--- of BOTH choices so neither path can act on a wrong Allocation.
-assertBoundTo : Party -> Party -> Party -> Time -> AllocationView -> Update ()
-assertBoundTo locker receiver executor unlockTime av = do
+-- withdrawn through it). Asserts the Allocation's parties, amount, instrument,
+-- and settle window == our lock terms. Called at the start of BOTH choices so
+-- neither path can act on a wrong Allocation.
+assertBoundTo : Party -> Party -> Party -> Decimal -> InstrumentId -> Time -> AllocationView -> Update ()
+assertBoundTo locker receiver executor amount instrumentId unlockTime av = do
   let tl = av.allocation.transferLeg
       st = av.allocation.settlement
   assertMsg "HTLC: Allocation sender != locker"      (tl.sender == locker)
   assertMsg "HTLC: Allocation receiver != receiver"  (tl.receiver == receiver)
   assertMsg "HTLC: Allocation executor != executor"  (st.executor == executor)
+  assertMsg "HTLC: Allocation amount != amount"      (tl.amount == amount)
+  assertMsg "HTLC: Allocation instrument != instrument" (tl.instrumentId == instrumentId)
   assertMsg "HTLC: unlockTime outlives settleBefore" (unlockTime <= st.settleBefore)
 
 -- | A hash-time-locked wrapper around a Splice `Allocation`. The Allocation
@@ -83,6 +85,10 @@ template HtlcLock
       --   This is the party that can fire Allocation_ExecuteTransfer alone.
     allocationCid : ContractId Allocation
       -- ^ The registry Allocation that locks the actual holding (created in step 1).
+    amount : Decimal
+      -- ^ The exact transfer amount locked by the Allocation.
+    instrumentId : InstrumentId
+      -- ^ The exact token instrument locked by the Allocation.
     hashLock : Text
       -- ^ H = keccak256(preimageHex), lowercase hex. MUST equal the EVM leg's
       --   keccak256(rawPreimage). See the ENCODING CONTRACT note above.
@@ -119,7 +125,7 @@ template HtlcLock
         assertMsg "HTLC: too late (timelock passed)" (now < unlockTime)
         assertMsg "HTLC: bad preimage" (keccak256 preimage == hashLock)
         av <- view <$> fetch allocationCid
-        assertBoundTo locker receiver executor unlockTime av
+        assertBoundTo locker receiver executor amount instrumentId unlockTime av
         -- Fire the real Splice release. Executor authority is pre-delegated, so
         -- this succeeds without sender/receiver having to co-sign here.
         exercise allocationCid Allocation_ExecuteTransfer with extraArgs = allocationContext
@@ -137,5 +143,5 @@ template HtlcLock
         now <- getTime
         assertMsg "HTLC: too early (timelock not reached)" (now >= unlockTime)
         av <- view <$> fetch allocationCid
-        assertBoundTo locker receiver executor unlockTime av
+        assertBoundTo locker receiver executor amount instrumentId unlockTime av
         exercise allocationCid Allocation_Withdraw with extraArgs = allocationContext

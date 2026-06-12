@@ -2,8 +2,26 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {ERC20} from "openzeppelin/token/ERC20/ERC20.sol";
 import {HTLCEscrow} from "../src/HTLCEscrow.sol";
 import {MockWBTC} from "../src/MockWBTC.sol";
+
+contract FeeOnTransferToken is ERC20 {
+    constructor() ERC20("Fee Token", "FEE") {}
+
+    function mint(address to, uint256 amt) external {
+        _mint(to, amt);
+    }
+
+    function _update(address from, address to, uint256 value) internal override {
+        if (from != address(0) && to != address(0) && value > 1) {
+            super._update(from, address(0xD00D), 1);
+            super._update(from, to, value - 1);
+        } else {
+            super._update(from, to, value);
+        }
+    }
+}
 
 /// Tests the keccak256, hashlock-keyed HTLC (aligned to Cancore's HTLC.sol).
 /// One secret `preImage` with hashValue = keccak256(preImage) gates the lock;
@@ -141,6 +159,16 @@ contract HTLCEscrowTest is Test {
         wbtc.approve(address(escrow), AMOUNT);
         vm.expectRevert(HTLCEscrow.ZeroAmount.selector);
         escrow.lock(_hash(), uint64(block.timestamp + 1 hours), 0, address(wbtc), receiver);
+        vm.stopPrank();
+    }
+
+    function test_fee_on_transfer_token_reverts() public {
+        FeeOnTransferToken feeToken = new FeeOnTransferToken();
+        feeToken.mint(sender, AMOUNT);
+        vm.startPrank(sender);
+        feeToken.approve(address(escrow), AMOUNT);
+        vm.expectRevert(HTLCEscrow.UnsupportedFeeOnTransferToken.selector);
+        escrow.lock(_hash(), uint64(block.timestamp + 1 hours), AMOUNT, address(feeToken), receiver);
         vm.stopPrank();
     }
 }
