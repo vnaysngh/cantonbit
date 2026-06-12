@@ -1,43 +1,41 @@
 # Canton → EVM swap — research + locked design (2026-06-11)
 
-Research round: Cancore docs (https://docs.cancore.io/usecases/en — UC4/UC5 = sell
-CC/CBTC for EVM token, UC4L/UC5L Loop variants, UC4R/UC5R refunds), Cancore prod
-bundle (cancore.io/assets/index-\*.js, embedded OpenAPI + Loop orchestration), Splice
+Research round: industry HTLC swap docs, reference production bundle, Splice
 AllocationV1 docs. This file is the single reference for the reverse direction.
 
-## What Cancore does (confirmed)
+## Reference venue behavior (confirmed)
 
 1. **USER (maker) locks the Canton asset FIRST** — custom Daml HTLC
-   (`HTLCProposal`/`Proposal_Accept`/`HTLC_Claim`/`HTLC_Refund`), **LONGER timelock**
-   (typical 3h, min expiration 2h). Participant-managed users: **the platform
-   auto-locks** (node signs for the user).
+ (`HTLCProposal`/`Proposal_Accept`/`HTLC_Claim`/`HTLC_Refund`), **LONGER timelock**
+ (typical 3h, min expiration 2h). Participant-managed users: **the platform
+ auto-locks** (node signs for the user).
 2. **Venue locks the EVM asset second** — same hashLock, **SHORTER timelock**
-   (typical 1h), receiver = user's EVM address. Two timers in their model:
-   `swap.timeout` (main/Canton) > `swap.counterTimeout` (EVM).
+ (typical 1h), receiver = user's EVM address. Two timers in their model:
+ `swap.timeout` (main/Canton) > `swap.counterTimeout` (EVM).
 3. **User claims the EVM leg in MetaMask** → `claim(preimage)` on-chain IS the
-   secret reveal.
+ secret reveal.
 4. **Venue claims the Canton HTLC** with the now-public preimage.
 5. Refunds: user `HTLC_Refund` after the long timeout (auto-refund cron + manual
-   button); venue EVM `retake` after the short one. EVM leg becomes refundable
-   first (correct ordering).
+ button); venue EVM `retake` after the short one. EVM leg becomes refundable
+ first (correct ordering).
 6. **Loop sellers (external wallet)** = "Flow B": `build-transfer-to-venue` —
-   user signs a standard TransferInstruction to the venue + one `HTLCInitRequest`;
-   venue runs `InitRequest_ExecuteWithEscrow` = atomic "transfer accept + allocate
-   - proposal". **Custody-during-swap**; their admin surface (cleanup-failed-
-     transfer, force-withdraw) exists because this step is the fragile part.
+ user signs a standard TransferInstruction to the venue + one `HTLCInitRequest`;
+ venue runs `InitRequest_ExecuteWithEscrow` = atomic "transfer accept + allocate
+ - proposal". **Custody-during-swap**; their admin surface (cleanup-failed-
+ transfer, force-withdraw) exists because this step is the fragile part.
 
 ## OUR design — EMAIL (participant-managed) users: FULLY TRUSTLESS
 
 Both Canton parties (user + solver) are LOCAL on warpx → the proven HtlcLock works
 with roles flipped. No new DAR. No new mechanism.
 
-| Step | Actor                                           | Action                                                                                                                                                                                                                                                                                        |
+| Step | Actor | Action |
 | ---- | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1    | Browser                                         | generate secret s, H=keccak(s) (existing generateSecret)                                                                                                                                                                                                                                      |
-| 2    | Backend (CanActAs user = Cancore's "auto-lock") | Allocation: **sender=USER party**, receiver=solver, executor=solver; HtlcLock: **locker=user**, receiver=solver, executor=solver, unlockTime=**LONG** → status `main_locked`                                                                                                                  |
-| 3    | Solver daemon                                   | sees main_locked (our own backend created the lock — trusted write) → **locks WBTC on EVM**: hashLock=H, receiver=**user's EVM address**, unlockTime=**SHORT** → `counter_locked`                                                                                                             |
-| 4    | **User, MetaMask**                              | **claims the WBTC** (the one EVM signature) → preimage revealed ON-CHAIN → `counter_claimed`                                                                                                                                                                                                  |
-| 5    | Solver daemon                                   | reads preimage (UI records it AND the daemon watches the EVM `Claimed` event itself — NEVER trust only the browser) → exercises `HtlcLock.Claim` as receiver(=solver, LOCAL party, own authority) → **ledger checks keccak** → `Allocation_ExecuteTransfer` → CBTC to solver → `main_claimed` |
+| 1 | Browser | generate secret s, H=keccak(s) (existing generateSecret) |
+| 2 | Backend (CanActAs user = "auto-lock") | Allocation: **sender=USER party**, receiver=solver, executor=solver; HtlcLock: **locker=user**, receiver=solver, executor=solver, unlockTime=**LONG** → status `main_locked` |
+| 3 | Solver daemon | sees main_locked (our own backend created the lock — trusted write) → **locks WBTC on EVM**: hashLock=H, receiver=**user's EVM address**, unlockTime=**SHORT** → `counter_locked` |
+| 4 | **User, MetaMask** | **claims the WBTC** (the one EVM signature) → preimage revealed ON-CHAIN → `counter_claimed` |
+| 5 | Solver daemon | reads preimage (UI records it AND the daemon watches the EVM `Claimed` event itself — NEVER trust only the browser) → exercises `HtlcLock.Claim` as receiver(=solver, LOCAL party, own authority) → **ledger checks keccak** → `Allocation_ExecuteTransfer` → CBTC to solver → `main_claimed` |
 
 Authority check (why this works, proven primitives): DvpLegAllocation's
 ExecuteTransfer needs **receiver + executor** authorizers = solver + solver = the
@@ -46,7 +44,7 @@ solver ALONE (the exact shape the original self-swap spike proved on-node).
 Refunds:
 
 - User: `HtlcLock.Refund` (controller locker=user, backend CanActAs) after the LONG
-  timelock → `Allocation_Withdraw` returns the CBTC. Auto-refund sweep branch.
+ timelock → `Allocation_Withdraw` returns the CBTC. Auto-refund sweep branch.
 - Solver: EVM `retake(hashLock)` after the SHORT timelock if the user never claims.
 
 Timelocks (existing lib/htlc-timelock.ts, assignments flipped per direction):
@@ -54,7 +52,7 @@ Timelocks (existing lib/htlc-timelock.ts, assignments flipped per direction):
 - `userTimelock` (LONG) = **Canton** HtlcLock unlockTime (user's refund gate).
 - `solverTimelock` (SHORT) = **EVM** lock unlockTime (solver's retake gate).
 - Gap (user-solver) must dominate: read EVM reveal + claim Canton + EVM finality —
-  existing MIN_GAP (~20m) is fine.
+ existing MIN_GAP (~20m) is fine.
 
 Statuses (direction="canton-to-evm"; main leg = CANTON, counter leg = EVM):
 open → accepted → main_locked (CBTC HtlcLock) → counter_locked (WBTC locked)
@@ -77,7 +75,7 @@ authorizers [loop user], [warpx]"). A bare allocation between cross-participant
 parties can be locked but settled by NO ONE: we lack the Loop party's authority,
 the user lacks ours. Our custom HtlcLock settles only because the CONTRACT
 aggregates authorities (locker = signatory, receiver = controller) — which needs
-the DAR on the controller's participant → email-only. **Cancore's transfer-to-venue
+the DAR on the controller's participant → email-only. **transfer-to-venue
 custody is FORCED by Canton's authority model.** Never propose Loop allocation
 escrows again — in either direction (the buyer-direction probe failed the same way
 on the missing receiver).
@@ -85,31 +83,31 @@ on the missing receiver).
 **Variant A flow (built):**
 
 1. User signs ONE standard `TransferFactory_Transfer` (their CBTC → venue party);
-   holding cids read in the browser (`provider.getActiveContracts` — raw ACS-entry
-   shape, NOT the SDK's documented flat shape).
+ holding cids read in the browser (`provider.getActiveContracts` — raw ACS-entry
+ shape, NOT the SDK's documented flat shape).
 2. Backend finds the offer in ITS OWN view and ACCEPTS as the venue
-   (`confirmLoopSellerLock`) → custody begins → `main_locked`.
+ (`confirmLoopSellerLock`) → custody begins → `main_locked`.
 3. Daemon locks WBTC (short timelock, receiver = user's EVM address).
 4. User MetaMask-claims the WBTC (the reveal). `claim-main` just records — the
-   CBTC is already in our float (custody settled at lock time).
+ CBTC is already in our float (custody settled at lock time).
 5. Refunds: FULLY AUTOMATED on our side — the sweep (and the UI button →
-   refund-main) sends the custodied CBTC straight back via a direct transfer
-   (auto-accepts via the user's preapproval); guarded on preimage-not-revealed.
-   `recordMainClaim` hard-rejects reverse orders (stale-daemon false-completion fix).
+ refund-main) sends the custodied CBTC straight back via a direct transfer
+ (auto-accepts via the user's preapproval); guarded on preimage-not-revealed.
+ `recordMainClaim` hard-rejects reverse orders (stale-daemon false-completion fix).
 
-Trust: custody-during-swap (identical to Cancore's production Loop mode). The
+Trust: custody-during-swap (identical to Loop custody mode). The
 user's protections: the venue accept is atomic + visible, the EVM lock is verified
 before they reveal, and refunds are automated.
 
 ## Build inventory (additive; frozen paths untouched)
 
 - lib/htlc-onledger.ts: `allocate`/`createHtlcLock`/`refundHtlcLock` get optional
-  sender/locker params (default = solver → existing EVM→Canton callers unchanged).
+ sender/locker params (default = solver → existing EVM→Canton callers unchanged).
 - lib/htlc-service-singleton.ts: `lockMainCanton`, `recordCounterLocked`,
-  `claimMainAsSolver`, refund branch by direction. recordCounterClaimed reused.
+ `claimMainAsSolver`, refund branch by direction. recordCounterClaimed reused.
 - Routes: POST /api/htlc/[id]/lock-main, /counter-lock, /claim-main.
 - Daemon: reverse branch (main_locked→lock WBTC; counter_locked→watch EVM Claimed;
-  counter_claimed→claim CBTC; retake after solverTimelock).
+ counter_claimed→claim CBTC; retake after solverTimelock).
 - DB: migration 009 — counter_lock_tx column.
 - UI: direction toggle on /swap (email users only for canton-to-evm in v1);
-  Claim button = MetaMask WBTC claim + recordCounterClaimed.
+ Claim button = MetaMask WBTC claim + recordCounterClaimed.

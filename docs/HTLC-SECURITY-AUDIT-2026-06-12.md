@@ -5,7 +5,7 @@ This document records the security audit and fixes for the CBTC HTLC swap flows:
 - EVM -> Canton email: trustless, on-ledger keccak HTLC
 - Canton -> EVM email: trustless, on-ledger keccak HTLC
 - EVM -> Canton Loop: trust-minimized reveal-first flow
-- Canton -> EVM Loop: custody flow aligned with Cancore's proven ceiling
+- Canton -> EVM Loop: custody flow aligned with the proven Loop custody ceiling
 
 The audit focused on bugs that could lose user funds, app/solver funds, or leak private swap data.
 
@@ -89,9 +89,9 @@ Attackers could drive state transitions for orders they did not own, trigger pre
 Implemented approach:
 
 - Added route-level guards:
-  - User-owned actions require the order owner.
-  - Solver/maintenance actions require daemon bearer authorization.
-  - Mixed routes allow either the owner or the daemon only where the protocol needs both.
+ - User-owned actions require the order owner.
+ - Solver/maintenance actions require daemon bearer authorization.
+ - Mixed routes allow either the owner or the daemon only where the protocol needs both.
 - Added solver Canton party and solver EVM address checks on order creation when configured.
 
 Status: Fixed.
@@ -267,7 +267,7 @@ Affected flows:
 
 Risk:
 
-The Loop reveal path (`claimCounter`) called `verifyEvmLock()` before delivering CBTC, ensuring the solver had enough time to claim WBTC after reveal. The managed path did not. A user could reveal near `userTimelock`, receive CBTC, and still `retake` WBTC after the solver ran out of time.
+The Loop reveal path (`claimCounter`) called `verifyEvmLock` before delivering CBTC, ensuring the solver had enough time to claim WBTC after reveal. The managed path did not. A user could reveal near `userTimelock`, receive CBTC, and still `retake` WBTC after the solver ran out of time.
 
 Implemented approach:
 
