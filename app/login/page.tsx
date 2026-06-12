@@ -1,37 +1,94 @@
 "use client";
 
-import Image from "next/image";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
-import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { useLoopWallet } from "@/hooks/useLoopWallet";
 import { swapSessionActive } from "@/lib/swap-accept";
-import { cn } from "@/lib/utils";
+import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 
-type Stage =
+type EmailStage =
   | { kind: "email" }
-  | { kind: "otp"; email: string; canResendAt: number }
-  | { kind: "loading" }
-  | { kind: "error"; message: string; prevEmail: string };
+  | { kind: "otp"; email: string; canResendAt: number };
+
+type EmailBusy = "sending" | "verifying" | null;
 
 const RESEND_COOLDOWN_SEC = 120;
 
 const inputClass =
-  "w-full h-12 rounded-lg border border-outline-variant bg-surface-container-low px-md font-body-md text-body-md text-on-surface transition-all placeholder:text-on-secondary-container/50 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-primary md:bg-surface-container-low";
-
-const otpInputClass =
-  "w-full h-12 rounded-lg border border-outline-variant bg-surface-container-low px-md text-center font-body-md text-body-md tracking-[0.4em] text-on-surface transition-all placeholder:text-on-secondary-container/50 focus:border-transparent focus:outline-none focus:ring-2 focus:ring-primary";
+  "h-[76px] w-full rounded-xl border border-[#dfc7be] bg-white px-5 pb-3 pt-8 text-[22px] font-bold leading-none text-[#191919] outline-none transition-all placeholder:text-transparent autofill:shadow-[inset_0_0_0_1000px_white] focus:border-[#a84e32] focus:ring-4 focus:ring-[#a84e32]/10";
 
 const primaryBtnClass =
-  "flex h-14 w-full items-center justify-center gap-sm rounded-lg bg-primary font-headline-md text-headline-md text-on-primary transition-all duration-200 hover:bg-primary-container hover:text-on-primary-container active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60";
+  "inline-flex h-14 w-full items-center justify-center gap-sm rounded-xl bg-[#b65335] px-md text-[18px] font-bold text-white transition-all hover:bg-[#9f462d] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50";
+
+const secondaryBtnClass =
+  "inline-flex h-14 w-full items-center justify-center gap-sm rounded-xl border border-[#dfc7be] bg-white px-md text-[18px] font-bold text-[#1d1d1f] transition-all hover:border-[#b65335]/45 hover:bg-[#fff8f5] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50";
+
+const otpInputClass =
+  "h-[76px] w-full rounded-xl border border-[#dfc7be] bg-white px-5 pb-3 pt-8 text-[26px] font-bold leading-none tracking-[0.32em] text-[#191919] outline-none transition-all placeholder:text-transparent focus:border-[#a84e32] focus:ring-4 focus:ring-[#a84e32]/10";
+
+function deferState(fn: () => void) {
+  void Promise.resolve().then(fn);
+}
+
+function cleanError(err: unknown, fallback = "Something went wrong. Please try again."): string {
+  if (!err) return fallback;
+  const maybe = err as {
+    shortMessage?: unknown;
+    message?: unknown;
+    reason?: unknown;
+    data?: { message?: unknown };
+    error?: { message?: unknown };
+  };
+  const direct = maybe.shortMessage ?? maybe.message ?? maybe.reason ?? maybe.data?.message ?? maybe.error?.message;
+  if (typeof direct === "string" && direct.trim() && direct !== "[object Object]") return direct.trim();
+  if (err instanceof Error && err.cause) return cleanError(err.cause, fallback);
+  try {
+    const json = JSON.stringify(err);
+    if (json && json !== "{}") return json;
+  } catch {
+    // fall through
+  }
+  const text = String(err);
+  return text && text !== "[object Object]" ? text : fallback;
+}
+
+function emailAuthErrorMessage(err: unknown): string {
+  const maybe = err as { code?: unknown; status?: unknown };
+  const raw = cleanError(err, "Could not send the sign-in code.");
+  const normalized = raw.toLowerCase();
+  if (
+    maybe.code === "unexpected_failure" ||
+    normalized.includes("magic link email") ||
+    normalized.includes("sending")
+  ) {
+    return "We could not send the email code. The email service failed to deliver it, so try again in a minute or use Loop Wallet.";
+  }
+  if (normalized.includes("rate limit")) {
+    return "Too many email code requests. Wait a minute, then try again.";
+  }
+  return raw;
+}
+
+function Spinner() {
+  return (
+    <span
+      aria-hidden
+      className="material-symbols-outlined animate-spin text-[20px]"
+    >
+      progress_activity
+    </span>
+  );
+}
 
 export default function LoginPage() {
-  const [stage, setStage] = useState<Stage>({ kind: "email" });
+  const [emailStage, setEmailStage] = useState<EmailStage>({ kind: "email" });
   const [email, setEmail] = useState("");
   const [otp, setOtp] = useState("");
   const [resendCountdown, setResendCountdown] = useState(0);
-  const [emailFocused, setEmailFocused] = useState(false);
+  const [emailBusy, setEmailBusy] = useState<EmailBusy>(null);
+  const [emailError, setEmailError] = useState<string | null>(null);
   const [loopLoginError, setLoopLoginError] = useState<string | null>(null);
   const [loopLoginPending, setLoopLoginPending] = useState(false);
   const [loopLoginInFlight, setLoopLoginInFlight] = useState(false);
@@ -42,18 +99,35 @@ export default function LoginPage() {
   const loop = useLoopWallet();
   const router = useRouter();
 
+  useEffect(() => {
+    let cancelled = false;
+    void fetch("/api/parties/me")
+      .then((r) => r.json())
+      .then((d) => {
+        if (!cancelled && d?.partyId) router.replace("/swap");
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
+
   // If the Loop SDK silently restored a wallet session, first check whether our
   // server-side Loop API-key cookie is still active. This is a no-signature
   // probe; if it succeeds, the user should not see the Exchange API Key prompt.
   useEffect(() => {
     if (!loop.connected || !loop.party || !loop.provider) {
-      setLoopSessionProbe(null);
-      setLoopSessionChecking(false);
+      deferState(() => {
+        setLoopSessionProbe(null);
+        setLoopSessionChecking(false);
+      });
       return;
     }
     let cancelled = false;
-    setLoopSessionChecking(true);
-    setLoopSessionProbe(null);
+    deferState(() => {
+      setLoopSessionChecking(true);
+      setLoopSessionProbe(null);
+    });
     void swapSessionActive(loop.party)
       .then((active) => {
         if (cancelled) return;
@@ -69,19 +143,18 @@ export default function LoginPage() {
   }, [loop.connected, loop.party, loop.provider, router]);
 
   // Loop login: the Loop wallet IS the user's identity (it carries their email +
-  // Canton party). On connect, register the party (loop-wallet mode) → go to swap.
-  // Use client-side nav (router.replace) NOT a full reload, so the in-memory Loop
-  // provider survives — a full reload drops it and races the /swap gate into a loop.
+  // Canton party). On connect, register the party (loop-wallet mode) -> go to swap.
+  // Use client-side nav so the in-memory Loop provider survives.
   useEffect(() => {
     if (!loopLoginPending || loopLoginInFlight || !loop.connected || !loop.party || !loop.provider) return;
     if (loopSessionChecking) return;
     if (loopSessionProbe?.party !== loop.party) return;
     if (loopSessionProbe.active) {
-      setLoopLoginPending(false);
+      deferState(() => setLoopLoginPending(false));
       router.replace("/swap");
       return;
     }
-    setLoopLoginInFlight(true);
+    deferState(() => setLoopLoginInFlight(true));
     void (async () => {
       setLoopLoginError(null);
       const { signExchange } = await import("@/lib/swap-accept");
@@ -100,7 +173,7 @@ export default function LoginPage() {
       router.replace("/swap");
     })()
       .catch((err) => {
-        setLoopLoginError(err instanceof Error ? err.message : String(err));
+        setLoopLoginError(cleanError(err, "Loop wallet sign-in failed."));
         setLoopLoginPending(false);
       })
       .finally(() => {
@@ -119,13 +192,84 @@ export default function LoginPage() {
 
   useEffect(() => {
     if (loopLoginPending && loop.error && (!loop.connected || !loop.provider)) {
-      setLoopLoginError(loop.error);
-      setLoopLoginPending(false);
-      setLoopLoginInFlight(false);
+      deferState(() => {
+        setLoopLoginError(cleanError(loop.error, "Loop wallet connection failed."));
+        setLoopLoginPending(false);
+        setLoopLoginInFlight(false);
+      });
     }
   }, [loop.connected, loop.error, loop.provider, loopLoginPending]);
 
+  useEffect(() => {
+    if (emailStage.kind !== "otp") return;
+    const t = setInterval(() => {
+      const r = Math.max(0, Math.ceil((emailStage.canResendAt - Date.now()) / 1000));
+      setResendCountdown(r);
+      if (r === 0) clearInterval(t);
+    }, 1000);
+    return () => clearInterval(t);
+  }, [emailStage]);
+
+  const sendOtp = async (emailOverride?: string) => {
+    const target = (emailOverride ?? email).trim().toLowerCase();
+    if (!target || emailBusy) return;
+    setEmailBusy("sending");
+    setEmailError(null);
+
+    const { error } = await supabase.auth.signInWithOtp({
+      email: target,
+      options: {
+        shouldCreateUser: true,
+        emailRedirectTo: `${window.location.origin}/auth/callback`,
+      },
+    });
+
+    if (error) {
+      setEmailError(emailAuthErrorMessage(error));
+      setEmailBusy(null);
+      return;
+    }
+
+    setEmail(target);
+    setOtp("");
+    setEmailStage({
+      kind: "otp",
+      email: target,
+      canResendAt: Date.now() + RESEND_COOLDOWN_SEC * 1000,
+    });
+    setResendCountdown(RESEND_COOLDOWN_SEC);
+    setEmailBusy(null);
+  };
+
+  const verifyOtp = async () => {
+    if (emailStage.kind !== "otp" || otp.length < 8 || emailBusy) return;
+    setEmailBusy("verifying");
+    setEmailError(null);
+
+    const { error } = await supabase.auth.verifyOtp({
+      email: emailStage.email,
+      token: otp.trim(),
+      type: "email",
+    });
+
+    if (error) {
+      setEmailError(cleanError(error, "Could not verify the code."));
+      setEmailBusy(null);
+      return;
+    }
+
+    for (let i = 0; i < 20; i++) {
+      const { data } = await supabase.auth.getSession();
+      if (data.session) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    await fetch("/api/parties/provision", { method: "POST", credentials: "include" }).catch(() => {});
+    window.location.href = "/swap";
+  };
+
   const startLoopLogin = () => {
+    if (!loop.ready || loop.restoring || loop.connecting || loopSessionChecking || loopLoginInFlight) return;
     const shouldRefreshLoop = !!loopLoginError || !loop.connected || !loop.provider;
     setLoopLoginError(null);
     setLoopLoginPending(true);
@@ -134,290 +278,199 @@ export default function LoginPage() {
     }
   };
 
-  useEffect(() => {
-    if (stage.kind !== "otp") return;
-    const remaining = Math.max(
-      0,
-      Math.ceil((stage.canResendAt - Date.now()) / 1000)
-    );
-    setResendCountdown(remaining);
-    if (remaining === 0) return;
-    const t = setInterval(() => {
-      const r = Math.max(0, Math.ceil((stage.canResendAt - Date.now()) / 1000));
-      setResendCountdown(r);
-      if (r === 0) clearInterval(t);
-    }, 1000);
-    return () => clearInterval(t);
-  }, [stage]);
-
-  const sendOtp = async (emailOverride?: string) => {
-    const target = (emailOverride ?? email).trim().toLowerCase();
-    if (!target) return;
-    setStage({ kind: "loading" });
-
-    const { error } = await supabase.auth.signInWithOtp({
-      email: target,
-      options: { shouldCreateUser: true }
-    });
-
-    if (error) {
-      setStage({ kind: "error", message: error.message, prevEmail: target });
-      return;
-    }
-
-    setOtp("");
-    setStage({
-      kind: "otp",
-      email: target,
-      canResendAt: Date.now() + RESEND_COOLDOWN_SEC * 1000
-    });
-  };
-
-  const verifyOtp = async () => {
-    if (stage.kind !== "otp") return;
-    setStage({ kind: "loading" });
-
-    const { error } = await supabase.auth.verifyOtp({
-      email: stage.email,
-      token: otp.trim(),
-      type: "email"
-    });
-
-    if (error) {
-      setStage({
-        kind: "error",
-        message: error.message,
-        prevEmail: stage.email
-      });
-      return;
-    }
-
-    // The session cookie is written asynchronously by the SSR client. If we
-    // navigate before it's flushed, /swap's server reads no cookie → the header
-    // briefly shows "Log in" until a manual refresh. Poll getSession() until the
-    // session is readable (cookie persisted) before we provision + navigate.
-    for (let i = 0; i < 20; i++) {
-      const { data } = await supabase.auth.getSession();
-      if (data.session) break;
-      await new Promise((r) => setTimeout(r, 100));
-    }
-
-    // Participant-managed: provision the user's Canton party on our warpx node
-    // (idempotent). This call also carries the cookie, so by the time it returns
-    // the server has accepted the session. Best-effort — failures don't block login.
-    await fetch("/api/parties/provision", { method: "POST", credentials: "include" }).catch(() => {});
-
-    window.location.href = "/swap";
-  };
-
-  const isEmail = stage.kind === "email";
-  const isOtp = stage.kind === "otp";
-  const isLoading = stage.kind === "loading";
-  const isError = stage.kind === "error";
-
-  const emailValue = isError ? stage.prevEmail : email;
+  const emailDisabled = emailBusy !== null;
+  const loopDisabled = !loop.ready || loop.restoring || loop.connecting || loopSessionChecking || loopLoginInFlight;
+  const loopButtonLabel =
+    loop.restoring || loopSessionChecking
+      ? "Checking Loop session..."
+      : loop.connecting
+        ? "Connecting..."
+        : loopLoginInFlight
+          ? "Signing..."
+          : loop.connected
+            ? "Sign with Loop Wallet"
+            : "Continue with Loop Wallet";
+  const loopBusy = loop.restoring || loopSessionChecking || loop.connecting || loopLoginInFlight;
 
   return (
-    <div className="flex w-full max-w-bridge-widget-width flex-col items-center">
-      {/* Brand */}
-      <div className="mb-lg text-center">
-        <div className="mb-sm flex items-center justify-center">
-          <Image
-            src="/logo.png"
-            alt="OranjSwap"
-            width={174}
-            height={42}
-            className="block dark:hidden"
-            priority
-          />
-          <Image
-            src="/logo-white.png"
-            alt="OranjSwap"
-            width={174}
-            height={42}
-            className="hidden dark:block"
-            priority
-          />
-        </div>
-        <p className="mx-auto max-w-[320px] font-body-md text-body-md text-on-secondary-container">
-          Mint, hold, and transfer CBTC on Canton Network.
-        </p>
-      </div>
-
-      {/* Auth card */}
-      <div className="w-full rounded-lg border border-outline-variant bg-surface-container-lowest p-md shadow-sm transition-all hover:border-primary/20 md:rounded-xl md:p-lg">
-        <div className="mb-lg">
-          <h2 className="font-headline-md text-headline-md text-on-surface">
-            {isOtp ? "Check your email" : "Sign in"}
-          </h2>
-        </div>
-
-        <div className="space-y-md">
-          {(isEmail || isError) && (
-            <>
-              {isError && (
-                <p className="rounded-lg bg-error-container px-md py-sm font-label-sm text-label-sm text-on-error-container">
-                  {stage.message}
-                </p>
-              )}
-              <div className="space-y-xs">
-                <label
-                  htmlFor="email"
-                  className={cn(
-                    "block font-label-sm text-label-sm uppercase text-on-surface-variant transition-colors md:text-on-secondary-container md:tracking-wider",
-                    emailFocused && "text-primary"
-                  )}
-                >
-                  Email address
-                </label>
-                <input
-                  id="email"
-                  type="email"
-                  placeholder="you@example.com"
-                  value={emailValue}
-                  onChange={(e) => {
-                    if (isError) {
-                      setEmail(e.target.value);
-                      setStage({ kind: "email" });
-                    } else {
-                      setEmail(e.target.value);
-                    }
-                  }}
-                  onFocus={() => setEmailFocused(true)}
-                  onBlur={() => setEmailFocused(false)}
-                  onKeyDown={(e) => e.key === "Enter" && sendOtp()}
-                  autoFocus
-                  autoComplete="email"
-                  className={inputClass}
-                />
-              </div>
-              <button
-                type="button"
-                className={primaryBtnClass}
-                onClick={() => sendOtp()}
-                disabled={!emailValue.trim()}
+    <main className="min-h-screen bg-[#f7f5f2] px-4 py-4 text-[#191919] sm:px-6 sm:py-6">
+      <div className="flex min-h-[calc(100vh-32px)] items-center justify-center overflow-hidden rounded-[28px] border border-[#ead9d2] bg-[#fffdfb] shadow-[0_24px_80px_rgba(79,48,37,0.10)]">
+        <section className="flex w-full items-center justify-center px-5 py-10 sm:px-8 lg:px-16">
+          <div className="w-full max-w-[500px]">
+            <div className="mb-12 flex items-center justify-center">
+              <Link
+                href="/swap"
+                aria-label="OranjSwap home"
+                className="text-[38px] font-semibold leading-none transition-opacity hover:opacity-80"
               >
-                Send code
-              </button>
-            </>
-          )}
+                <span className="text-primary">Oranj</span>
+                <span className="text-foreground">Swap</span>
+              </Link>
+            </div>
 
-          {isOtp && (
-            <>
-              <p className="font-body-md text-body-md text-on-secondary-container">
-                We sent an 8-digit code to{" "}
-                <span className="font-semibold text-on-surface">
-                  {stage.email}
-                </span>
-                .
-              </p>
-              <div className="space-y-xs">
-                <label
-                  htmlFor="otp"
-                  className="block font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant"
-                >
-                  One-time code
-                </label>
-                <input
-                  id="otp"
-                  type="text"
-                  inputMode="numeric"
-                  placeholder="00000000"
-                  maxLength={8}
-                  value={otp}
-                  onChange={(e) =>
-                    setOtp(e.target.value.replace(/\D/g, ""))
-                  }
-                  onKeyDown={(e) =>
-                    e.key === "Enter" && otp.length === 8 && verifyOtp()
-                  }
-                  autoFocus
-                  autoComplete="one-time-code"
-                  className={otpInputClass}
-                />
-              </div>
-              <button
-                type="button"
-                className={primaryBtnClass}
-                onClick={verifyOtp}
-                disabled={otp.length < 8}
-              >
-                Verify & sign in
-              </button>
-              <div className="flex items-center justify-between pt-xs">
-                <button
-                  type="button"
-                  className="font-label-sm text-label-sm text-on-secondary-container transition-colors hover:text-primary"
-                  onClick={() => {
-                    setOtp("");
-                    setEmail(stage.email);
-                    setStage({ kind: "email" });
-                  }}
-                >
-                  Wrong email?
-                </button>
-                <button
-                  type="button"
-                  disabled={resendCountdown > 0}
-                  className="font-label-sm text-label-sm text-on-secondary-container transition-colors hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
-                  onClick={() => sendOtp(stage.email)}
-                >
-                  {resendCountdown > 0
-                    ? `Resend in ${resendCountdown}s`
-                    : "Resend code"}
-                </button>
-              </div>
-            </>
-          )}
-
-          {isLoading && (
-            <div className="flex flex-col items-center gap-sm py-lg">
-              <span className="material-symbols-outlined animate-spin text-[28px] text-primary">
-                progress_activity
-              </span>
-              <p className="font-body-md text-body-md text-on-secondary-container">
-                Please wait…
+            <div className="mb-9">
+              <h1 className="text-[38px] font-extrabold leading-none tracking-normal text-[#161616]">
+                Sign in
+              </h1>
+              <p className="mt-3 text-[18px] font-semibold leading-7 text-[#756b66]">
+                Continue with an email code or your Loop Wallet.
               </p>
             </div>
-          )}
 
-          {/* Loop wallet — the alternative identity (Canton party from the wallet). */}
-          {(isEmail || isError) && (
-            <>
-              <div className="flex items-center gap-sm py-xs">
-                <div className="h-px flex-1 bg-outline-variant" />
-                <span className="font-label-sm text-label-sm text-on-secondary-container">or</span>
-                <div className="h-px flex-1 bg-outline-variant" />
+            <div className="space-y-6">
+              {emailStage.kind === "email" ? (
+                <>
+                  <div className="relative">
+                    <label
+                      htmlFor="email"
+                      className="pointer-events-none absolute left-4 top-2.5 text-[13px] font-bold text-[#8d7a72]"
+                    >
+                      Email
+                    </label>
+                    <input
+                      id="email"
+                      type="email"
+                      placeholder="you@example.com"
+                      value={email}
+                      onChange={(e) => {
+                        setEmail(e.target.value);
+                        setEmailError(null);
+                      }}
+                      onKeyDown={(e) => e.key === "Enter" && sendOtp()}
+                      autoComplete="email"
+                      className={inputClass}
+                    />
+                  </div>
+
+                  <button
+                    type="button"
+                    className={primaryBtnClass}
+                    onClick={() => sendOtp()}
+                    disabled={emailDisabled || !email.trim()}
+                  >
+                    {emailBusy === "sending" && <Spinner />}
+                    {emailBusy === "sending" ? "Sending code..." : "Send code"}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <p className="rounded-xl border border-[#dfc7be] bg-[#fff8f5] px-4 py-4 text-[15px] font-semibold leading-6 text-[#756b66]">
+                    We sent an 8-digit code to{" "}
+                    <span className="font-bold text-[#191919]">{emailStage.email}</span>.
+                  </p>
+                  <div className="relative">
+                    <label
+                      htmlFor="otp"
+                      className="pointer-events-none absolute left-4 top-2.5 text-[13px] font-bold text-[#8d7a72]"
+                    >
+                      One-time code
+                    </label>
+                    <input
+                      id="otp"
+                      type="text"
+                      inputMode="numeric"
+                      placeholder="00000000"
+                      maxLength={8}
+                      value={otp}
+                      onChange={(e) => {
+                        setOtp(e.target.value.replace(/\D/g, ""));
+                        setEmailError(null);
+                      }}
+                      onKeyDown={(e) => e.key === "Enter" && verifyOtp()}
+                      autoComplete="one-time-code"
+                      className={otpInputClass}
+                    />
+                  </div>
+
+                  <button
+                    type="button"
+                    className={primaryBtnClass}
+                    onClick={verifyOtp}
+                    disabled={emailDisabled || otp.length < 8}
+                  >
+                    {emailBusy === "verifying" && <Spinner />}
+                    {emailBusy === "verifying" ? "Verifying..." : "Verify and sign in"}
+                  </button>
+
+                  <div className="flex items-center justify-between gap-5">
+                    <button
+                      type="button"
+                      className="text-[15px] font-bold text-[#8a4d3a] underline underline-offset-2 transition-colors hover:text-[#5f2e1f] disabled:cursor-not-allowed disabled:opacity-40"
+                      disabled={emailDisabled}
+                      onClick={() => {
+                        setOtp("");
+                        setEmail(emailStage.email);
+                        setEmailStage({ kind: "email" });
+                        setEmailError(null);
+                      }}
+                    >
+                      Wrong email?
+                    </button>
+                    <button
+                      type="button"
+                      disabled={emailDisabled || resendCountdown > 0}
+                      className="text-[15px] font-bold text-[#8a4d3a] underline underline-offset-2 transition-colors hover:text-[#5f2e1f] disabled:cursor-not-allowed disabled:opacity-40"
+                      onClick={() => sendOtp(emailStage.email)}
+                    >
+                      {resendCountdown > 0 ? `Resend in ${resendCountdown}s` : "Resend code"}
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {emailError && (
+                <p className="rounded-xl border border-red-200 bg-red-50 px-4 py-4 text-[15px] font-semibold leading-6 text-red-700">
+                  {emailError}
+                </p>
+              )}
+
+              <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-5 py-1">
+                <div className="h-px bg-[#e3d3cc]" />
+                <span className="text-[16px] font-semibold text-[#8d7a72]">or</span>
+                <div className="h-px bg-[#e3d3cc]" />
               </div>
+
               <button
                 type="button"
                 onClick={startLoopLogin}
-                disabled={!loop.ready || loop.restoring || loop.connecting || loopSessionChecking || loopLoginInFlight}
-                className="flex h-14 w-full items-center justify-center gap-sm rounded-lg border border-outline-variant bg-surface-container-low font-headline-md text-headline-md text-on-surface transition-all hover:border-primary/40 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={loopDisabled}
+                className={secondaryBtnClass}
               >
-                {loop.restoring || loopSessionChecking
-                  ? "Checking Loop session…"
-                  : loop.connecting
-                  ? "Connecting…"
-                  : loopLoginInFlight
-                    ? "Signing…"
-                    : loop.connected
-                      ? "Sign with Loop Wallet"
-                      : "Continue with Loop Wallet"}
+                {loopBusy ? (
+                  <Spinner />
+                ) : (
+                  <span
+                    aria-hidden
+                    className="flex size-6 items-center justify-center rounded-full bg-[#f2eee9]"
+                  >
+                    <span className="block size-3 rotate-45 rounded-[3px] bg-[#dfff70]" />
+                  </span>
+                )}
+                {loopButtonLabel}
               </button>
+
               {loopLoginError && (
-                <p className="rounded-lg bg-error-container px-md py-sm font-label-sm text-label-sm text-on-error-container">
+                <p className="rounded-xl border border-red-200 bg-red-50 px-4 py-4 text-[15px] font-semibold leading-6 text-red-700">
                   {loopLoginError}
                 </p>
               )}
-            </>
-          )}
-        </div>
-      </div>
+            </div>
 
-      <p className="mt-md text-center font-label-sm text-label-sm text-on-secondary-container md:font-body-md md:text-body-md">
-        No password needed — we&apos;ll email you a one-time code.
-      </p>
-    </div>
+            <div className="mt-9 flex items-center justify-between gap-4 text-[14px] font-semibold text-[#8d7a72]">
+              <span>
+                {loop.restoring || loopSessionChecking
+                  ? "Checking Loop session"
+                  : loop.connected
+                    ? "Loop wallet connected"
+                    : "No wallet connected"}
+              </span>
+              <Link href="/how-it-works" className="underline underline-offset-2 hover:text-[#5f2e1f]">
+                How it works
+              </Link>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
   );
 }

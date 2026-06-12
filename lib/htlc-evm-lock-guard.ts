@@ -1,0 +1,42 @@
+/**
+ * Pure EVM HTLC lock checks used before cBTC reveal (Loop claim-counter + managed
+ * claim-managed). Shared so both paths and unit tests use identical solver-robbery
+ * guards without duplicating margin logic.
+ */
+
+/** Min seconds the solver needs left on the EVM lock to safely claim after a reveal. */
+export const EVM_CLAIM_MARGIN_SECONDS = 10 * 60;
+
+export type EvmLockSnapshot = {
+  unlockTime: number;
+  amount: bigint;
+  receiver: string;
+};
+
+export type EvmLockRevealRequirements = {
+  wbtcAmount: string;
+  solverEvmAddress: string;
+};
+
+/**
+ * Throws if the on-chain EVM lock is missing, under-funded, wrong receiver, or
+ * too close to expiry for the solver to claim WBTC after reveal.
+ */
+export function assertEvmLockSafeForReveal(
+  lock: EvmLockSnapshot,
+  req: EvmLockRevealRequirements,
+  nowSec = Math.floor(Date.now() / 1000),
+): void {
+  if (lock.amount === 0n) {
+    throw new Error("EVM lock not found — WBTC is not locked under this hashLock");
+  }
+  if (lock.amount < BigInt(req.wbtcAmount)) {
+    throw new Error(`EVM lock amount too small (${lock.amount} < ${req.wbtcAmount})`);
+  }
+  if (lock.receiver !== req.solverEvmAddress.toLowerCase()) {
+    throw new Error("EVM lock receiver is not the solver");
+  }
+  if (lock.unlockTime - nowSec < EVM_CLAIM_MARGIN_SECONDS) {
+    throw new Error("EVM lock expires too soon for the solver to claim safely");
+  }
+}

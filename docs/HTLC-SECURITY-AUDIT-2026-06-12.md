@@ -258,6 +258,25 @@ Results:
 - Whitespace check passed.
 - After review fixes, `npx tsc --noEmit` and `npm test` were rerun and passed.
 
+### 7. High - Managed Claim Missing EVM Claim-Margin Gate (2026-06-12 follow-up)
+
+Affected flows:
+
+- EVM → Canton email (`POST /api/htlc/{id}/claim-managed`)
+- `claimCounterAsBackend` in `lib/htlc-service-singleton.ts`
+
+Risk:
+
+The Loop reveal path (`claimCounter`) called `verifyEvmLock()` before delivering cBTC, ensuring the solver had enough time to claim WBTC after reveal. The managed path did not. A user could reveal near `userTimelock`, receive cBTC, and still `retake` WBTC after the solver ran out of time.
+
+Implemented approach:
+
+- `claimCounterAsBackend` now calls `verifyEvmLock(o)` for `evm-to-canton` orders before exercising `HtlcLock.Claim`.
+
+Status: Fixed.
+
+See also: `docs/HTLC-SECRET-VAULT.md` (Issue B) for client vault context.
+
 ## Operational Notes
 
 - Upload `canton-htlc/.daml/dist/cbtc-htlc-hardened-0.1.0.dar` to the participant before enabling on-ledger HTLC flows that use the hardened package id.

@@ -7,6 +7,7 @@ import {
 
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { useLoopWallet, type LoopProvider } from "@/hooks/useLoopWallet";
+import { clearLoopVaultSession } from "@/lib/secret-vault";
 
 /**
  * App identity hook. The Canton party now comes from the user's CONNECTED LOOP
@@ -82,6 +83,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         /* ignore — logging out anyway */
       }
     })();
+    clearLoopVaultSession();
     loop.logout();
   }, [loop]);
 

@@ -34,6 +34,10 @@ const POLL_MS = Number(process.env.SOLVER_POLL_MS ?? 4000);
 const API_AUTH_TOKEN = process.env.HTLC_DAEMON_SECRET ?? process.env.CRON_SECRET ?? process.env.API_AUTH_TOKEN ?? "";
 
 function reqEnv(k: string): string { const v = process.env[k]; if (!v) throw new Error(`missing env ${k}`); return v; }
+/** Solver EVM hot key — same fallbacks as swap-solver/src/env.ts. */
+function solverEvmPk(): string {
+  return process.env.SOLVER_EVM_PK ?? process.env.AGENT_PRIVATE_KEY ?? process.env.PRIVATE_KEY ?? reqEnv("SOLVER_EVM_PK");
+}
 const norm = (k: string) => (k.startsWith("0x") ? k : `0x${k}`) as Hex;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -104,7 +108,7 @@ async function jpost(path: string, body?: unknown) {
 }
 
 async function main() {
-  const account = privateKeyToAccount(norm(reqEnv("SOLVER_EVM_PK")));
+  const account = privateKeyToAccount(norm(solverEvmPk()));
   const pub = createPublicClient({ chain: baseSepolia, transport: http(RPC) });
   const wallet = createWalletClient({ account, chain: baseSepolia, transport: http(RPC) });
   const escrow = getContract({ address: ESCROW, abi: HTLC_ESCROW_ABI, client: { public: pub, wallet } });

@@ -20,15 +20,16 @@ import { cookies } from "next/headers";
 
 import { NETWORK } from "@/lib/constants";
 
-/** Loop backend base, per network (matches the SDK's apiUrl). */
+/** Loop backend base, per network (matches the SDK's apiUrl). Inlined here so server
+ *  routes never depend on a separate client-safe helper name at runtime. */
 const LOOP_API: Record<string, string> = {
-  mainnet: "https://cantonloop.com",
-  testnet: "https://testnet.cantonloop.com",
   devnet: "https://devnet.cantonloop.com",
+  testnet: "https://testnet.cantonloop.com",
+  mainnet: "https://cantonloop.com",
 };
 
 export function loopApiBase(): string {
-  return LOOP_API[NETWORK.name] ?? LOOP_API.mainnet;
+  return LOOP_API[NETWORK.name] ?? LOOP_API.devnet!;
 }
 
 /** The httpOnly cookie name holding the minted Loop JWT for the swap session. */

@@ -6,6 +6,7 @@
  * The user supplies the preimage at claim time (secret stays client-side until now).
  */
 import { NextResponse } from "next/server";
+import { htlcClaimErrorStatus } from "@/lib/htlc-claim-http";
 import { htlcService } from "@/lib/htlc-service-singleton";
 import { requireOrderOwner } from "@/lib/htlc-auth";
 
@@ -20,7 +21,6 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     return NextResponse.json({ ok: true, updateId, status: order.status });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    const status = msg.includes("invalid preimage") ? 400 : 500;
-    return NextResponse.json({ error: msg }, { status });
+    return NextResponse.json({ error: msg }, { status: htlcClaimErrorStatus(msg) });
   }
 }

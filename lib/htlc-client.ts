@@ -53,6 +53,38 @@ async function jget(url: string) {
   return j;
 }
 
+/** Merge swap history when session party and Loop party differ (dual-login users). */
+export async function fetchMergedSwapHistory(opts: {
+  sessionAuthed: boolean;
+  sessionParty: string | null;
+  loopParty: string | null;
+}): Promise<{ orders: unknown[] }> {
+  const urls: string[] = [];
+  if (opts.sessionAuthed && opts.sessionParty) urls.push("/api/htlc/history");
+  if (opts.loopParty && opts.loopParty !== opts.sessionParty) {
+    urls.push(`/api/htlc/history?party=${encodeURIComponent(opts.loopParty)}`);
+  }
+  if (urls.length === 0) urls.push("/api/htlc/history");
+
+  const results = await Promise.allSettled(urls.map((u) => jget(u)));
+  const merged = new Map<string, unknown>();
+  let lastError: Error | null = null;
+  for (const result of results) {
+    if (result.status === "rejected") {
+      lastError = result.reason instanceof Error ? result.reason : new Error(String(result.reason));
+      continue;
+    }
+    for (const o of (result.value.orders ?? []) as { id: string }[]) {
+      merged.set(o.id, o);
+    }
+  }
+  if (merged.size === 0 && lastError) throw lastError;
+  const orders = [...merged.values()].sort(
+    (a, b) => ((b as { createdAt: number }).createdAt - (a as { createdAt: number }).createdAt),
+  );
+  return { orders };
+}
+
 export const htlcApi = {
   createOrder: (o: HtlcOrderInput) => jpost("/api/htlc", o),
   // RFQ quote (both directions, live WBTC/BTC price, 60s TTL, de-peg breaker).

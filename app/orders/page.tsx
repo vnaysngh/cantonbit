@@ -13,8 +13,19 @@ import { createPortal } from "react-dom";
 
 import { useWallet } from "@/hooks/useWallet";
 import { useEvmWallet } from "@/hooks/useEvmWallet";
-import { claimSwap, evmRetake, htlcApi } from "@/lib/htlc-client";
-import { recallSecret, forgetSecret } from "@/lib/secret-vault";
+import { useVaultContext } from "@/hooks/useVaultContext";
+import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import { claimSwap, evmRetake, fetchMergedSwapHistory, htlcApi } from "@/lib/htlc-client";
+import { isSwapClaimable } from "@/lib/htlc-order-logic";
+import type { SwapStatus } from "@/lib/htlc-types";
+import {
+  forgetSecret,
+  hasStoredSecret,
+  purgeExpiredSecrets,
+  recallSecret,
+  vaultMetaFromOrder,
+} from "@/lib/secret-vault";
+import { listLoopCbtcHoldingCids } from "@/lib/loop-holdings";
 import { getSwapErrorMessage } from "@/lib/swap-api";
 import { SWAP_CHAIN } from "@/lib/swap-evm";
 import { cn } from "@/lib/utils";
@@ -34,6 +45,7 @@ interface HistoryOrder {
   mainLockTx?: string;
   counterLockTx?: string;
   counterTransferUpdateId?: string;
+  counterTransferOfferCid?: string;
   mainClaimTx?: string;
   counterClaimUpdateId?: string;
   allocationCid?: string;
@@ -51,12 +63,33 @@ function hasLockedFunds(o: HistoryOrder): boolean {
   return !!o.htlcCid || !!o.counterTransferUpdateId || !!o.allocationCid; // user's cBTC on Canton
 }
 
-/** Is this swap CLAIMABLE right now AND do we still have its secret in this
- *  browser? counter_locked = both legs locked, not yet revealed. Without the
- *  recalled secret the user can only claim from the original tab/device. */
-function canClaim(o: HistoryOrder): boolean {
-  if (o.status !== "counter_locked" || o.revealedPreimage) return false;
-  return !!recallSecret(o.id);
+function isClaimableOrder(o: HistoryOrder): boolean {
+  return isSwapClaimable({
+    status: o.status as SwapStatus,
+    direction: o.direction,
+    counterMode: o.counterMode === "loop" || o.counterMode === "managed" ? o.counterMode : undefined,
+    revealedPreimage: o.revealedPreimage as `0x${string}` | undefined,
+  });
+}
+
+/** Loop reverse: user signed the cBTC lock in Loop but confirm-lock-loop never ran (e.g. refresh). */
+function needsLoopLockConfirm(o: HistoryOrder): boolean {
+  return o.direction === "canton-to-evm" && o.counterMode === "loop" && o.status === "accepted";
+}
+
+/** Loop forward: secret revealed and cBTC offer sent, but user still owes a standard accept. */
+function needsLoopAccept(o: HistoryOrder): boolean {
+  return (
+    o.direction === "evm-to-canton" &&
+    o.counterMode === "loop" &&
+    o.status === "counter_claimed" &&
+    !!o.counterTransferOfferCid
+  );
+}
+
+/** User leg done; waiting for the HTLC solver daemon to claim WBTC on EVM. */
+function isAwaitingSolverFinalize(o: HistoryOrder): boolean {
+  return o.direction === "evm-to-canton" && o.status === "counter_claimed";
 }
 
 /** What recovery action (if any) the user can take on a stuck order, NOW. Only
@@ -142,21 +175,53 @@ export default function OrdersPage() {
   const [openId, setOpenId] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [mounted, setMounted] = useState(false);
+  const [sessionParty, setSessionParty] = useState<string | null>(null);
+  const [sessionAuthed, setSessionAuthed] = useState(false);
+  const [sessionUserId, setSessionUserId] = useState<string | null>(null);
+  const [identityProbed, setIdentityProbed] = useState(false);
 
-  useEffect(() => { setMounted(true); }, []);
+  useEffect(() => { setMounted(true); purgeExpiredSecrets(); }, []);
 
   useEffect(() => {
-    if (wallet.isLoading) return;
     let alive = true;
-    const qs = wallet.partyId ? `?party=${encodeURIComponent(wallet.partyId)}` : "";
-    fetch(`/api/htlc/history${qs}`)
+    fetch("/api/parties/me")
       .then((r) => r.json())
       .then((d) => {
         if (!alive) return;
-        if (d.error) {
-          setError(getSwapErrorMessage(d.error));
-          return;
-        }
+        setSessionParty(d?.partyId ?? null);
+        setSessionAuthed(!!d?.authed);
+      })
+      .catch(() => {})
+      .finally(() => { if (alive) setIdentityProbed(true); });
+    return () => { alive = false; };
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    void createSupabaseBrowserClient()
+      .auth.getUser()
+      .then(({ data }) => { if (alive) setSessionUserId(data.user?.id ?? null); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
+
+  const vaultContext = useVaultContext({
+    loopProvider: wallet.provider,
+    evmAddress: evm.account,
+    sessionUserId,
+    sessionPartyId: sessionParty,
+  });
+
+  useEffect(() => {
+    if (wallet.isLoading || !identityProbed) return;
+    let alive = true;
+    void fetchMergedSwapHistory({
+      sessionAuthed,
+      sessionParty,
+      loopParty: wallet.partyId,
+    })
+      .then((d) => {
+        if (!alive) return;
         const nextOrders = (d.orders ?? []) as HistoryOrder[];
         setOrders(nextOrders);
         setOptimisticStatus((prev) => {
@@ -172,7 +237,7 @@ export default function OrdersPage() {
       })
       .catch((e) => { if (alive) setError(getSwapErrorMessage(e)); });
     return () => { alive = false; };
-  }, [wallet.isLoading, wallet.partyId, reload]);
+  }, [wallet.isLoading, wallet.partyId, sessionAuthed, sessionParty, identityProbed, reload]);
 
   // Close the drawer on Escape.
   useEffect(() => {
@@ -189,9 +254,11 @@ export default function OrdersPage() {
         if (!evm.account) throw new Error("Connect your EVM wallet to retake your WBTC.");
         const tx = await evmRetake(evm.sendTransaction, HTLC_ESCROW, o.id);
         await htlcApi.recordRetake(o.id, tx).catch(() => {});
+        forgetSecret(o.id);
       } else {
         await htlcApi.refundMain(o.id);
       }
+      forgetSecret(o.id);
       setOptimisticStatus((prev) => ({ ...prev, [o.id]: "refunded" }));
       setReload((n) => n + 1);
       setOpenId(null);
@@ -202,11 +269,74 @@ export default function OrdersPage() {
     }
   }, [evm]);
 
-  // CLAIM a claimable swap from the secret persisted in this browser — same logic
+  const doConfirmLock = useCallback(async (o: HistoryOrder) => {
+    setBusy(o.id); setError(null);
+    try {
+      await htlcApi.confirmLockLoop(o.id);
+      setReload((n) => n + 1);
+      setOpenId(null);
+    } catch (e) {
+      setError(getSwapErrorMessage(e));
+    } finally {
+      setBusy(null);
+    }
+  }, []);
+
+  /** Re-sign the cBTC transfer in Loop when confirm finds no on-ledger offer
+   *  (page refresh before submit, or a failed Loop transaction). */
+  const doRetryLoopLock = useCallback(async (o: HistoryOrder) => {
+    const provider = wallet.provider;
+    if (!provider) {
+      setError("Connect your Loop wallet to retry the cBTC lock.");
+      return;
+    }
+    setBusy(o.id);
+    setError(null);
+    try {
+      const holdingCids = await listLoopCbtcHoldingCids(
+        provider as unknown as { getActiveContracts: (p?: { interfaceId?: string }) => Promise<unknown[]> },
+      );
+      if (!holdingCids.length) throw new Error("No unlocked cBTC holdings found in your Loop wallet.");
+      const prep = await htlcApi.prepareLockLoop(o.id, holdingCids);
+      const userParty = (provider as { party_id?: string }).party_id ?? wallet.partyId ?? "";
+      await provider.submitAndWaitForTransaction(
+        {
+          commands: [prep.command],
+          disclosedContracts: prep.disclosedContracts,
+          packageIdSelectionPreference: [],
+          actAs: [userParty],
+          readAs: [userParty],
+          synchronizerId: prep.synchronizerId,
+        },
+        undefined,
+      );
+      await htlcApi.confirmLockLoop(o.id);
+      setReload((n) => n + 1);
+      setOpenId(null);
+    } catch (e) {
+      setError(getSwapErrorMessage(e));
+    } finally {
+      setBusy(null);
+    }
+  }, [wallet.provider, wallet.partyId]);
+
+  // CLAIM a claimable swap from the encrypted vault (or manual paste) — same logic
   // the /swap page runs, so a swap can be completed from /orders / after a refresh.
-  const doClaim = useCallback(async (o: HistoryOrder) => {
-    const secret = recallSecret(o.id);
-    if (!secret) { setError("This swap's secret isn't on this device — claim it from the tab where you started it."); return; }
+  const doClaim = useCallback(async (o: HistoryOrder, manualSecret?: string) => {
+    let secret = manualSecret?.trim() ?? null;
+    if (!secret) {
+      const ctx = await vaultContext();
+      const orderMeta = vaultMetaFromOrder(o) ?? undefined;
+      secret = await recallSecret(o.id, { ...ctx, orderMeta });
+    }
+    if (!secret) {
+      setError(
+        o.counterMode === "loop"
+          ? "Could not unlock this swap's secret. Connect your Loop wallet and approve the unlock sign, or paste your saved secret."
+          : "This swap's secret isn't available on this device. Sign in with the same account or paste your saved secret.",
+      );
+      return;
+    }
     setBusy(o.id); setError(null);
     try {
       await claimSwap({
@@ -217,7 +347,8 @@ export default function OrdersPage() {
         loop: wallet.provider as unknown as { party_id?: string; submitAndWaitForTransaction: (p: unknown, o?: unknown) => Promise<unknown> } | null,
       });
       forgetSecret(o.id);
-      setOptimisticStatus((prev) => ({ ...prev, [o.id]: "main_claimed" }));
+      // User leg stops at counter_claimed (Settling). Completed needs the HTLC daemon.
+      setOptimisticStatus((prev) => ({ ...prev, [o.id]: "counter_claimed" }));
       setReload((n) => n + 1);
       setOpenId(null);
     } catch (e) {
@@ -225,7 +356,40 @@ export default function OrdersPage() {
     } finally {
       setBusy(null);
     }
-  }, [evm, wallet.provider]);
+  }, [evm, wallet.provider, vaultContext]);
+
+  const doLoopAccept = useCallback(async (o: HistoryOrder) => {
+    const loop = wallet.provider as unknown as {
+      party_id?: string;
+      submitAndWaitForTransaction: (p: unknown, opts?: unknown) => Promise<unknown>;
+    } | null;
+    if (!loop) {
+      setError("Connect your Loop wallet to accept your cBTC.");
+      return;
+    }
+    setBusy(o.id);
+    setError(null);
+    try {
+      const { command, disclosedContracts, synchronizerId } = await htlcApi.prepareAccept(o.id);
+      const userParty = loop.party_id ?? wallet.partyId ?? "";
+      await loop.submitAndWaitForTransaction(
+        {
+          commands: [command],
+          disclosedContracts,
+          packageIdSelectionPreference: [],
+          actAs: [userParty],
+          readAs: [userParty],
+          synchronizerId,
+        },
+        undefined,
+      );
+      setReload((n) => n + 1);
+    } catch (e) {
+      setError(getSwapErrorMessage(e));
+    } finally {
+      setBusy(null);
+    }
+  }, [wallet.provider, wallet.partyId]);
 
   const copy = useCallback((text: string) => {
     void navigator.clipboard.writeText(text);
@@ -284,7 +448,7 @@ export default function OrdersPage() {
                 const pay = reverse ? `${fmtCbtc(displayOrder.cbtcAmount)} CBTC` : `${fmtWbtc(displayOrder.wbtcAmount)} WBTC`;
                 const recv = reverse ? `${fmtWbtc(displayOrder.wbtcAmount)} WBTC` : `${fmtCbtc(displayOrder.cbtcAmount)} CBTC`;
                 const action = recoveryAction(displayOrder);
-                const claimable = canClaim(displayOrder);
+                const claimable = isClaimableOrder(displayOrder);
                 return (
                   <tr
                     key={displayOrder.id}
@@ -350,6 +514,10 @@ export default function OrdersPage() {
           onClose={() => setOpenId(null)}
           onRecover={doRecover}
           onClaim={doClaim}
+          onConfirmLock={doConfirmLock}
+          onRetryLoopLock={doRetryLoopLock}
+          onLoopAccept={doLoopAccept}
+          loopConnected={!!wallet.provider}
           busy={busy === active.id}
         />,
         document.body,
@@ -359,7 +527,8 @@ export default function OrdersPage() {
 }
 
 function DetailDrawer({
-  o, explorer, copied, onCopy, onClose, onRecover, onClaim, busy,
+  o, explorer, copied, onCopy, onClose, onRecover, onClaim, onConfirmLock, onRetryLoopLock,
+  onLoopAccept, loopConnected, busy,
 }: {
   o: HistoryOrder;
   explorer: string;
@@ -367,12 +536,21 @@ function DetailDrawer({
   onCopy: (s: string) => void;
   onClose: () => void;
   onRecover: (o: HistoryOrder, a: "retake-wbtc" | "refund-cbtc") => void;
-  onClaim: (o: HistoryOrder) => void;
+  onClaim: (o: HistoryOrder, manualSecret?: string) => void;
+  onConfirmLock: (o: HistoryOrder) => void;
+  onRetryLoopLock: (o: HistoryOrder) => void;
+  onLoopAccept: (o: HistoryOrder) => void;
+  loopConnected: boolean;
   busy: boolean;
 }) {
   const reverse = o.direction === "canton-to-evm";
   const action = recoveryAction(o);
-  const claimable = canClaim(o);
+  const claimable = isClaimableOrder(o);
+  const lockConfirm = needsLoopLockConfirm(o);
+  const loopAccept = needsLoopAccept(o);
+  const awaitingSolver = isAwaitingSolverFinalize(o);
+  const vaultReady = hasStoredSecret(o.id);
+  const [manualSecret, setManualSecret] = useState("");
 
   const Row = ({ label, value, mono, copyText, href }: {
     label: string; value: string; mono?: boolean; copyText?: string; href?: string;
@@ -446,13 +624,76 @@ function DetailDrawer({
           </div>
 
           {claimable ? (
-            <button
-              onClick={() => onClaim(o)}
-              disabled={busy}
-              className="mt-4 w-full rounded-xl bg-[#b04a2a] px-4 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
-            >
-              {busy ? "Claiming…" : reverse ? "Claim my WBTC" : "Claim my CBTC"}
-            </button>
+            <div className="mt-4 space-y-2">
+              <p className="rounded-xl bg-amber-500/10 px-4 py-3 text-center text-xs text-amber-700">
+                {vaultReady
+                  ? o.counterMode === "loop"
+                    ? "Approve the Loop unlock sign to use the saved secret, or paste it below."
+                    : "Sign in with the same account to unlock the saved secret, or paste it below."
+                  : o.counterMode === "loop"
+                    ? "Connect your Loop wallet to unlock the saved secret, or paste it below."
+                    : "Sign in with the same account to unlock the saved secret, or paste it below."}
+              </p>
+              <input
+                type="password"
+                autoComplete="off"
+                placeholder="Optional: paste saved secret (0x…)"
+                value={manualSecret}
+                onChange={(e) => setManualSecret(e.target.value)}
+                className="w-full rounded-xl border border-foreground/15 bg-transparent px-3 py-2 text-xs font-mono text-foreground"
+              />
+              <button
+                onClick={() => onClaim(o, manualSecret.trim() || undefined)}
+                disabled={busy}
+                className="w-full rounded-xl bg-[#b04a2a] px-4 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+              >
+                {busy ? "Claiming…" : reverse ? "Claim my WBTC" : "Claim my CBTC"}
+              </button>
+            </div>
+          ) : awaitingSolver && !loopAccept ? (
+            <div className="mt-4 space-y-2">
+              <p className="rounded-xl bg-amber-500/10 px-4 py-3 text-center text-xs text-amber-700">
+                Your cBTC is delivered. Waiting for the solver to claim your WBTC on EVM —
+                refresh in a few seconds if <span className="font-mono">npm run solver:htlc</span> is
+                running (not <span className="font-mono">solver:watch</span>).
+              </p>
+            </div>
+          ) : loopAccept ? (
+            <div className="mt-4 space-y-2">
+              <p className="rounded-xl bg-amber-500/10 px-4 py-3 text-center text-xs text-amber-700">
+                Your secret was revealed but the cBTC transfer still needs a standard accept in Loop
+                (no cBTC preapproval on this wallet yet).
+              </p>
+              <button
+                onClick={() => onLoopAccept(o)}
+                disabled={busy || !loopConnected}
+                className="w-full rounded-xl bg-[#b04a2a] px-4 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+              >
+                {busy ? "Waiting for Loop…" : loopConnected ? "Accept cBTC in Loop" : "Connect Loop to accept cBTC"}
+              </button>
+            </div>
+          ) : lockConfirm ? (
+            <div className="mt-4 space-y-2">
+              <p className="rounded-xl bg-amber-500/10 px-4 py-3 text-center text-xs text-amber-700">
+                This swap is waiting for your cBTC lock. If you already signed in Loop, confirm here
+                (may take up to ~30s while the offer syncs). If the page refreshed before you signed,
+                connect Loop and retry the lock.
+              </p>
+              <button
+                onClick={() => onConfirmLock(o)}
+                disabled={busy}
+                className="w-full rounded-xl bg-[#b04a2a] px-4 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+              >
+                {busy ? "Confirming…" : "Confirm cBTC lock"}
+              </button>
+              <button
+                onClick={() => onRetryLoopLock(o)}
+                disabled={busy || !loopConnected}
+                className="w-full rounded-xl border border-foreground/15 px-4 py-2.5 text-sm font-semibold text-foreground/80 transition-colors hover:bg-foreground/5 disabled:opacity-50"
+              >
+                {busy ? "Waiting for Loop…" : loopConnected ? "Retry lock in Loop" : "Connect Loop to retry lock"}
+              </button>
+            </div>
           ) : action ? (
             <button
               onClick={() => onRecover(o, action)}
@@ -461,10 +702,6 @@ function DetailDrawer({
             >
               {busy ? "Submitting…" : action === "retake-wbtc" ? "Retake my WBTC" : "Refund my cBTC"}
             </button>
-          ) : o.status === "counter_locked" && !o.revealedPreimage ? (
-            <p className="mt-4 rounded-xl bg-amber-500/10 px-4 py-3 text-center text-xs text-amber-700">
-              This swap is claimable, but its secret isn’t saved on this device. Open it from the tab/device where you started it to claim.
-            </p>
           ) : null}
         </div>
       </div>

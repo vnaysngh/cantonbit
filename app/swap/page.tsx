@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { ChainIcon } from "@/components/ChainIcon";
 import { useEvmWallet } from "@/hooks/useEvmWallet";
 import { useWallet } from "@/hooks/useWallet";
+import { useVaultContext } from "@/hooks/useVaultContext";
 import { useBalance } from "@/hooks/useBalance";
 import { usePendingOrders, type TrackedOrder } from "@/hooks/usePendingOrders";
 import {
@@ -14,6 +15,7 @@ import {
   mintSwapSession
 } from "@/lib/swap-accept";
 import { truncatePartyId } from "@/lib/format";
+import { loopSettingsUrl } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import {
   getQuote,
@@ -52,7 +54,18 @@ import {
   evmRetake,
 } from "@/lib/htlc-client";
 import { listLoopCbtcHoldingCids } from "@/lib/loop-holdings";
-import { rememberSecret } from "@/lib/secret-vault";
+import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import { isSwapClaimable } from "@/lib/htlc-order-logic";
+import type { SwapStatus } from "@/lib/htlc-types";
+import {
+  forgetSecret,
+  rememberSecret,
+  recallSecret,
+  readActiveHtlcSwap,
+  vaultExpiryFromTimelock,
+  vaultMetaFromOrder,
+  type SecretVaultMeta,
+} from "@/lib/secret-vault";
 import {
   timelocksFromExpiration,
   EXPIRATION_OPTIONS,
@@ -78,6 +91,8 @@ type Stage =
   | { kind: "htlc-locking"; quote: QuoteResponse; swapId: string; secret: string; lockTx: string }
   // HTLC: both legs locked — the USER can now claim (press to reveal).
   | { kind: "htlc-claimable"; swapId: string; secret: string; lockTx: string; claimError?: string }
+  // HTLC: refresh detected a claimable swap — user must unlock vault before claim.
+  | { kind: "htlc-resume"; swapId: string; lockTx: string; unlockError?: string }
   // HTLC: the user's claim (reveal) is in flight.
   | { kind: "htlc-claiming"; swapId: string; secret: string; lockTx: string }
   // HTLC swap completed. swapId = hashLock.
@@ -90,6 +105,7 @@ type Stage =
   // (= the secret reveal). rev-done: WBTC claimed; the solver claims the cBTC.
   | { kind: "rev-locking"; swapId: string; secret: string }
   | { kind: "rev-claimable"; swapId: string; secret: string; claimError?: string }
+  | { kind: "rev-resume"; swapId: string; unlockError?: string }
   | { kind: "rev-claiming"; swapId: string; secret: string }
   | { kind: "rev-done"; swapId: string; claimTx: string }
   | { kind: "error"; message: string };
@@ -111,6 +127,7 @@ export default function SwapPage() {
   // on-ledger claim for them (CanActAs) — no Loop wallet needed. We fall back to the
   // connected Loop party only if there's no session (the legacy/Loop path).
   const [sessionParty, setSessionParty] = useState<string | null>(null);
+  const [sessionUserId, setSessionUserId] = useState<string | null>(null);
   const [sessionReadyAuth, setSessionReadyAuth] = useState(false);
   const [identityProbed, setIdentityProbed] = useState(false);
   useEffect(() => {
@@ -120,6 +137,14 @@ export default function SwapPage() {
       .then((d) => { if (alive) { setSessionParty(d?.partyId ?? null); setSessionReadyAuth(!!d?.authed); } })
       .catch(() => {})
       .finally(() => { if (alive) setIdentityProbed(true); });
+    return () => { alive = false; };
+  }, []);
+  useEffect(() => {
+    let alive = true;
+    void createSupabaseBrowserClient()
+      .auth.getUser()
+      .then(({ data }) => { if (alive) setSessionUserId(data.user?.id ?? null); })
+      .catch(() => {});
     return () => { alive = false; };
   }, []);
 
@@ -138,6 +163,40 @@ export default function SwapPage() {
   }, [identityProbed, wallet.isLoading, destinationParty, router]);
   // Is this a participant-managed swap (backend signs the claim) vs Loop (user signs)?
   const isParticipantManaged = !!sessionParty && destinationParty === sessionParty;
+
+  const vaultRecallContext = useVaultContext({
+    loopProvider: wallet.provider,
+    evmAddress: evm.account,
+    sessionUserId,
+    sessionPartyId: sessionParty,
+  });
+
+  const persistSwapSecret = useCallback(
+    async (
+      swapId: string,
+      secret: string,
+      meta: Omit<SecretVaultMeta, "expiresAt"> & { userTimelock: number; solverTimelock?: number },
+    ) => {
+      const ok = await rememberSecret(
+        swapId,
+        secret,
+        {
+          ...meta,
+          expiresAt: vaultExpiryFromTimelock(meta.userTimelock, {
+            direction: meta.direction,
+            solverTimelock: meta.solverTimelock,
+          }),
+        },
+        await vaultRecallContext(),
+      );
+      if (!ok) {
+        throw new Error(
+          "Could not save the swap secret on this device. Reconnect your wallet/account and try again before locking funds.",
+        );
+      }
+    },
+    [vaultRecallContext],
+  );
 
   // Amount starts EMPTY (CoW-style) — no default value. The input shows its "0.0"
   // placeholder and the button reads "Enter an amount" until the user types. All
@@ -269,6 +328,30 @@ export default function SwapPage() {
     }
   }, [wallet.provider]);
 
+  /** Loop forward path only — managed (email) swaps use on-ledger HtlcLock, not Loop preapproval. */
+  const probeCbtcAutoAccept = useCallback(async (): Promise<"ok" | "off" | "no-session" | "skipped"> => {
+    if (isParticipantManaged || !wallet.provider) return "skipped";
+    const ok = await hasCbtcAutoAccept(wallet.provider);
+    setAutoAccept(ok);
+    if (ok === false) return "off";
+    if (ok === null) return "no-session";
+    return "ok";
+  }, [isParticipantManaged, wallet.provider]);
+
+  // Loop forward: warn as soon as the JWT session is ready (not only on Review click).
+  // Participant-managed users skip — their cBTC leg doesn't use Loop preapproval.
+  useEffect(() => {
+    if (isParticipantManaged || isReverse || !wallet.provider || sessionReady !== true) return;
+    let cancelled = false;
+    void (async () => {
+      const gate = await probeCbtcAutoAccept();
+      if (cancelled || gate !== "off") return;
+      setEnableVisited(false);
+      setShowEnablePopup(true);
+    })();
+    return () => { cancelled = true; };
+  }, [isParticipantManaged, isReverse, wallet.provider, sessionReady, probeCbtcAutoAccept]);
+
   const fail = (message: string) => setStage({ kind: "error", message });
 
   // --- switch wallet to the configured swap chain (adds it if unknown) ---
@@ -315,25 +398,20 @@ export default function SwapPage() {
       return;
     }
 
-    // GATE: CBTC auto-accept must be ON, else the swap would finalise (take the
-    // WBTC) before the user accepts the CBTC. The session already exists, so this
-    // reads the preapproval with NO signature. Outcomes:
-    //   true  → proceed to quote.
-    //   false → preapproval OFF → open the enable-auto-accept popup.
-    //   null  → couldn't read (session expired mid-flow) → show error.
-    if (wallet.provider) {
+    // GATE (Loop forward only): cBTC auto-accept must be ON or the solver could
+    // take WBTC before the user holds cBTC. Managed users skip — on-ledger path.
+    if (!isParticipantManaged && wallet.provider) {
       setStage({ kind: "quoting" }); // brief "Checking…" during the read
-      const ok = await hasCbtcAutoAccept(wallet.provider);
-      setAutoAccept(ok);
-      if (ok === false) {
+      const gate = await probeCbtcAutoAccept();
+      if (gate === "off") {
         setStage({ kind: "idle" });
         setEnableVisited(false);
-        setShowEnablePopup(true); // popup with the "enable in Loop settings" CTA
+        setShowEnablePopup(true);
         return;
       }
-      if (ok === null) {
+      if (gate === "no-session") {
         setStage({ kind: "idle" });
-        setSessionReady(false); // likely the session lapsed — re-show the sign gate
+        setSessionReady(false);
         return;
       }
     }
@@ -358,13 +436,13 @@ export default function SwapPage() {
       }
       fail(getSwapErrorMessage(e));
     }
-  }, [evm.account, destinationParty, amount, refreshBalance, wallet.provider, sessionReady]);
+  }, [evm.account, destinationParty, amount, refreshBalance, wallet.provider, sessionReady, isParticipantManaged, probeCbtcAutoAccept]);
 
   // --- ENABLE-AUTO-ACCEPT popup actions ---
   // CTA 1: open Loop settings in a new tab and flip the CTA to "confirm".
   const handleOpenLoopSettings = useCallback(() => {
     setEnableVisited(true);
-    window.open("https://cantonloop.com/settings", "_blank", "noopener,noreferrer");
+    window.open(loopSettingsUrl(), "_blank", "noopener,noreferrer");
   }, []);
 
   // CTA 2 (after returning): re-check the preapproval status. ON → close popup,
@@ -373,22 +451,19 @@ export default function SwapPage() {
     if (!wallet.provider) return;
     setEnableChecking(true);
     try {
-      const ok = await hasCbtcAutoAccept(wallet.provider);
-      setAutoAccept(ok);
-      if (ok === true) {
+      const gate = await probeCbtcAutoAccept();
+      if (gate === "ok") {
         setShowEnablePopup(false);
-        void handleQuote(); // continue the swap now that it's enabled
+        void handleQuote();
       }
-      // ok === false → stay open; the popup shows it's still off.
-      // ok === null → session lapsed; surface the sign gate.
-      if (ok === null) {
+      if (gate === "no-session") {
         setShowEnablePopup(false);
         setSessionReady(false);
       }
     } finally {
       setEnableChecking(false);
     }
-  }, [wallet.provider, handleQuote]);
+  }, [wallet.provider, probeCbtcAutoAccept, handleQuote]);
 
   // Begin tracking a freshly-submitted order: register it in the persistent
   // pending-orders list (which polls it independently and survives refresh/tabs)
@@ -422,9 +497,6 @@ export default function SwapPage() {
       // 1. generate the secret (stays in the browser until the reveal) + create order
       const { secret, hashLock } = generateSecret();
       const id = hashLock; // swapId = hashLock
-      // Persist the secret per-browser so the swap is CLAIMABLE later (from /orders
-      // or after a refresh), not abandonable on tab close. Stays on-device only.
-      rememberSecret(id, secret);
       const now = Math.floor(Date.now() / 1000);
       // Derive the staggered timelocks from the chosen order expiration (Cancore §8):
       // userTimelock (EVM, = now + expiration) > solverTimelock (Canton, − gap).
@@ -447,6 +519,14 @@ export default function SwapPage() {
           counterMode: isParticipantManaged ? "managed" : "loop",
         });
         await htlcApi.accept(id); // (the independent solver also accepts; idempotent)
+        await persistSwapSecret(id, secret, {
+          direction: "evm-to-canton",
+          counterMode: isParticipantManaged ? "managed" : "loop",
+          userCantonParty: quote.cantonParty,
+          userEvmAddress: evm.account,
+          userTimelock,
+          solverTimelock,
+        });
       } catch (e) {
         retry(`Could not create the swap order: ${getSwapErrorMessage(e)}`);
         return;
@@ -506,7 +586,7 @@ export default function SwapPage() {
         retry(`Waiting for the solver failed: ${getSwapErrorMessage(e)}`);
       }
     },
-    [evm, expirationSeconds]
+    [evm, expirationSeconds, isParticipantManaged, persistSwapSecret]
   );
 
   // THE USER's CLAIM (the real reveal) — signed by the USER's Loop wallet.
@@ -532,6 +612,7 @@ export default function SwapPage() {
           // receiver (CanActAs). One call, no wallet popup. The daemon then claims
           // the WBTC from the revealed preimage.
           await htlcApi.claimManaged(swapId, preimage);
+          forgetSecret(swapId);
           setStage({ kind: "htlc-done", swapId, lockTx });
           return;
         }
@@ -550,6 +631,7 @@ export default function SwapPage() {
           // Preapproval auto-accepted the transfer — the cBTC is ALREADY in the
           // user's Loop wallet. Nothing to sign; record and finish.
           await htlcApi.recordClaim(swapId, preimage, reveal.updateId).catch(() => {});
+          forgetSecret(swapId);
           setStage({ kind: "htlc-done", swapId, lockTx });
           return;
         }
@@ -570,6 +652,7 @@ export default function SwapPage() {
         // Reveal the preimage to our node so the solver claims the WBTC (the user's
         // standard accept above is their only Canton action).
         await htlcApi.recordClaim(swapId, preimage, updateId);
+        forgetSecret(swapId);
         setStage({ kind: "htlc-done", swapId, lockTx });
       } catch (e) {
         setStage({ kind: "htlc-claimable", swapId, secret, lockTx, claimError: getSwapErrorMessage(e) });
@@ -596,7 +679,6 @@ export default function SwapPage() {
       const cbtcAmount = (Number(cbtcSats) / 1e8).toFixed(8);
       const { secret, hashLock } = generateSecret();
       const id = hashLock;
-      rememberSecret(id, secret); // claimable later from /orders / after refresh
       const now = Math.floor(Date.now() / 1000);
       // Ladder FLIPPED: userTimelock (LONG) = Canton HtlcLock; solverTimelock
       // (SHORT) = the solver's EVM lock.
@@ -614,6 +696,14 @@ export default function SwapPage() {
         solverTimelock,
       });
       await htlcApi.accept(id);
+      await persistSwapSecret(id, secret, {
+        direction: "canton-to-evm",
+        counterMode: isParticipantManaged ? "managed" : "loop",
+        userCantonParty: destinationParty,
+        userEvmAddress: evm.account,
+        userTimelock,
+        solverTimelock,
+      });
       if (isParticipantManaged) {
         // EMAIL: backend locks the user's cBTC on-ledger (the "auto-locks" step).
         await htlcApi.lockMain(id);
@@ -662,7 +752,7 @@ export default function SwapPage() {
     } catch (e) {
       fail(getSwapErrorMessage(e));
     }
-  }, [evm.account, destinationParty, amount, expirationSeconds, isParticipantManaged, wallet]);
+  }, [evm.account, destinationParty, amount, expirationSeconds, isParticipantManaged, wallet, persistSwapSecret]);
 
   // REVERSE claim — the user claims the WBTC in MetaMask. This on-chain
   // claim(preimage) IS the secret reveal; the daemon then claims the cBTC.
@@ -674,6 +764,7 @@ export default function SwapPage() {
         const tx = await evmClaim(evm.sendTransaction, HTLC_ESCROW, preimage);
         // Report the reveal (the daemon's EVM watchtower also catches it on its own).
         await htlcApi.recordClaim(swapId, preimage, tx).catch(() => {});
+        forgetSecret(swapId);
         setStage({ kind: "rev-done", swapId, claimTx: tx });
       } catch (e) {
         setStage({ kind: "rev-claimable", swapId, secret, claimError: getSwapErrorMessage(e) });
@@ -690,6 +781,7 @@ export default function SwapPage() {
       try {
         const tx = await evmRetake(evm.sendTransaction, HTLC_ESCROW, swapId);
         await htlcApi.recordRetake(swapId, tx);
+        forgetSecret(swapId);
         setStage({ kind: "htlc-refunded", swapId, retakeTx: tx });
       } catch (e) {
         setStage((s) =>
@@ -721,14 +813,110 @@ export default function SwapPage() {
     }
   }, [pendingOrders]);
 
-  // The live OrderView for the focused tracking order is DERIVED from the list's
-  // polling at render time (no setState-in-effect mirroring). Falls back to the
-  // stage's own order (e.g. the brief moment right after submit, before the first
-  // poll resolves).
   const focusedOrder =
     stage.kind === "tracking"
       ? (pendingOrders.find((o) => o.orderId === stage.orderId)?.order ?? stage.order)
       : null;
+
+  // Resume HTLC claim UI after refresh — detect claimable swap but do NOT auto-trigger
+  // Loop signMessage; the user unlocks the vault with an explicit click.
+  const resumeCheckedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      stage.kind === "htlc-claimable" ||
+      stage.kind === "htlc-claiming" ||
+      stage.kind === "htlc-resume" ||
+      stage.kind === "rev-claimable" ||
+      stage.kind === "rev-claiming" ||
+      stage.kind === "rev-resume"
+    ) {
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const swapId = readActiveHtlcSwap();
+      if (!swapId || resumeCheckedRef.current === swapId) return;
+      resumeCheckedRef.current = swapId;
+      const { order } = await htlcApi.getOrder(swapId);
+      const o = order as {
+        status?: string;
+        direction?: "evm-to-canton" | "canton-to-evm";
+        counterMode?: "managed" | "loop";
+        revealedPreimage?: string;
+        mainLockTx?: string;
+      } | null;
+      if (
+        !o ||
+        !isSwapClaimable({
+          status: o.status as SwapStatus,
+          direction: o.direction ?? "evm-to-canton",
+          counterMode: o.counterMode,
+          revealedPreimage: o.revealedPreimage as `0x${string}` | undefined,
+        })
+      ) {
+        return;
+      }
+      if (cancelled) return;
+      if (o.direction === "canton-to-evm") {
+        setStage({ kind: "rev-resume", swapId });
+      } else {
+        setStage({ kind: "htlc-resume", swapId, lockTx: o.mainLockTx ?? "" });
+      }
+    })().catch(() => {});
+    return () => { cancelled = true; };
+  }, [stage.kind]);
+
+  const unlockResumeSecret = useCallback(
+    async (swapId: string, lockTx: string, direction: "evm-to-canton" | "canton-to-evm") => {
+      const unlockFailMsg =
+        "Could not unlock the saved secret. Connect the same wallet/account or paste it from Orders.";
+      try {
+        const { order } = await htlcApi.getOrder(swapId);
+        const o = order as {
+          direction?: "evm-to-canton" | "canton-to-evm";
+          counterMode?: "managed" | "loop";
+          userCantonParty?: string;
+          userEvmAddress?: string;
+          userTimelock?: number;
+          solverTimelock?: number;
+          mainLockTx?: string;
+        } | null;
+        const orderMeta = vaultMetaFromOrder({
+          direction: o?.direction ?? direction,
+          counterMode: o?.counterMode,
+          userCantonParty: o?.userCantonParty,
+          userEvmAddress: o?.userEvmAddress,
+          userTimelock: o?.userTimelock,
+          solverTimelock: o?.solverTimelock,
+        }) ?? undefined;
+        const secret = await recallSecret(swapId, {
+          ...(await vaultRecallContext()),
+          orderMeta,
+        });
+        if (!secret) {
+          if (direction === "canton-to-evm") {
+            setStage({ kind: "rev-resume", swapId, unlockError: unlockFailMsg });
+          } else {
+            setStage({ kind: "htlc-resume", swapId, lockTx, unlockError: unlockFailMsg });
+          }
+          return;
+        }
+        if (direction === "canton-to-evm") {
+          setStage({ kind: "rev-claimable", swapId, secret });
+        } else {
+          setStage({ kind: "htlc-claimable", swapId, secret, lockTx: lockTx || o?.mainLockTx || "" });
+        }
+      } catch (e) {
+        const unlockError = getSwapErrorMessage(e);
+        if (direction === "canton-to-evm") {
+          setStage({ kind: "rev-resume", swapId, unlockError });
+        } else {
+          setStage({ kind: "htlc-resume", swapId, lockTx, unlockError });
+        }
+      }
+    },
+    [vaultRecallContext],
+  );
 
   // --- refund an expired, stuck order (solver submits it; funds → user) ---
   const handleRefundOrder = useCallback(
@@ -1026,6 +1214,25 @@ export default function SwapPage() {
           </div>
         )}
 
+        {(stage.kind === "htlc-resume") && (
+          <div className="px-1 pb-1 pt-4 text-center">
+            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/15 text-2xl">🔓</div>
+            <h3 className="text-lg font-semibold">Swap ready to claim</h3>
+            <p className="mt-1 text-sm text-foreground/60">
+              You have a claimable swap from a previous session. Unlock your saved secret to continue.
+            </p>
+            {stage.unlockError && (
+              <p className="mt-2 text-sm text-red-500">⚠️ {stage.unlockError}</p>
+            )}
+            <button
+              onClick={() => void unlockResumeSecret(stage.swapId, stage.lockTx, "evm-to-canton")}
+              className="mt-4 w-full rounded-2xl bg-[#b04a2a] px-4 py-3 font-semibold text-white hover:opacity-90"
+            >
+              Unlock saved secret
+            </button>
+          </div>
+        )}
+
         {(stage.kind === "htlc-claimable" || stage.kind === "htlc-claiming") && (
           <div className="px-1 pb-1 pt-4 text-center">
             <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/15 text-2xl">🔓</div>
@@ -1077,10 +1284,10 @@ export default function SwapPage() {
         {stage.kind === "htlc-done" && (
           <div className="px-1 pb-1 pt-4 text-center">
             <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-green-500/15 text-2xl">✅</div>
-            <h3 className="text-lg font-semibold">Swap complete</h3>
+            <h3 className="text-lg font-semibold">cBTC claimed</h3>
             <p className="mt-1 text-sm text-foreground/60">
-              You claimed your cBTC (revealing the secret). The solver claims the WBTC you
-              locked with that same secret — both legs settle.
+              Your cBTC is delivered and the secret is revealed. Orders will show Settling until
+              the HTLC solver daemon claims your WBTC on EVM (<span className="font-mono text-xs">npm run solver:htlc</span>).
             </p>
             <p className="mt-2 break-all text-xs text-foreground/40">
               swap {stage.swapId.slice(0, 14)}… · lock tx {stage.lockTx.slice(0, 14)}…
@@ -1092,6 +1299,25 @@ export default function SwapPage() {
         )}
 
         {/* ===== REVERSE (canton-to-evm) stages ===== */}
+        {(stage.kind === "rev-resume") && (
+          <div className="px-1 pb-1 pt-4 text-center">
+            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/15 text-2xl">🔓</div>
+            <h3 className="text-lg font-semibold">Swap ready to claim</h3>
+            <p className="mt-1 text-sm text-foreground/60">
+              You have a claimable swap from a previous session. Unlock your saved secret to continue.
+            </p>
+            {stage.unlockError && (
+              <p className="mt-2 text-sm text-red-500">⚠️ {stage.unlockError}</p>
+            )}
+            <button
+              onClick={() => void unlockResumeSecret(stage.swapId, "", "canton-to-evm")}
+              className="mt-4 w-full rounded-2xl bg-[#b04a2a] px-4 py-3 font-semibold text-white hover:opacity-90"
+            >
+              Unlock saved secret
+            </button>
+          </div>
+        )}
+
         {(stage.kind === "rev-claimable" || stage.kind === "rev-claiming") && (
           <div className="px-1 pb-1 pt-4 text-center">
             <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/15 text-2xl">🔓</div>

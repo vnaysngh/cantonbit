@@ -112,6 +112,21 @@ function resolveNetworkName(): NetworkName {
 
 export const NETWORK: NetworkConfig = NETWORKS[resolveNetworkName()];
 
+/** Loop web + API base URL per Canton network (matches @fivenorth/loop-sdk apiUrl). */
+const LOOP_WEB: Record<NetworkName, string> = {
+  devnet: "https://devnet.cantonloop.com",
+  testnet: "https://testnet.cantonloop.com",
+  mainnet: "https://cantonloop.com",
+};
+
+export function loopWebBase(): string {
+  return LOOP_WEB[NETWORK.name] ?? LOOP_WEB.devnet;
+}
+
+export function loopSettingsUrl(): string {
+  return `${loopWebBase()}/settings`;
+}
+
 // Token Standard endpoint helpers — built from NETWORK so screens never
 // concatenate URLs themselves.
 export const tokenStandardBase = (): string =>

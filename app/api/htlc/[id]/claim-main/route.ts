@@ -4,6 +4,7 @@
  * back to the stored revealedPreimage). On-ledger keccak gate enforces validity.
  */
 import { NextResponse } from "next/server";
+import { htlcClaimErrorStatus } from "@/lib/htlc-claim-http";
 import { htlcService } from "@/lib/htlc-service-singleton";
 import { requireDaemon } from "@/lib/htlc-auth";
 
@@ -17,6 +18,6 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     return NextResponse.json({ order, updateId });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    return NextResponse.json({ error: msg }, { status: msg.includes("invalid preimage") ? 400 : 500 });
+    return NextResponse.json({ error: msg }, { status: htlcClaimErrorStatus(msg) });
   }
 }

@@ -27,6 +27,10 @@ import {
 } from "./htlc-onledger";
 import { SupabaseSwapStore, type SwapStore } from "./htlc-order-store";
 import { resolveCreateOrder } from "./htlc-order-logic";
+import {
+  assertEvmLockSafeForReveal,
+  EVM_CLAIM_MARGIN_SECONDS,
+} from "./htlc-evm-lock-guard";
 import type { SwapOrder, SwapStatus, SwapDirection } from "./htlc-types";
 
 export type { SwapOrder, SwapStatus, SwapDirection };
@@ -37,8 +41,8 @@ function toHexLower(bytes: Uint8Array): string {
 
 const HTLC_ESCROW_ADDR =
   process.env.NEXT_PUBLIC_HTLC_ESCROW ?? "0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1";
-/** Min seconds the solver needs left on the EVM lock to safely claim after a reveal. */
-const EVM_CLAIM_MARGIN_SECONDS = 10 * 60;
+/** Re-export for daemon alignment — defined in htlc-evm-lock-guard. */
+export { EVM_CLAIM_MARGIN_SECONDS };
 /** Loop-seller custody: if the WBTC counter-lock hasn't happened within this grace,
  *  the sweep returns the custody early (no point holding the user's funds). */
 const LOOP_CUSTODY_GRACE_SECONDS = 30 * 60;
@@ -68,19 +72,19 @@ async function readEvmLock(hashLockRaw: string): Promise<{ unlockTime: number; a
 }
 
 /**
- * SERVER-SIDE EVM LOCK CHECK (solver-robbery guard for the Loop path): before we
- * deliver cBTC, verify on-chain that the user's WBTC is REALLY locked in the HTLC
- * escrow under this order's hashLock — right amount, claimable by OUR solver, with
- * enough time left. Without this, a faked recordMainLock would let a user collect
- * cBTC against a non-existent WBTC lock. (The daemon re-checks at claim time too.)
+ * SERVER-SIDE EVM LOCK CHECK (solver-robbery guard): before we release cBTC on
+ * reveal (Loop claim-counter OR managed claim-managed), verify on-chain that the
+ * user's WBTC is REALLY locked in the HTLC escrow under this order's hashLock —
+ * right amount, claimable by OUR solver, with enough time left for the daemon to
+ * claim after the reveal. Without this, a late reveal near userTimelock lets the
+ * user collect cBTC and still retake WBTC after the solver runs out of time.
  */
 async function verifyEvmLock(o: SwapOrder): Promise<void> {
   const { unlockTime, amount, receiver } = await readEvmLock(o.hashLock);
-  if (amount === 0n) throw new Error("EVM lock not found — WBTC is not locked under this hashLock");
-  if (amount < BigInt(o.wbtcAmount)) throw new Error(`EVM lock amount too small (${amount} < ${o.wbtcAmount})`);
-  if (receiver !== o.solverEvmAddress.toLowerCase()) throw new Error("EVM lock receiver is not the solver");
-  const now = Math.floor(Date.now() / 1000);
-  if (unlockTime - now < EVM_CLAIM_MARGIN_SECONDS) throw new Error("EVM lock expires too soon for the solver to claim safely");
+  assertEvmLockSafeForReveal(
+    { unlockTime, amount, receiver },
+    { wbtcAmount: o.wbtcAmount, solverEvmAddress: o.solverEvmAddress },
+  );
 }
 
 function preimageMatches(preimageHex: string, hashLock: string): boolean {
@@ -314,6 +318,10 @@ class HtlcService {
     if (!o.htlcCid || !o.allocationCid) throw new Error("on-ledger HtlcLock not present");
     if (!preimageMatches(preimageHex, o.hashLock)) throw new Error("invalid preimage");
 
+    // Same solver-robbery guard as claimCounter — reject late reveals when the EVM
+    // lock no longer gives the daemon enough time to claim WBTC before user retake.
+    if (o.direction === "evm-to-canton") await verifyEvmLock(o);
+
     const { updateId } = await claimAsReceiver({
       receiverParty: o.userCantonParty,
       solverParty: o.solverCantonParty,
@@ -458,26 +466,50 @@ class HtlcService {
   }
 
   /** STEP 2b (LOOP SELLER) — find the user's transfer offer in OUR view and ACCEPT
-   *  it as the venue (custody starts) → main_locked. Never trusts the browser. */
-  async confirmLoopSellerLock(id: string): Promise<SwapOrder> {
+   *  it as the venue (custody starts) → main_locked. Never trusts the browser.
+   *  Polls the solver ACS — cross-participant offers can lag a few seconds after
+   *  the Loop wallet submits, and a page refresh may leave confirm never called. */
+  async confirmLoopSellerLock(
+    id: string,
+    opts?: { maxAttempts?: number; pollMs?: number },
+  ): Promise<SwapOrder> {
     const o = await this.must(id);
     if (o.direction !== "canton-to-evm" || o.counterMode !== "loop") {
       throw new Error("confirm-lock-loop is for Loop-seller orders only");
     }
     if (o.status === "main_locked") return o; // idempotent
     if (o.status !== "accepted") throw new Error(`order not accepted (${o.status})`);
-    const offers = await listPendingOffers(o.solverCantonParty);
-    const offer = offers.find(
-      (x) => x.sender === o.userCantonParty && parseFloat(x.amountBtc) + 1e-9 >= parseFloat(o.cbtcAmount),
+
+    const maxAttempts = opts?.maxAttempts ?? 15;
+    const pollMs = opts?.pollMs ?? 2000;
+    const targetAmount = parseFloat(o.cbtcAmount);
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const offers = await listPendingOffers(o.solverCantonParty);
+      const offer = offers.find(
+        (x) =>
+          x.sender === o.userCantonParty &&
+          parseFloat(x.amountBtc) + 1e-9 >= targetAmount,
+      );
+      if (offer) {
+        const { updateId } = await acceptTransfer({
+          receiverParty: o.solverCantonParty,
+          offerContractId: offer.contractId,
+        });
+        o.counterTransferOfferCid = offer.contractId;
+        o.counterTransferUpdateId = updateId;
+        o.status = "main_locked";
+        await this.store.put(o);
+        return o;
+      }
+      if (attempt < maxAttempts - 1) {
+        await new Promise((r) => setTimeout(r, pollMs));
+      }
+    }
+
+    throw new Error(
+      "transfer offer not visible on-ledger yet — connect Loop and use Retry lock, or wait a moment and confirm again",
     );
-    if (!offer) throw new Error("transfer offer not visible on-ledger yet");
-    const { updateId } = await acceptTransfer({
-      receiverParty: o.solverCantonParty,
-      offerContractId: offer.contractId,
-    });
-    o.counterTransferOfferCid = offer.contractId;
-    o.counterTransferUpdateId = updateId;
-    o.status = "main_locked"; await this.store.put(o); return o;
   }
 
   /** LOOP-SELLER refund prep — the user's unilateral exit: standard
