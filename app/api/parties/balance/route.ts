@@ -13,7 +13,8 @@ import {
   createSupabaseServerClient,
   createSupabaseServiceClient
 } from "@/lib/supabase/server";
-import { getHoldings } from "@/lib/canton";
+import { getAmuletBalance, getHoldings } from "@/lib/canton";
+import { MIN_CC_BALANCE, NETWORK } from "@/lib/constants";
 
 export async function GET() {
   try {
@@ -34,16 +35,29 @@ export async function GET() {
     if (!party)
       return NextResponse.json({ total: "0", utxoCount: 0, authed: true });
 
-    const holdings = await getHoldings(party);
+    const [holdings, ccTotal] = await Promise.all([
+      getHoldings(party),
+      getAmuletBalance(party)
+    ]);
     let sats = 0n;
     for (const h of holdings) {
       const amt = h.payload.amount ?? "0";
       sats += BigInt(Math.round(parseFloat(amt) * 1e8));
     }
     const total = (Number(sats) / 1e8).toFixed(8);
+    const ccNum = parseFloat(ccTotal);
+    const ccReady = ccNum >= MIN_CC_BALANCE;
+    // On devnet the validator operator often subsidizes synchronizer fees for
+    // hosted parties — swaps can succeed with 0 CC even when ccReady is false.
+    const ccSubsidizedOnDevnet =
+      NETWORK.name === "devnet" && !ccReady;
     return NextResponse.json({
       total,
       utxoCount: holdings.length,
+      ccTotal,
+      ccReady,
+      ccMin: MIN_CC_BALANCE,
+      ccSubsidizedOnDevnet,
       authed: true,
       party
     });

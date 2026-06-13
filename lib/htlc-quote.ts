@@ -17,7 +17,12 @@
  */
 import "server-only";
 
-export const BRIDGE_FEE_BPS = 20; // 0.2% on the output
+import { DEFAULT_PLATFORM_FEE_BPS } from "./constants";
+
+/** Output-side platform fee (bps). Override with PLATFORM_FEE_BPS env. */
+export const BRIDGE_FEE_BPS = Number(
+  process.env.PLATFORM_FEE_BPS ?? DEFAULT_PLATFORM_FEE_BPS
+);
 export const QUOTE_TTL_SECONDS = 60; // RFQ-style short validity (NOT the order window)
 const DEPEG_LIMIT_BPS = 200; // 2% — refuse to quote beyond this
 const CACHE_FRESH_MS = 30_000;

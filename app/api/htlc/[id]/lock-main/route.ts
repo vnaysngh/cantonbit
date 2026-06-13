@@ -1,7 +1,7 @@
 /**
  * POST /api/htlc/{id}/lock-main — REVERSE (canton-to-evm) step 2: the backend locks
  * the USER's CBTC on-ledger (Allocation sender=user + HtlcLock locker=user, LONG
- * timelock) via CanActAs — Cancore's "platform auto-locks". Managed users only.
+ * timelock) via CanActAs — platform auto-lock. Managed users only.
  */
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";

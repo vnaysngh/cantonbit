@@ -2,7 +2,7 @@
  * POST /api/htlc/quote — RFQ-style quote, BOTH directions, price-adjusted.
  *
  * CBTC is 1:1 BTC; WBTC is NOT — so the live WBTC/BTC rate is applied
- * directionally (lib/htlc-quote.ts), with a 20bps fee on the output, a 60s quote
+ * directionally (lib/htlc-quote.ts), with a 1% fee on the output, a 60s quote
  * TTL, and a 2% de-peg circuit breaker (→ 503, the page shows "swaps paused").
  *
  * Body (forward, unchanged shape): { user, wbtcAmount (8dp units), cantonParty }
@@ -59,6 +59,7 @@ export async function POST(req: Request) {
       wbtcPriceRaw: q.price8.toString(), // LIVE WBTC/BTC, 8dp
       wbtcPriceDecimals: 8,
       expires: q.expiresAt, // 60s quote TTL (RFQ), not the order window
+      feeBps: q.feeBps,
       bridgeFeeBps: q.feeBps,
       instrument: NETWORK.instrumentId
     });

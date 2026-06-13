@@ -29,6 +29,7 @@ trust properties on the CBTC leg for each mode.
 9. [Running locally](#9-running-locally)
 10. [Deploying on Railway](#10-deploying-on-railway)
 11. [Repo layout & deeper docs](#11-repo-layout--deeper-docs)
+12. [Fees & swap parameters](#12-fees--swap-parameters)
 
 ---
 
@@ -429,10 +430,85 @@ Optional: `ALERT_WEBHOOK_URL`, `SOLVER_POLL_MS`.
 
 ---
 
-## Swap parameters
+## 12. Fees & swap parameters
+
+Swaps involve **three separate cost types**. Only the **platform fee** is OranjSwap revenue;
+network fees go to Canton (CC) and EVM (gas) infrastructure.
+
+### Platform fee (OranjSwap / solver)
+
+**Model:** user ↔ **solver** (us), not P2P. We take **one fee on the quoted output** — not
+1% from each side like P2P venues that match two independent users.
+
+| Config | Default | Where enforced |
+| --- | --- | --- |
+| `PLATFORM_FEE_BPS` | `100` (1%) | Server quote (`lib/htlc-quote.ts`) |
+| `NEXT_PUBLIC_FEE_BPS` | `100` | UI pre-quote estimate (`app/swap/page.tsx`) |
+| `SOLVER_FEE_BPS` | `100` | Legacy OIF solver only (`swap-solver/`) |
+
+**Quote math** (live WBTC/BTC price `P`, 8dp units):
+
+- **EVM → Canton:** `cbtcOut = wbtcIn × P × (1 − fee)`
+- **Canton → EVM:** `wbtcOut = cbtcIn ÷ P × (1 − fee)`
+
+**How it is collected:** there is no separate on-chain “fee transfer.” The fee is embedded in
+the quoted amounts bound into the HTLC locks. The solver locks **less** on its leg than the
+fair mid-price amount and receives **more** on the user leg — the spread is the platform fee.
+
+**Example (Canton → EVM, P = 1.0, 1% fee):**
+
+| Party | Locks | Receives |
+| --- | --- | --- |
+| User | 1.00000000 CBTC | 0.99000000 WBTC |
+| Solver | 0.99000000 WBTC | 1.00000000 CBTC |
+
+Solver gross ≈ **0.01 BTC notional** minus network costs. Order creation re-validates amounts
+against a fresh quote (`assertOrderAmounts` in `lib/htlc-quote.ts`) so clients cannot bypass
+the fee.
+
+The review modal shows **Platform fee** with the exact deduction before confirm.
+
+### Canton network fee (CC / Amulet)
+
+Every Canton ledger submission burns **CC (Amulet)** from the party in `actAs`. This is
+**not** platform revenue — it pays Canton synchronizer / validator infrastructure.
+
+**Who pays which leg (typical email / participant-managed flow):**
+
+| Direction | User party CC | Solver party CC |
+| --- | --- | --- |
+| **Canton → EVM** | Lock path (~2 ledger txs: allocate + `HtlcLock`) | Claim CBTC after EVM reveal |
+| **EVM → Canton** | Usually none for the user’s lock (user signs EVM only) | Lock + claim CBTC counter |
+
+Amount is **variable** (small fractions of CC per tx), not a fixed per-swap line item in the app.
+
+**UI & guardrails:**
+
+- CC balance shown in the header for email users (`/api/parties/balance` → `useBalance`).
+- **Review swap** blocked when `ccReady === false` and balance &lt; `MIN_CC_BALANCE` (0.001).
+- **DevNet bypass:** when `ccSubsidizedOnDevnet` is true, the guard is off — WarpX often
+  subsidizes hosted parties so swaps succeed with **0 CC visible**. On testnet/mainnet the
+  guard applies.
+- **EnableCC** (one-time CC opt-in: `ValidatorRight` + `TransferPreapproval`) runs on
+  participant provision (`lib/enable-cc.ts`).
+
+CC burn does not appear as a separate row in the swap UI; inspect ledger transaction history
+(Splice meta keys such as `splice.lfdecentralizedtrust.org/burned`) to verify per-tx cost.
+
+### EVM network fee (gas)
+
+Paid in **ETH** on the swap chain (Base Sepolia today) to Ethereum validators — not OranjSwap.
+
+| Step | Who pays gas |
+| --- | --- |
+| User locks WBTC (EVM → Canton) | User (MetaMask) |
+| User claims WBTC (Canton → EVM) | User (MetaMask) |
+| Solver locks WBTC counter (Canton → EVM) | Solver hot wallet |
+| Solver claims / retake on EVM | Solver |
+
+### Other swap parameters
 
 - **Timelocks:** maker ≥ order expiration; taker shorter; min **2h** for Canton swaps; default **4h**
 - **Gap:** ~20m minimum between legs (Canton skew + EVM finality + execution buffer)
-- **Fee:** configurable (`NEXT_PUBLIC_FEE_BPS`, default 20 bps = 0.2%)
 - **Refunds:** Canton auto-refund sweep + manual; EVM `retake(hashLock)` via MetaMask
 - **Cancel:** maker can cancel before any lock (no on-chain activity)

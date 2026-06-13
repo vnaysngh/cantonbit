@@ -65,7 +65,11 @@ export async function GET() {
           party_hint: "participant-managed"
         });
     }
-    return NextResponse.json({ partyId: party, authed: true });
+    return NextResponse.json({
+      partyId: party,
+      authed: true,
+      mode: "participant-managed"
+    });
   } catch (e) {
     return NextResponse.json(
       { error: e instanceof Error ? e.message : String(e) },

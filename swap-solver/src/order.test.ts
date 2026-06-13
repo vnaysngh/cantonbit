@@ -60,9 +60,9 @@ test("FEE: the fee-reduced cbtcAmount is bound into output.amount (the signed or
   // The fee is charged by committing the REDUCED amount as the signed output, so
   // the solver delivers exactly that and keeps the difference. This proves the
   // fee can't be bypassed: what the user signs == what is delivered == cbtcAmount.
-  const feeBps = 20;
+  const feeBps = 100;
   const wbtcAmount = 1_00_000_000n; // 1 WBTC
-  const cbtcAmount = (wbtcAmount * BigInt(10000 - feeBps)) / 10000n; // 0.998 CBTC
+  const cbtcAmount = (wbtcAmount * BigInt(10000 - feeBps)) / 10000n; // 0.99 CBTC
   const built = buildOrder(cfg(), { ...req(), wbtcAmount, cbtcAmount }, NOW);
   // output.amount IS the fee-reduced CBTC the user signs and the solver delivers.
   assert.equal(
@@ -78,7 +78,7 @@ test("FEE: the fee-reduced cbtcAmount is bound into output.amount (the signed or
   );
   // Fee = collected − delivered, and the solver NEVER overpays (delivered <= collected).
   const fee = wbtcAmount - cbtcAmount;
-  assert.equal(fee, 200_000n, "0.2% of 1 WBTC = 0.002 BTC fee");
+  assert.equal(fee, 1_000_000n, "1% of 1 WBTC = 0.01 BTC fee");
   assert.ok(
     cbtcAmount <= wbtcAmount,
     "solver must never deliver more than it collects"

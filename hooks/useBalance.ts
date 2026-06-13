@@ -12,6 +12,12 @@ interface BalanceState {
   locked: string;
   /** Number of CBTC holdings (Loop aggregates per-instrument, so 0 or 1). */
   utxoCount: number;
+  /** CC (Amulet) balance for Canton network fees — email/session path only. */
+  ccTotal: string | null;
+  /** True when ccTotal >= MIN_CC_BALANCE (server-side). */
+  ccReady: boolean | null;
+  /** Devnet: operator may cover fees even when ccReady is false. */
+  ccSubsidizedOnDevnet: boolean;
   isLoading: boolean;
   error: string | null;
   refetch: () => void;
@@ -21,9 +27,19 @@ interface Fetched {
   total: string;
   locked: string;
   utxoCount: number;
+  ccTotal: string | null;
+  ccReady: boolean | null;
+  ccSubsidizedOnDevnet: boolean;
 }
 
-const ZERO: Fetched = { total: "0", locked: "0", utxoCount: 0 };
+const ZERO: Fetched = {
+  total: "0",
+  locked: "0",
+  utxoCount: 0,
+  ccTotal: null,
+  ccReady: null,
+  ccSubsidizedOnDevnet: false
+};
 
 /** How often to re-fetch the balance in the background (ms). */
 const POLL_INTERVAL_MS = 30_000;
@@ -46,16 +62,32 @@ export function useBalance(): BalanceState {
     queryFn: async (): Promise<Fetched> => {
       if (useLoop && provider) {
         const { total, locked, count } = await readLoopCbtcBalance(provider);
-        return { total, locked, utxoCount: count };
+        return {
+          total,
+          locked,
+          utxoCount: count,
+          ccTotal: null,
+          ccReady: null,
+          ccSubsidizedOnDevnet: false
+        };
       }
       // Session-party (email) path — server reads the warpx party's holdings.
       const r = await fetch("/api/parties/balance");
       if (!r.ok) return ZERO;
-      const j = (await r.json()) as { total?: string; utxoCount?: number };
+      const j = (await r.json()) as {
+        total?: string;
+        utxoCount?: number;
+        ccTotal?: string;
+        ccReady?: boolean;
+        ccSubsidizedOnDevnet?: boolean;
+      };
       return {
         total: j.total ?? "0",
         locked: "0",
-        utxoCount: j.utxoCount ?? 0
+        utxoCount: j.utxoCount ?? 0,
+        ccTotal: j.ccTotal ?? "0",
+        ccReady: j.ccReady ?? false,
+        ccSubsidizedOnDevnet: j.ccSubsidizedOnDevnet ?? false
       };
     },
     refetchInterval: POLL_INTERVAL_MS,
@@ -68,6 +100,9 @@ export function useBalance(): BalanceState {
     total: view.total,
     locked: view.locked,
     utxoCount: view.utxoCount,
+    ccTotal: view.ccTotal,
+    ccReady: view.ccReady,
+    ccSubsidizedOnDevnet: view.ccSubsidizedOnDevnet,
     isLoading,
     error: error instanceof Error ? error.message : null,
     refetch: () => void refetch()

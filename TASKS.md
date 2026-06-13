@@ -160,7 +160,7 @@ REMAINING (tracked, not blockers for the proven happy/failure paths):
  (email session → warpx party; Loop → ?party=). Status chips + explorer links.
 - [x] **RFQ quote engine, both directions** — lib/htlc-quote.ts + quote route: LIVE
  WBTC/BTC price (CoinGecko, 30s cache, ≤10min stale, else refuse), applied
- directionally (×P forward, ÷P reverse — CBTC is 1:1 BTC, WBTC is NOT), 20bps fee
+ directionally (×P forward, ÷P reverse — CBTC is 1:1 BTC, WBTC is NOT), 1% fee
  on output, 60s quote TTL, 2% de-peg breaker → 503. Reverse UI now server-quotes.
 - [x] **Hygiene sweep** (swap-solver/src/hygiene-sweep.mts) — chunked Locked-event scan
  (RPC 2000-block cap; also fixed the daemon watchtower the same way), retakes

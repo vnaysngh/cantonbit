@@ -8,6 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { ChainIcon } from "@/components/ChainIcon";
 import { useWallet } from "@/hooks/useWallet";
 import { useEvmWallet } from "@/hooks/useEvmWallet";
+import { useBalance } from "@/hooks/useBalance";
 import { SWAP_CHAIN } from "@/lib/swap-evm";
 import { cn } from "@/lib/utils";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
@@ -86,6 +87,7 @@ export function TopNav() {
 
         {/* Actions — takes up right third, pushes to the right edge */}
         <div className="flex flex-1 items-center justify-end gap-3">
+          <CcBalanceBadge />
           <WalletsMenu
             evm={evm}
             evmWrongChain={evmWrongChain}
@@ -105,26 +107,63 @@ export function TopNav() {
  * after login and would briefly show "Log in"). Falls back to the Loop party.
  * Returns { party, ready }. party=null + ready=true means logged out.
  */
-function useCantonIdentity(): { party: string | null; ready: boolean; isLoop: boolean } {
+function useCantonIdentity(): {
+  party: string | null;
+  ready: boolean;
+  isLoop: boolean;
+  isManaged: boolean;
+} {
   const { partyId: loopParty } = useWallet();
-  const [state, setState] = useState<{ party: string | null; ready: boolean; isLoop: boolean }>(
-    { party: null, ready: false, isLoop: false },
-  );
+  const [state, setState] = useState<{
+    party: string | null;
+    ready: boolean;
+    isLoop: boolean;
+    isManaged: boolean;
+  }>({ party: null, ready: false, isLoop: false, isManaged: false });
   useEffect(() => {
     let alive = true;
     fetch("/api/parties/me")
       .then((r) => r.json())
       .then((d) => {
         if (!alive) return;
-        if (d?.partyId) setState({ party: d.partyId, ready: true, isLoop: d.mode === "loop" });
-        else setState({ party: null, ready: true, isLoop: false });
+        if (d?.partyId) {
+          setState({
+            party: d.partyId,
+            ready: true,
+            isLoop: d.mode === "loop",
+            isManaged: d.mode === "participant-managed"
+          });
+        } else setState({ party: null, ready: true, isLoop: false, isManaged: false });
       })
-      .catch(() => { if (alive) setState({ party: null, ready: true, isLoop: false }); });
-    return () => { alive = false; };
+      .catch(() => {
+        if (alive)
+          setState({ party: null, ready: true, isLoop: false, isManaged: false });
+      });
+    return () => {
+      alive = false;
+    };
   }, []);
-  // Loop wallet connected without a session still counts as identity.
-  if (!state.party && loopParty) return { party: loopParty, ready: true, isLoop: true };
+  if (!state.party && loopParty)
+    return { party: loopParty, ready: true, isLoop: true, isManaged: false };
   return state;
+}
+
+/** CC (Canton network fee) balance for email/participant-managed users. */
+function CcBalanceBadge() {
+  const { party, ready, isManaged } = useCantonIdentity();
+  const { ccTotal } = useBalance();
+
+  if (!ready || !party || !isManaged || ccTotal === null) return null;
+
+  return (
+    <div
+      className="hidden items-center gap-1.5 rounded-lg border border-outline-variant bg-surface-container px-2.5 py-1.5 text-xs text-muted-foreground sm:flex"
+      title="Canton Coin balance for network fees"
+    >
+      <span className="text-[11px] uppercase tracking-wide">CC</span>
+      <span className="font-mono tabular-nums text-foreground">{ccTotal}</span>
+    </div>
+  );
 }
 
 /** Header Log out (outside the dropdown) — clears session + Loop → /login. */

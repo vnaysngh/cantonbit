@@ -16,7 +16,7 @@ import {
   mintSwapSession
 } from "@/lib/swap-accept";
 import { truncatePartyId } from "@/lib/format";
-import { loopSettingsUrl } from "@/lib/constants";
+import { loopSettingsUrl, MIN_CC_BALANCE, DEFAULT_PLATFORM_FEE_BPS } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import {
   getQuote,
@@ -153,9 +153,9 @@ type Stage =
 // usePendingOrders (the CoW-style order list). The single-active-order key is gone.
 
 /** Bridge fee in basis points for the pre-quote "You receive" estimate. Must
- *  match the solver's SOLVER_FEE_BPS (default 20 = 0.2%). The review modal shows
+ *  match the server's PLATFORM_FEE_BPS (default 100 = 1%). The review modal shows
  *  the exact fee from the server quote. */
-const FEE_BPS = Number(process.env.NEXT_PUBLIC_FEE_BPS ?? 20);
+const FEE_BPS = Number(process.env.NEXT_PUBLIC_FEE_BPS ?? DEFAULT_PLATFORM_FEE_BPS);
 
 export default function SwapPage() {
   const evm = useEvmWallet();
@@ -278,7 +278,14 @@ export default function SwapPage() {
   const { orders: pendingOrders, addOrder, dismissOrder } = usePendingOrders();
 
   // CBTC balance from the connected Loop wallet (for the "You receive" panel).
-  const { total: cbtcBalance } = useBalance();
+  const {
+    total: cbtcBalance,
+    ccReady,
+    ccSubsidizedOnDevnet
+  } = useBalance();
+
+  const ccBlocksCantonSwap =
+    isParticipantManaged && ccReady === false && !ccSubsidizedOnDevnet;
 
   const wrongChain = evm.chainId != null && evm.chainId !== SWAP_CHAIN.id;
 
@@ -446,40 +453,46 @@ export default function SwapPage() {
     }
   }, [evm]);
 
-  // --- 1. quote ---
+  // --- 1. quote (both directions) ---
   const handleQuote = useCallback(async () => {
     if (!evm.account) {
       fail("Connect your EVM wallet first.");
       return;
     }
     if (!destinationParty) {
-      fail("Connect your Loop wallet to set the destination.");
+      fail(
+        isReverse
+          ? "Sign in to set your Canton party."
+          : "Connect your Loop wallet to set the destination."
+      );
       return;
     }
-    let wbtcAmount: bigint;
+    let inUnits: bigint;
     try {
-      wbtcAmount = parseWbtc(amount);
+      inUnits = parseWbtc(amount);
     } catch {
       fail("Enter a valid amount.");
       return;
     }
-    if (wbtcAmount <= 0n) {
+    if (inUnits <= 0n) {
       fail("Amount must be greater than zero.");
       return;
     }
-
-    // PREREQUISITE: a JWT session must already exist (the user signed once on
-    // entering the swap screen). If somehow not ready, surface the sign popup
-    // instead of quoting — never sign implicitly on this click.
-    if (sessionReady !== true) {
-      setSessionReady(false); // shows the sign popup
+    if (ccBlocksCantonSwap) {
+      fail(
+        `Insufficient CC for Canton network fees (need at least ${MIN_CC_BALANCE} CC).`
+      );
       return;
     }
 
-    // GATE (Loop forward only): CBTC auto-accept must be ON or the solver could
-    // take WBTC before the user holds CBTC. Managed users skip — on-ledger path.
-    if (!isParticipantManaged && wallet.provider) {
-      setStage({ kind: "quoting" }); // brief "Checking…" during the read
+    if (!isParticipantManaged && sessionReady !== true) {
+      setSessionReady(false);
+      return;
+    }
+
+    // GATE (Loop forward only): CBTC auto-accept must be ON.
+    if (!isReverse && !isParticipantManaged && wallet.provider) {
+      setStage({ kind: "quoting" });
       const gate = await probeCbtcAutoAccept();
       if (gate === "off") {
         setStage({ kind: "idle" });
@@ -496,16 +509,24 @@ export default function SwapPage() {
 
     setStage({ kind: "quoting" });
     try {
-      const quote = await getQuote({
-        user: evm.account,
-        wbtcAmount: wbtcAmount.toString(),
-        cantonParty: destinationParty
-      });
-      void refreshBalance(quote.wbtc);
+      const quote = await getQuote(
+        isReverse
+          ? {
+              user: evm.account,
+              cantonParty: destinationParty,
+              cbtcAmount: inUnits.toString(),
+              direction: "canton-to-evm"
+            }
+          : {
+              user: evm.account,
+              wbtcAmount: inUnits.toString(),
+              cantonParty: destinationParty,
+              direction: "evm-to-canton"
+            }
+      );
+      if (!isReverse) void refreshBalance(quote.wbtc);
       setStage({ kind: "quoted", quote });
     } catch (e) {
-      // De-peg circuit breaker → 503. Show a clean "swaps paused" message rather
-      // than a raw error, so the user understands it's temporary + protective.
       if (e instanceof ApiError && e.status === 503) {
         fail(
           "Swaps are paused — the WBTC/BTC price is temporarily unstable. This protects your funds; please try again shortly."
@@ -518,10 +539,12 @@ export default function SwapPage() {
     evm.account,
     destinationParty,
     amount,
+    isReverse,
     refreshBalance,
     wallet.provider,
     sessionReady,
     isParticipantManaged,
+    ccBlocksCantonSwap,
     probeCbtcAutoAccept
   ]);
 
@@ -804,145 +827,144 @@ export default function SwapPage() {
     [wallet, isParticipantManaged]
   );
 
-  // ===== REVERSE (canton-to-evm): sell CBTC, receive WBTC. Email users only. =====
-  // Flow (docs/canton-to-evm-design.md): backend locks the USER's CBTC on-ledger
-  // (CanActAs, LONG timelock) → solver daemon locks WBTC on EVM (SHORT) → user
-  // claims the WBTC in MetaMask (= the secret reveal) → solver claims the CBTC
-  // via the on-ledger keccak gate. Fully trustless both legs.
-  const handleSwapReverse = useCallback(async () => {
-    if (!evm.account || !destinationParty || !SOLVER_CANTON) return;
-    const fail = (message: string) => setStage({ kind: "error", message });
-    try {
-      setStage({ kind: "quoting" });
-      // RFQ quote from the server: live WBTC/BTC price applied directionally
-      // (cbtc ÷ P), 20bps fee, 60s TTL, de-peg breaker (503 → error message).
-      const cbtcSats = parseWbtc(amount); // 8dp parse works for CBTC too
-      const q = await htlcApi.quoteReverse(
-        evm.account,
-        cbtcSats.toString(),
-        destinationParty
+  // --- 2b. confirm reverse (canton-to-evm) — same review modal as forward ---
+  const handleConfirmReverse = useCallback(
+    async (quote: QuoteResponse) => {
+      const retry = (msg: string) =>
+        setStage({ kind: "quoted", quote, retryError: msg });
+      if (!evm.account || !destinationParty || !SOLVER_CANTON) {
+        retry("Wallet or party disconnected — reconnect and try again.");
+        return;
+      }
+      const cbtcUnits = BigInt(quote.cbtcAmount);
+      const wbtcUnits = BigInt(
+        quote.wbtcAmount ?? quote.order.outputs[0]?.amount ?? "0"
       );
-      const wbtcUnits = BigInt(q.wbtcAmount);
-      const cbtcAmount = (Number(cbtcSats) / 1e8).toFixed(8);
+      if (wbtcUnits <= 0n || cbtcUnits <= 0n) {
+        retry("Invalid quote — please review again.");
+        return;
+      }
+      const cbtcAmount = (Number(cbtcUnits) / 1e8).toFixed(8);
       const { secret, hashLock } = generateSecret();
       const id = hashLock;
       const now = Math.floor(Date.now() / 1000);
-      // Ladder FLIPPED: userTimelock (LONG) = Canton HtlcLock; solverTimelock
-      // (SHORT) = the solver's EVM lock.
       const { userTimelock, solverTimelock } = timelocksFromExpiration(
         now,
         expirationSeconds
       );
-      setStage({ kind: "rev-locking", swapId: id, secret });
-      await htlcApi.createOrder({
-        id,
-        direction: "canton-to-evm",
-        hashLock,
-        userEvmAddress: evm.account, // receives the WBTC
-        solverEvmAddress: SOLVER_EVM, // pays the WBTC
-        wbtcAmount: wbtcUnits.toString(),
-        userTimelock,
-        userCantonParty: destinationParty, // the session party selling CBTC
-        solverCantonParty: SOLVER_CANTON,
-        cbtcAmount,
-        solverTimelock
-      });
-      await htlcApi.accept(id);
-      await persistSwapSecret(id, secret, {
-        direction: "canton-to-evm",
-        counterMode: isParticipantManaged ? "managed" : "loop",
-        userCantonParty: destinationParty,
-        userEvmAddress: evm.account,
-        userTimelock,
-        solverTimelock
-      });
-      if (isParticipantManaged) {
-        // EMAIL: backend locks the user's CBTC on-ledger (the "auto-locks" step).
-        await htlcApi.lockMain(id);
-      } else {
-        // LOOP SELLER: the user locks via the STANDARD AllocationFactory_Allocate
-        // signed in THEIR wallet (escrow with a unilateral Allocation_Withdraw
-        // exit — no custom contract ever touches the Loop party).
-        const provider = wallet.provider;
-        if (!provider)
-          throw new Error("Connect your Loop wallet to lock your CBTC.");
-        const holdingCids = await listLoopCbtcHoldingCids(
-          provider as unknown as {
-            getActiveContracts: (p?: {
-              interfaceId?: string;
-            }) => Promise<unknown[]>;
-          }
-        );
-        if (!holdingCids.length)
-          throw new Error(
-            "No unlocked CBTC holdings found in your Loop wallet."
-          );
-        const prep = await htlcApi.prepareLockLoop(id, holdingCids);
-        const userParty =
-          (provider as { party_id?: string }).party_id ?? wallet.partyId ?? "";
-        await provider.submitAndWaitForTransaction(
-          {
-            commands: [prep.command],
-            disclosedContracts: prep.disclosedContracts,
-            packageIdSelectionPreference: [],
-            actAs: [userParty],
-            readAs: [userParty],
-            synchronizerId: prep.synchronizerId
-          },
-          undefined
-        );
-        // Backend verifies the allocation from ITS OWN ledger view (never the browser).
-        let confirmed = false;
-        for (let i = 0; i < 10; i++) {
-          try {
-            await htlcApi.confirmLockLoop(id);
-            confirmed = true;
-            break;
-          } catch {
-            await sleep(2000);
-          }
-        }
-        if (!confirmed) {
-          fail(
-            "Your CBTC allocation was signed but not yet visible on-ledger — reopen this swap from Orders in a moment."
-          );
-          return;
-        }
-      }
-      // Wait for the solver daemon to lock the WBTC counter on EVM.
-      let counterLocked = false;
-      for (let i = 0; i < 60; i++) {
-        await sleep(3000);
-        const { order } = await htlcApi.getOrder(id);
-        const st = (order as { status?: string } | undefined)?.status;
-        if (st === "counter_locked" || st === "counter_claimed") {
-          counterLocked = true;
-          break;
-        }
-        if (st === "refunded" || st === "cancelled" || st === "failed") {
-          fail(`Swap ${st} while waiting for the solver.`);
-          return;
-        }
-      }
-      if (!counterLocked) {
-        fail(
-          "The solver hasn't locked the WBTC yet. Is the daemon running? Your CBTC auto-refunds after the timelock."
-        );
+      try {
+        setStage({ kind: "submitting", quote });
+        await htlcApi.createOrder({
+          id,
+          direction: "canton-to-evm",
+          hashLock,
+          userEvmAddress: evm.account,
+          solverEvmAddress: SOLVER_EVM,
+          wbtcAmount: wbtcUnits.toString(),
+          userTimelock,
+          userCantonParty: destinationParty,
+          solverCantonParty: SOLVER_CANTON,
+          cbtcAmount,
+          solverTimelock
+        });
+        await htlcApi.accept(id);
+        await persistSwapSecret(id, secret, {
+          direction: "canton-to-evm",
+          counterMode: isParticipantManaged ? "managed" : "loop",
+          userCantonParty: destinationParty,
+          userEvmAddress: evm.account,
+          userTimelock,
+          solverTimelock
+        });
+      } catch (e) {
+        retry(`Could not create the swap order: ${getSwapErrorMessage(e)}`);
         return;
       }
-      setStage({ kind: "rev-claimable", swapId: id, secret });
-    } catch (e) {
-      fail(getSwapErrorMessage(e));
-    }
-  }, [
-    evm.account,
-    destinationParty,
-    amount,
-    expirationSeconds,
-    isParticipantManaged,
-    wallet,
-    persistSwapSecret
-  ]);
+
+      try {
+        setStage({ kind: "rev-locking", swapId: id, secret });
+        if (isParticipantManaged) {
+          await htlcApi.lockMain(id);
+        } else {
+          const provider = wallet.provider;
+          if (!provider)
+            throw new Error("Connect your Loop wallet to lock your CBTC.");
+          const holdingCids = await listLoopCbtcHoldingCids(
+            provider as unknown as {
+              getActiveContracts: (p?: {
+                interfaceId?: string;
+              }) => Promise<unknown[]>;
+            }
+          );
+          if (!holdingCids.length)
+            throw new Error(
+              "No unlocked CBTC holdings found in your Loop wallet."
+            );
+          const prep = await htlcApi.prepareLockLoop(id, holdingCids);
+          const userParty =
+            (provider as { party_id?: string }).party_id ?? wallet.partyId ?? "";
+          await provider.submitAndWaitForTransaction(
+            {
+              commands: [prep.command],
+              disclosedContracts: prep.disclosedContracts,
+              packageIdSelectionPreference: [],
+              actAs: [userParty],
+              readAs: [userParty],
+              synchronizerId: prep.synchronizerId
+            },
+            undefined
+          );
+          let confirmed = false;
+          for (let i = 0; i < 10; i++) {
+            try {
+              await htlcApi.confirmLockLoop(id);
+              confirmed = true;
+              break;
+            } catch {
+              await sleep(2000);
+            }
+          }
+          if (!confirmed) {
+            retry(
+              "Your CBTC allocation was signed but not yet visible on-ledger — reopen this swap from Orders in a moment."
+            );
+            return;
+          }
+        }
+        let counterLocked = false;
+        for (let i = 0; i < 60; i++) {
+          await sleep(3000);
+          const { order } = await htlcApi.getOrder(id);
+          const st = (order as { status?: string } | undefined)?.status;
+          if (st === "counter_locked" || st === "counter_claimed") {
+            counterLocked = true;
+            break;
+          }
+          if (st === "refunded" || st === "cancelled" || st === "failed") {
+            retry(`Swap ${st} while waiting for the solver.`);
+            return;
+          }
+        }
+        if (!counterLocked) {
+          retry(
+            "The solver hasn't locked the WBTC yet. Is the daemon running? Your CBTC auto-refunds after the timelock."
+          );
+          return;
+        }
+        setStage({ kind: "rev-claimable", swapId: id, secret });
+      } catch (e) {
+        retry(getSwapErrorMessage(e));
+      }
+    },
+    [
+      evm.account,
+      destinationParty,
+      expirationSeconds,
+      isParticipantManaged,
+      wallet,
+      persistSwapSecret
+    ]
+  );
 
   // REVERSE claim — the user claims the WBTC in MetaMask. This on-chain
   // claim(preimage) IS the secret reveal; the daemon then claims the CBTC.
@@ -1302,11 +1324,10 @@ export default function SwapPage() {
         disabled: true
       };
     } else if (isReverse) {
-      // REVERSE: no server quote (1:1 minus the same fee, computed locally). The
-      // backend locks the CBTC via CanActAs — email users only (toggle is gated).
       primary = {
-        label: "Swap CBTC → WBTC",
-        onClick: () => void handleSwapReverse()
+        label: "Review swap",
+        onClick: handleQuote,
+        disabled: reviewing
       };
     } else {
       // Session ready + amount valid. Review checks auto-accept (no signature)
@@ -1765,12 +1786,21 @@ export default function SwapPage() {
               : stage.kind === "signing"
                 ? "Sign the swap in your wallet…"
                 : stage.kind === "submitting"
-                  ? `Locking WBTC on ${SWAP_CHAIN.name}…`
+                  ? stage.quote.direction === "canton-to-evm"
+                    ? "Locking CBTC on Canton…"
+                    : `Locking WBTC on ${SWAP_CHAIN.name}…`
                   : null
           }
-          onConfirm={() =>
-            stage.kind === "quoted" && handleConfirm(stage.quote)
-          }
+          expirationSeconds={expirationSeconds}
+          evmRecipient={evm.account}
+          onConfirm={() => {
+            if (stage.kind !== "quoted") return;
+            if (stage.quote.direction === "canton-to-evm") {
+              void handleConfirmReverse(stage.quote);
+            } else {
+              void handleConfirm(stage.quote);
+            }
+          }}
           onClose={reset}
         />
       )}
@@ -2063,12 +2093,16 @@ function ReviewModal({
   quote,
   retryError,
   busy,
+  expirationSeconds,
+  evmRecipient,
   onConfirm,
   onClose
 }: {
   quote: QuoteResponse | null;
   retryError?: string;
   busy: string | null;
+  expirationSeconds: number;
+  evmRecipient: string | null;
   onConfirm: () => void;
   onClose: () => void;
 }) {
@@ -2084,35 +2118,59 @@ function ReviewModal({
 
   if (!quote) return null;
 
-  const wbtcIn = BigInt(quote.order.inputs[0][1]);
-  const cbtcOut = BigInt(quote.cbtcAmount);
-  const wbtc = formatWbtc(wbtcIn);
-  const cbtc = formatWbtc(cbtcOut);
-
-  // The REAL rate = live WBTC/BTC price (CBTC is redeemable 1:1 BTC, so the
-  // WBTC→CBTC rate IS the WBTC price in BTC). Never hardcode 1:1 — WBTC trades
-  // slightly off par (e.g. 0.9978). Falls back to deriving from the amounts.
+  const reverse = quote.direction === "canton-to-evm";
+  const feeBps = quote.feeBps ?? 0;
   const priceScale = 10n ** BigInt(quote.wbtcPriceDecimals ?? 8);
   const priceRaw = quote.wbtcPriceRaw ? BigInt(quote.wbtcPriceRaw) : priceScale;
-  // Rate string: 1 WBTC = <price> CBTC (formatted to 8dp).
-  const rateLabel = `1 WBTC = ${formatWbtc((priceRaw * 100_000_000n) / priceScale)} CBTC`;
 
-  // Split the total deduction into PRICE adjustment vs FEE, so the user sees both
-  // honestly (CoW lists each cost line separately).
-  //   cbtcBeforeFee = wbtcIn × price  (the WBTC's real BTC value)
-  //   fee           = cbtcBeforeFee − cbtcOut  (the solver's cut)
-  const cbtcBeforeFee = (wbtcIn * priceRaw) / priceScale;
-  const feeAmount = cbtcBeforeFee - cbtcOut;
-  const feeLabel =
-    quote.feeBps > 0
-      ? `${quote.feeBps / 100}% (−${formatWbtc(feeAmount)} CBTC)`
-      : "Free";
-  const refundAt = new Date(quote.expires * 1000).toLocaleString(undefined, {
+  const cbtcUnits = BigInt(quote.cbtcAmount);
+  const wbtcUnits = BigInt(
+    quote.wbtcAmount ?? quote.order.outputs[0]?.amount ?? "0"
+  );
+  const cbtc = formatWbtc(cbtcUnits);
+  const wbtc = formatWbtc(wbtcUnits);
+
+  // Rate labels — CBTC is 1:1 BTC; WBTC trades at P BTC per WBTC.
+  const cbtcPerWbtc = formatWbtc((priceRaw * 100_000_000n) / priceScale);
+  const wbtcPerCbtc = formatWbtc((100_000_000n * 100_000_000n) / priceRaw);
+  const rateLabel = reverse
+    ? `1 CBTC = ${wbtcPerCbtc} WBTC`
+    : `1 WBTC = ${cbtcPerWbtc} CBTC`;
+
+  // Platform fee on output side.
+  const feeLabel = (() => {
+    if (feeBps <= 0) return "Free";
+    if (reverse) {
+      const wbtcBeforeFee = (cbtcUnits * priceRaw) / priceScale;
+      const feeAmount = wbtcBeforeFee - wbtcUnits;
+      return `${feeBps / 100}% (−${formatWbtc(feeAmount)} WBTC)`;
+    }
+    const cbtcBeforeFee = (wbtcUnits * priceRaw) / priceScale;
+    const feeAmount = cbtcBeforeFee - cbtcUnits;
+    return `${feeBps / 100}% (−${formatWbtc(feeAmount)} CBTC)`;
+  })();
+
+  const refundAt = new Date(
+    (Math.floor(Date.now() / 1000) + expirationSeconds) * 1000
+  ).toLocaleString(undefined, {
     month: "short",
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit"
   });
+
+  const recipientLabel = reverse
+    ? evmRecipient
+      ? `${evmRecipient.slice(0, 8)}…${evmRecipient.slice(-6)}`
+      : "Connect EVM wallet"
+    : truncatePartyId(quote.cantonParty);
+
+  const payAmount = reverse ? cbtc : wbtc;
+  const payToken = reverse ? "CBTC" : "WBTC";
+  const payNetwork = reverse ? "Canton" : SWAP_CHAIN.name;
+  const receiveAmount = reverse ? wbtc : cbtc;
+  const receiveToken = reverse ? "WBTC" : "CBTC";
+  const receiveNetwork = reverse ? SWAP_CHAIN.name : "Canton";
 
   return (
     <div
@@ -2146,9 +2204,9 @@ function ReviewModal({
         <div className="flex flex-col">
           <div className="flex items-center justify-between gap-3">
             <div className="text-3xl font-medium text-foreground">
-              {wbtc} WBTC
+              {payAmount} {payToken}
             </div>
-            <TokenBadge token="WBTC" network={SWAP_CHAIN.name} />
+            <TokenBadge token={payToken} network={payNetwork} />
           </div>
           <div className="my-2 pl-1 text-on-surface-variant">
             <span className="material-symbols-outlined text-[22px]">
@@ -2157,21 +2215,21 @@ function ReviewModal({
           </div>
           <div className="flex items-center justify-between gap-3">
             <div className="text-3xl font-medium text-foreground">
-              {cbtc} CBTC
+              {receiveAmount} {receiveToken}
             </div>
-            <TokenBadge token="CBTC" network="Canton" />
+            <TokenBadge token={receiveToken} network={receiveNetwork} />
           </div>
         </div>
 
         {/* Trade details */}
         <div className="mt-5 flex flex-col gap-1.5 border-t border-foreground/10 pt-4 text-sm">
           <DetailRow label="Rate" value={rateLabel} />
-          <DetailRow label="Bridge fee" value={feeLabel} />
-          <DetailRow label="You receive" value={`${cbtc} CBTC`} />
+          <DetailRow label="Platform fee" value={feeLabel} />
           <DetailRow
-            label="Recipient"
-            value={truncatePartyId(quote.cantonParty)}
+            label="You receive"
+            value={`${receiveAmount} ${receiveToken}`}
           />
+          <DetailRow label="Recipient" value={recipientLabel} />
           <DetailRow label="Refundable after" value={refundAt} />
         </div>
 

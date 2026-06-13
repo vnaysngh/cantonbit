@@ -22,6 +22,8 @@ export type CantonChain = "canton-devnet" | "canton-testnet" | "canton-mainnet";
 export interface NetworkConfig {
   name: NetworkName;
   ledgerHost: string;
+  /** Splice validator app (scan-proxy + admin external-party APIs). */
+  validatorHost: string;
   registryUrl: string;
   coordinatorUrl: string;
   decentralizedPartyId: string;
@@ -62,6 +64,7 @@ export const NETWORKS: Record<NetworkName, NetworkConfig> = {
   devnet: {
     name: "devnet",
     ledgerHost: "https://ledger-api.validator.devnet.warpx.fivenorth.io",
+    validatorHost: "https://wallet.validator.devnet.warpx.fivenorth.io",
     registryUrl: "https://api.utilities.digitalasset-dev.com",
     coordinatorUrl: "https://api.devnet.bitsafe.finance",
     decentralizedPartyId: CBTC_DEVNET_ADMIN,
@@ -77,6 +80,7 @@ export const NETWORKS: Record<NetworkName, NetworkConfig> = {
     // Testnet ledger host not yet confirmed — fall back to devnet until provided.
     // TODO(testnet-ledger): replace with the real testnet ledger API host.
     ledgerHost: "https://ledger-api.validator.devnet.warpx.fivenorth.io",
+    validatorHost: "https://wallet.validator.devnet.warpx.fivenorth.io",
     registryUrl: "https://api.utilities.digitalasset-staging.com",
     coordinatorUrl: "https://api.testnet.bitsafe.finance",
     decentralizedPartyId: CBTC_TESTNET_ADMIN,
@@ -90,6 +94,7 @@ export const NETWORKS: Record<NetworkName, NetworkConfig> = {
   mainnet: {
     name: "mainnet",
     ledgerHost: "https://ledger-api.validator.warpx.fivenorth.io",
+    validatorHost: "https://wallet.validator.warpx.fivenorth.io",
     registryUrl: "https://api.utilities.digitalasset.com",
     coordinatorUrl: "https://api.mainnet.bitsafe.finance",
     decentralizedPartyId: CBTC_MAINNET_ADMIN,
@@ -142,3 +147,10 @@ export const acceptChoiceContextUrl = (transferInstructionCid: string): string =
 export const UTXO_WARN_THRESHOLD = 20;
 export const BITCOIN_CONFIRMATIONS_REQUIRED = 6;
 export const JWT_REFRESH_BUFFER_SECONDS = 5 * 60;
+
+/** Recommended minimum CC (Amulet) before Canton ledger writes (lock, claim, refund). */
+export const MIN_CC_BALANCE = 0.001;
+
+/** Platform swap fee in basis points (100 = 1% on quoted output). Override server-side
+ *  with PLATFORM_FEE_BPS; UI estimate with NEXT_PUBLIC_FEE_BPS. Legacy solver: SOLVER_FEE_BPS. */
+export const DEFAULT_PLATFORM_FEE_BPS = 100;

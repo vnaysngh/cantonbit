@@ -43,13 +43,13 @@ const BANNED_USERS = new Set(
 );
 
 /**
- * Solver/bridge fee in basis points (1 bps = 0.01%). Default 20 bps = 0.2% — the
+ * Solver/bridge fee in basis points (1 bps = 0.01%). Default 100 bps = 1% — the
  * cost of running the cross-chain bridge (gas to openFor/attest/finalise, the
  * CBTC float capital, operational risk). Subtracted from the CBTC the user
  * receives: cbtcOut = wbtcIn * (10000 - feeBps) / 10000. Override via
  * SOLVER_FEE_BPS; set 0 for a clean 1:1.
  */
-const SOLVER_FEE_BPS = Number(process.env.SOLVER_FEE_BPS ?? 20);
+const SOLVER_FEE_BPS = Number(process.env.SOLVER_FEE_BPS ?? 100);
 
 /**
  * De-peg circuit breaker config. We quote WBTC↔CBTC at 1:1 (both = 1 BTC); this

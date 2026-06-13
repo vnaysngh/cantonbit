@@ -240,7 +240,7 @@ async function allocationChoiceContext(
 /** STEP 1 — lock CBTC in an Allocation.
  *  EVM→Canton (default): solver = sender = executor (locks its own float).
  *  Canton→EVM (reverse): senderParty = the USER's hosted party (backend CanActAs
- *  signs as them — Cancore's "platform auto-locks"); executor stays the solver so
+ *  signs as them — platform auto-lock); executor stays the solver so
  *  ExecuteTransfer's receiver+executor authorizers are BOTH the solver (it claims
  *  alone after the on-ledger keccak gate). */
 export async function allocate(params: {

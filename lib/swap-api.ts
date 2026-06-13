@@ -45,20 +45,28 @@ export interface SerializedOrder {
   }[];
 }
 
+/** Minimal order shape returned by POST /api/htlc/quote. */
+export interface HtlcQuoteOrder {
+  inputs: [string, string][];
+  outputs: { amount: string }[];
+}
+
 export interface QuoteResponse {
-  orderId: string;
-  order: SerializedOrder;
+  orderId?: string;
+  order: SerializedOrder | HtlcQuoteOrder;
   cantonParty: string;
   cbtcAmount: string;
+  wbtcAmount?: string;
+  direction?: "evm-to-canton" | "canton-to-evm";
   feeBps: number;
   /** Live WBTC/BTC price used for this quote: price = wbtcPriceRaw / 10^wbtcPriceDecimals. */
   wbtcPriceRaw?: string;
   wbtcPriceDecimals?: number;
-  permit2: Permit2TypedData;
-  escrow: string;
+  permit2?: Permit2TypedData;
+  escrow?: string;
   wbtc: string;
   expires: number;
-  fillDeadline: number;
+  fillDeadline?: number;
 }
 
 export type SwapStatus =
@@ -95,7 +103,7 @@ export interface HealthResponse {
   oracle: string;
   wbtc: string;
   agent: string;
-  /** Bridge fee in basis points (e.g. 20 = 0.2%). */
+  /** Bridge fee in basis points (e.g. 100 = 1%). */
   feeBps: number;
   floatSats: string | null;
   floatError: string | null;
@@ -224,10 +232,13 @@ export function getHealth(): Promise<HealthResponse> {
 
 export function getQuote(input: {
   user: string;
-  wbtcAmount: string; // base units (8dp)
   cantonParty: string;
+  /** Forward (evm-to-canton): WBTC input in 8dp base units. */
+  wbtcAmount?: string;
+  /** Reverse (canton-to-evm): CBTC input in 8dp base units. */
+  cbtcAmount?: string;
+  direction?: "evm-to-canton" | "canton-to-evm";
 }): Promise<QuoteResponse> {
-  // HTLC-native quote — same-origin route, no dependency on the old solver service.
   return req<QuoteResponse>(
     "/quote",
     {
@@ -235,7 +246,10 @@ export function getQuote(input: {
       body: JSON.stringify(input)
     },
     "/api/htlc"
-  );
+  ).then((q) => ({
+    ...q,
+    feeBps: q.feeBps ?? (q as { bridgeFeeBps?: number }).bridgeFeeBps ?? 0
+  }));
 }
 
 export function submitOrder(input: {

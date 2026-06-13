@@ -13,6 +13,7 @@ import "server-only";
 
 import { getLedgerJwt } from "./auth";
 import { NETWORK } from "./constants";
+import { enableCcForParty } from "./enable-cc";
 
 const TAG = "[party-onboarding]";
 
@@ -78,13 +79,21 @@ export async function grantCanActAs(party: string): Promise<void> {
 }
 
 /**
- * Onboard a user party: allocate + grant CanActAs. (Preapproval/EnableCC handled
- * separately so each step can be verified independently.) Returns the party id.
+ * Onboard a user party: allocate + grant CanActAs + EnableCC (CC preapproval).
  */
 export async function onboardParticipantManagedParty(
   hint?: string
 ): Promise<{ party: string }> {
   const party = await allocateUserParty(hint);
   await grantCanActAs(party);
+  try {
+    await enableCcForParty(party);
+  } catch (e) {
+    // Non-fatal on devnet (validator may subsidize fees anyway) — log and continue.
+    console.warn(
+      `${TAG} EnableCC failed for ${party.slice(0, 28)}…:`,
+      e instanceof Error ? e.message : e
+    );
+  }
   return { party };
 }

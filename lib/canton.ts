@@ -332,6 +332,36 @@ export async function getHoldings(partyId: string): Promise<Holding[]> {
   return out;
 }
 
+/** Sum CC (Amulet) holdings for a party — used for Canton network-fee readiness. */
+export async function getAmuletBalance(partyId: string): Promise<string> {
+  console.log(`${TAG} getAmuletBalance partyId=${partyId.slice(0, 40)}...`);
+  const activeAtOffset = await getLedgerEnd();
+  const body = buildInterfaceFilterRequest(
+    partyId,
+    HOLDING_INTERFACE_ID,
+    activeAtOffset
+  );
+  const resp = await ledgerFetch<ActiveContractsResponse>(
+    "/v2/state/active-contracts",
+    { method: "POST", jsonBody: body }
+  );
+  const allEntries = unwrapContracts(resp);
+  let total = 0;
+  for (const entry of allEntries) {
+    const ev = entry.JsActiveContract.createdEvent;
+    const payload = pickInterfaceView<Holding["payload"]>(
+      ev,
+      HOLDING_INTERFACE_ID
+    );
+    if (!payload || payload.owner !== partyId) continue;
+    const inst = (payload as { instrumentId?: { id?: string } }).instrumentId;
+    if (inst?.id !== "Amulet") continue;
+    const amt = (payload as { amount?: string }).amount ?? "0";
+    total += parseFloat(amt);
+  }
+  return total.toFixed(6);
+}
+
 /** POST /v2/state/active-contracts filtered to TransferInstruction interface. */
 export async function getPendingTransfers(
   partyId: string
