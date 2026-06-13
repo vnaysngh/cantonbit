@@ -9,6 +9,7 @@
     "build": "npm run build:devnet",
     "build:devnet": "bash scripts/with-env.sh devnet next build",
     "build:mainnet": "bash scripts/with-env.sh mainnet next build",
+    "build:prod": "next build",
     "start": "next start",
     "lint": "eslint",
     "test": "tsx --test lib/**/*.test.ts",

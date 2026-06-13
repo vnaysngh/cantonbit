@@ -173,23 +173,28 @@ Fill secrets in `.env.devnet` / `.env.mainnet` and `swap-solver/.env.htlc-*`. Us
 
 ## Railway runbook
 
-### Web app service
+Configure everything in the **Railway dashboard** — there is no `railway.json` in this repo.
+
+### Web app service (root directory `/`)
 
 | Setting | Value |
 |---------|-------|
-| Build | `npm ci && npm run build` |
+| Build | `npm ci && npm run build:prod` |
 | Start | `npm run start -- -p $PORT` |
+| Healthcheck path (optional) | `/swap` |
 
-Set **all** `NEXT_PUBLIC_*` vars before build. See [`.env.devnet.example`](../.env.devnet.example) or [`.env.mainnet.example`](../.env.mainnet.example).
+Set **all** `NEXT_PUBLIC_*` vars in Railway **before** build (they are baked into the client).
+Network is chosen by variables (`NEXT_PUBLIC_NETWORK=devnet` vs `mainnet`), not by
+`npm run build:devnet`.
 
-### HTLC solver service
+### HTLC solver service (root directory `swap-solver`)
 
 | Setting | Value |
 |---------|-------|
-| Build | `npm ci --prefix swap-solver` (or `npm run build` if your setup requires it) |
-| Start | `npx tsx swap-solver/src/htlc-solver-daemon.mts` |
+| Build | `npm ci` |
+| Start | `npx tsx src/htlc-solver-daemon.mts` |
 
-**Solver build quirk:** if this service runs `npm run build`, set **both** `HTLC_ESCROW_ADDRESS` and `NEXT_PUBLIC_HTLC_ESCROW` (same address).
+Do **not** point a solver service at repo root — it would pick up the Next.js app by mistake.
 
 ### Toggle procedure
 

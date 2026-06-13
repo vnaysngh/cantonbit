@@ -19,6 +19,12 @@ fi
 
 ENV_FILE="$ROOT/.env.$NETWORK"
 if [[ ! -f "$ENV_FILE" ]]; then
+  # Railway / CI inject vars into the process env — no .env.devnet on disk.
+  if [[ -n "${NEXT_PUBLIC_NETWORK:-}" || -n "${RAILWAY_ENVIRONMENT:-}" || -n "${CI:-}" ]]; then
+    echo "[with-env] $ENV_FILE missing — using process environment"
+    cd "$ROOT"
+    exec "$@"
+  fi
   echo "Missing $ENV_FILE" >&2
   echo "Run: cp .env.$NETWORK.example .env.$NETWORK" >&2
   exit 1

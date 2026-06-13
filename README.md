@@ -359,16 +359,18 @@ app; HTLC swaps do **not** need this.
 
 ## 10. Deploying on Railway
 
-Use **two services** in one project (duplicate for **parallel** devnet + mainnet stacks — see
-[`docs/MAINNET-DEPLOY.md`](docs/MAINNET-DEPLOY.md)):
+Use **four services** in one project (parallel devnet + mainnet — see
+[`docs/MAINNET-DEPLOY.md`](docs/MAINNET-DEPLOY.md)). There is **no `railway.json`** — configure
+build/start commands in the Railway dashboard per service.
 
-| Service | Build | Start |
-| --- | --- | --- |
-| **Web app** | `npm ci && npm run build` | `npm run start -- -p $PORT` |
-| **HTLC solver** | `npm ci --prefix swap-solver` | `npx tsx swap-solver/src/htlc-solver-daemon.mts` |
+| Service | Root directory | Build | Start |
+| --- | --- | --- | --- |
+| **Web (devnet or mainnet)** | `/` (repo root) | `npm ci && npm run build:prod` | `npm run start -- -p $PORT` |
+| **HTLC solver** | `swap-solver` | `npm ci` | `npx tsx src/htlc-solver-daemon.mts` |
 
-Prefer **not** running `npm run build` on the solver service. If your solver service does run
-`next build`, set **both** `HTLC_ESCROW_ADDRESS` and `NEXT_PUBLIC_HTLC_ESCROW` (same address).
+Set network-specific env vars in each service (`NEXT_PUBLIC_NETWORK`, solver `SWAP_NETWORK`, etc.).
+Do **not** use `npm run build` on Railway — it runs `build:devnet` and requires a local
+`.env.devnet` file.
 
 ### Network switch (master vars)
 
