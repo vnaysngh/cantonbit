@@ -54,6 +54,18 @@ export async function readLoopCbtcBalance(
   return { total, locked, count: cbtc.length };
 }
 
+/** CC (Amulet) total from the Loop wallet aggregate — same instrument id the ledger uses. */
+export async function readLoopCcBalance(provider: ProviderLike): Promise<string> {
+  const all = (await provider.getHolding()) as unknown as LoopHolding[];
+  const amulets = all.filter((h) => h.instrument_id?.id === "Amulet");
+  if (amulets.length === 0) return "0.000000";
+  const total = sumDecimals([
+    ...amulets.map((h) => h.total_unlocked_coin ?? "0"),
+    ...amulets.map((h) => h.total_locked_coin ?? "0")
+  ]);
+  return parseFloat(total).toFixed(6);
+}
+
 /** LOOP SELLER: the user's individual UNLOCKED CBTC holding contract-ids, read
  *  through THEIR wallet connection (we can't see a Loop party cross-participant).
  *  Defensive shape-matching — the SDK returns per-contract records whose payload

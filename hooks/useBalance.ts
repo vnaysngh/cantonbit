@@ -2,7 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 
-import { readLoopCbtcBalance } from "@/lib/loop-holdings";
+import { readLoopCbtcBalance, readLoopCcBalance } from "@/lib/loop-holdings";
 import { useLoopWallet } from "./useLoopWallet";
 
 interface BalanceState {
@@ -12,7 +12,7 @@ interface BalanceState {
   locked: string;
   /** Number of CBTC holdings (Loop aggregates per-instrument, so 0 or 1). */
   utxoCount: number;
-  /** CC (Amulet) balance for Canton network fees — email/session path only. */
+  /** CC (Amulet) balance — Loop: client-side holdings; email: /api/parties/balance. */
   ccTotal: string | null;
   /** True when ccTotal >= MIN_CC_BALANCE (server-side). */
   ccReady: boolean | null;
@@ -61,12 +61,15 @@ export function useBalance(): BalanceState {
     queryKey: ["balance", useLoop ? party : "session"],
     queryFn: async (): Promise<Fetched> => {
       if (useLoop && provider) {
-        const { total, locked, count } = await readLoopCbtcBalance(provider);
+        const [{ total, locked, count }, ccTotal] = await Promise.all([
+          readLoopCbtcBalance(provider),
+          readLoopCcBalance(provider)
+        ]);
         return {
           total,
           locked,
           utxoCount: count,
-          ccTotal: null,
+          ccTotal,
           ccReady: null,
           ccSubsidizedOnDevnet: false
         };

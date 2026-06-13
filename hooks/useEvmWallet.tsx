@@ -71,7 +71,9 @@ function useEvmWalletState(): EvmWallet {
     if (!p?.on) return;
     const onAccounts = (...args: unknown[]) => {
       const accts = args[0] as string[];
-      setAccount(disconnected.current ? null : (accts?.[0] ?? null));
+      const next = disconnected.current ? null : (accts?.[0] ?? null);
+      setAccount(next);
+      if (!next) setChainId(null);
     };
     const onChain = (...args: unknown[]) => {
       const cid = args[0] as string;
@@ -83,10 +85,14 @@ function useEvmWalletState(): EvmWallet {
     if (!disconnected.current) {
       void p.request({ method: "eth_accounts" }).then((a) => {
         const accts = a as string[];
-        if (accts?.[0]) setAccount(accts[0]);
-      });
-      void p.request({ method: "eth_chainId" }).then((c) => {
-        setChainId(c ? Number.parseInt(c as string, 16) : null);
+        if (accts?.[0]) {
+          setAccount(accts[0]);
+          void p.request({ method: "eth_chainId" }).then((c) => {
+            setChainId(c ? Number.parseInt(c as string, 16) : null);
+          });
+        } else {
+          setChainId(null);
+        }
       });
     }
     return () => {
@@ -118,6 +124,7 @@ function useEvmWalletState(): EvmWallet {
     disconnected.current = true;
     try { localStorage.setItem(DISCONNECTED_KEY, "1"); } catch { /* ignore */ }
     setAccount(null);
+    setChainId(null);
     setError(null);
   }, []);
 

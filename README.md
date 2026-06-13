@@ -546,15 +546,9 @@ transaction metadata. Users do **not** need to fund CC before swapping on our cu
 | Solver WBTC lock / claim (Canton → EVM) | ETH gas on Base | Solver EVM hot wallet |
 | Canton ledger writes (both directions) | CC (Amulet) | **Operator-subsidized** in practice — 0 CC balance OK |
 
-**UI & guardrails:**
+**UI:**
 
-- CC balance shown in the header for email users (`/api/parties/balance` → `useBalance`).
-- **Conservative guard:** **Canton → EVM** **Review swap** is blocked when `ccReady === false` and
-  balance &lt; `MIN_CC_BALANCE` (10). This is a safety rail, not a hard network requirement on our
-  WarpX node — mainnet testing with 0 CC succeeded with the guard temporarily disabled
-  (`NEXT_PUBLIC_BYPASS_CC_CHECK=true`; revert to `false` after testing).
-- **DevNet:** `ccSubsidizedOnDevnet` skips the guard when the balance API reports low CC (devnet
-  subsidy assumed).
+- CC balance shown in the header for email users (`/api/parties/balance` → `useBalance`) — **informational only**; swaps do not block on CC balance.
 - **EnableCC** (one-time CC opt-in: `ValidatorRight` + `TransferPreapproval`) runs on
   participant provision (`lib/enable-cc.ts`); failure is non-fatal when the validator subsidizes.
 

@@ -32,7 +32,8 @@ const NAV_LINKS = [
 export function TopNav() {
   const pathname = usePathname();
   const evm = useEvmWallet();
-  const evmWrongChain = evm.chainId != null && evm.chainId !== SWAP_CHAIN.id;
+  const evmWrongChain =
+    !!evm.account && evm.chainId != null && evm.chainId !== SWAP_CHAIN.id;
 
   // Click the wrong-network warning to switch the connected EVM provider to the
   // swap chain (Arbitrum). Adds the chain if the wallet doesn't have it.
@@ -148,12 +149,12 @@ function useCantonIdentity(): {
   return state;
 }
 
-/** CC (Canton network fee) balance for email/participant-managed users. */
+/** CC (Amulet) balance for any connected Canton party (Loop or email). */
 function CcBalanceBadge() {
-  const { party, ready, isManaged } = useCantonIdentity();
+  const { party, ready } = useCantonIdentity();
   const { ccTotal } = useBalance();
 
-  if (!ready || !party || !isManaged || ccTotal === null) return null;
+  if (!ready || !party || ccTotal === null) return null;
 
   return (
     <div

@@ -16,7 +16,7 @@ import {
   mintSwapSession
 } from "@/lib/swap-accept";
 import { truncatePartyId } from "@/lib/format";
-import { loopSettingsUrl, MIN_CC_BALANCE, BYPASS_CC_CHECK, DEFAULT_PLATFORM_FEE_BPS } from "@/lib/constants";
+import { loopSettingsUrl, DEFAULT_PLATFORM_FEE_BPS } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import {
   getQuote,
@@ -281,6 +281,17 @@ export default function SwapPage() {
     DEFAULT_EXPIRATION_SECONDS
   );
   const [stage, setStage] = useState<Stage>({ kind: "idle" });
+
+  // Drop stale CC-guard errors (older builds blocked email users at 0 CC).
+  useEffect(() => {
+    if (
+      stage.kind === "error" &&
+      stage.message.includes("Insufficient CC for Canton network fees")
+    ) {
+      setStage({ kind: "idle" });
+    }
+  }, [stage]);
+
   const [wbtcBalance, setWbtcBalance] = useState<bigint | null>(null);
 
   // CoW-style list of in-flight swaps — every submitted order is tracked here and
@@ -290,22 +301,10 @@ export default function SwapPage() {
   const { orders: pendingOrders, addOrder, dismissOrder } = usePendingOrders();
 
   // CBTC balance from the connected Loop wallet (for the "You receive" panel).
-  const {
-    total: cbtcBalance,
-    ccReady,
-    ccSubsidizedOnDevnet
-  } = useBalance();
+  const { total: cbtcBalance } = useBalance();
 
-  // Email users locking CBTC (Canton→EVM) burn CC on each ledger write. Forward
-  // (EVM→Canton) only needs EVM gas for the WBTC lock; CBTC delivery is backend-signed.
-  const ccBlocksCantonSwap =
-    !BYPASS_CC_CHECK &&
-    isReverse &&
-    isParticipantManaged &&
-    ccReady === false &&
-    !ccSubsidizedOnDevnet;
-
-  const wrongChain = evm.chainId != null && evm.chainId !== SWAP_CHAIN.id;
+  const wrongChain =
+    !!evm.account && evm.chainId != null && evm.chainId !== SWAP_CHAIN.id;
 
   // --- read the WBTC balance from the connected EVM wallet (for "You pay") ---
   const refreshBalance = useCallback(
@@ -496,12 +495,6 @@ export default function SwapPage() {
       fail("Amount must be greater than zero.");
       return;
     }
-    if (ccBlocksCantonSwap) {
-      fail(
-        `Insufficient CC for Canton network fees (need at least ${MIN_CC_BALANCE} CC).`
-      );
-      return;
-    }
 
     if (!isParticipantManaged && sessionReady !== true) {
       setSessionReady(false);
@@ -562,7 +555,6 @@ export default function SwapPage() {
     wallet.provider,
     sessionReady,
     isParticipantManaged,
-    ccBlocksCantonSwap,
     probeCbtcAutoAccept
   ]);
 
@@ -1381,12 +1373,6 @@ export default function SwapPage() {
         onClick: () => {},
         disabled: true
       };
-    } else if (ccBlocksCantonSwap) {
-      primary = {
-        label: `Need ${MIN_CC_BALANCE} CC for Canton fees`,
-        onClick: () => {},
-        disabled: true
-      };
     } else {
       primary = {
         label: "Review swap",
@@ -1506,13 +1492,6 @@ export default function SwapPage() {
                 </select>
               </div>
             </div>
-
-            {ccBlocksCantonSwap && (
-              <div className="mb-2 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-                Insufficient CC for Canton network fees (need at least{" "}
-                {MIN_CC_BALANCE} CC).
-              </div>
-            )}
 
             {stage.kind === "error" &&
               (stage.message.startsWith("Swaps are paused") ? (
