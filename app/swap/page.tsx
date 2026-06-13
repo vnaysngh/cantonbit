@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
@@ -9,6 +9,7 @@ import { useEvmWallet } from "@/hooks/useEvmWallet";
 import { useWallet } from "@/hooks/useWallet";
 import { useVaultContext } from "@/hooks/useVaultContext";
 import { useBalance } from "@/hooks/useBalance";
+import { useInvalidateBalances } from "@/hooks/useInvalidateBalances";
 import { usePendingOrders, type TrackedOrder } from "@/hooks/usePendingOrders";
 import {
   hasCbtcAutoAccept,
@@ -73,6 +74,7 @@ import {
   EXPIRATION_OPTIONS,
   DEFAULT_EXPIRATION_SECONDS
 } from "@/lib/htlc-timelock";
+import { quoteOutUnits, quoteGrossOutUnits } from "@/lib/htlc-quote-math";
 
 // HTLC EVM leg config (Base Sepolia). The new trustless escrow (replaces the old
 // oracle InputSettlerEscrow for swaps). Shared resolver fails closed in production.
@@ -293,6 +295,38 @@ export default function SwapPage() {
   }, [stage]);
 
   const [wbtcBalance, setWbtcBalance] = useState<bigint | null>(null);
+  /** Live WBTC/BTC from GET /api/htlc/price — same cache as server quotes. */
+  const [wbtcPrice, setWbtcPrice] = useState<{
+    raw: bigint;
+    feeBps: number;
+  } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadPrice = async () => {
+      try {
+        const res = await fetch("/api/htlc/price", { cache: "no-store" });
+        if (!res.ok) return;
+        const body = (await res.json()) as {
+          wbtcPriceRaw?: string;
+          feeBps?: number;
+        };
+        if (!body.wbtcPriceRaw || cancelled) return;
+        setWbtcPrice({
+          raw: BigInt(body.wbtcPriceRaw),
+          feeBps: body.feeBps ?? FEE_BPS
+        });
+      } catch {
+        /* keep last price or fee-only fallback */
+      }
+    };
+    void loadPrice();
+    const id = setInterval(loadPrice, 30_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
 
   // CoW-style list of in-flight swaps — every submitted order is tracked here and
   // polled independently, so starting a new swap (or another tab) never orphans a
@@ -302,6 +336,13 @@ export default function SwapPage() {
 
   // CBTC balance from the connected Loop wallet (for the "You receive" panel).
   const { total: cbtcBalance } = useBalance();
+  const invalidateBalances = useInvalidateBalances();
+
+  useEffect(() => {
+    if (stage.kind === "htlc-done" || stage.kind === "rev-done") {
+      invalidateBalances();
+    }
+  }, [stage.kind, invalidateBalances]);
 
   const wrongChain =
     !!evm.account && evm.chainId != null && evm.chainId !== SWAP_CHAIN.id;
@@ -1267,20 +1308,30 @@ export default function SwapPage() {
     stage.kind === "htlc-locking" ||
     stage.kind === "rev-locking" ||
     reviewing;
-  // "You receive" estimate BEFORE quoting — an APPROXIMATION (shown with "≈").
-  // It applies the fee but NOT the live WBTC/BTC price (the browser doesn't have
-  // it pre-quote). The EXACT, price-adjusted amount comes from the server quote
-  // and is shown in the review modal. So this is a close upper-bound estimate;
-  // the real number is slightly lower by WBTC's deviation from 1 BTC.
-  const receiveEstimate = (() => {
-    if (!amount || !/^\d*\.?\d+$/.test(amount)) return "0";
-    try {
-      const out = (parseWbtc(amount) * BigInt(10000 - FEE_BPS)) / 10000n;
-      return formatWbtc(out);
-    } catch {
-      return "0";
+  // "You receive" uses the same price-adjusted formula as POST /api/htlc/quote.
+  // Falls back to fee-only 1:1 (with "≈") until /api/htlc/price loads.
+  const receiveDisplay = useMemo(() => {
+    if (!amount || !/^\d*\.?\d+$/.test(amount)) {
+      return { amount: "0", approximate: false };
     }
-  })();
+    try {
+      const inUnits = parseWbtc(amount);
+      if (inUnits <= 0n) return { amount: "0", approximate: false };
+      if (wbtcPrice) {
+        const out = quoteOutUnits(
+          direction,
+          inUnits,
+          wbtcPrice.raw,
+          wbtcPrice.feeBps
+        );
+        return { amount: formatWbtc(out), approximate: false };
+      }
+      const out = (inUnits * BigInt(10000 - FEE_BPS)) / 10000n;
+      return { amount: formatWbtc(out), approximate: true };
+    } catch {
+      return { amount: "0", approximate: false };
+    }
+  }, [amount, direction, wbtcPrice]);
 
   // CoW-style amount validation (TradeFormValidation analogue): compute the
   // amount state once, ordered — the button reflects the FIRST problem.
@@ -1449,7 +1500,8 @@ export default function SwapPage() {
               title="You receive"
               token={isReverse ? "WBTC" : "CBTC"}
               network={isReverse ? SWAP_CHAIN.name : "Canton"}
-              amount={receiveEstimate}
+              amount={receiveDisplay.amount}
+              approximate={receiveDisplay.approximate}
               editable={false}
               balance={
                 isReverse
@@ -1993,6 +2045,7 @@ function TokenPanel({
   token,
   network,
   amount,
+  approximate = false,
   editable,
   onAmountChange,
   balance,
@@ -2002,6 +2055,7 @@ function TokenPanel({
   token: string;
   network: string;
   amount: string;
+  approximate?: boolean;
   editable: boolean;
   onAmountChange?: (v: string) => void;
   balance?: string;
@@ -2048,8 +2102,10 @@ function TokenPanel({
           <div className="w-full min-w-0 truncate text-[2rem] font-semibold leading-none tracking-tight text-foreground">
             {amount === "0" ? (
               <span className="text-on-surface-variant/40">0.0</span>
-            ) : (
+            ) : approximate ? (
               `≈ ${amount}`
+            ) : (
+              amount
             )}
           </div>
         )}
@@ -2183,11 +2239,19 @@ function ReviewModal({
   const feeLabel = (() => {
     if (feeBps <= 0) return "Free";
     if (reverse) {
-      const wbtcBeforeFee = (cbtcUnits * priceRaw) / priceScale;
+      const wbtcBeforeFee = quoteGrossOutUnits(
+        "canton-to-evm",
+        cbtcUnits,
+        priceRaw
+      );
       const feeAmount = wbtcBeforeFee - wbtcUnits;
       return `${feeBps / 100}% (−${formatWbtc(feeAmount)} WBTC)`;
     }
-    const cbtcBeforeFee = (wbtcUnits * priceRaw) / priceScale;
+    const cbtcBeforeFee = quoteGrossOutUnits(
+      "evm-to-canton",
+      wbtcUnits,
+      priceRaw
+    );
     const feeAmount = cbtcBeforeFee - cbtcUnits;
     return `${feeBps / 100}% (−${formatWbtc(feeAmount)} CBTC)`;
   })();

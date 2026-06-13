@@ -19,6 +19,7 @@ import "server-only";
 
 import { alert } from "./alert";
 import { DEFAULT_PLATFORM_FEE_BPS } from "./constants";
+import { quoteGrossOutUnits, applyOutputFee } from "./htlc-quote-math";
 
 /** Output-side platform fee (bps). Override with PLATFORM_FEE_BPS env. */
 export const BRIDGE_FEE_BPS = Number(
@@ -97,19 +98,19 @@ export interface QuoteResult {
 /** wbtc → cbtc : out = in × P × (1 − fee). */
 export async function quoteWbtcToCbtc(wbtcUnits: bigint): Promise<QuoteResult> {
   const price8 = await getWbtcBtcPrice8();
-  const gross = (wbtcUnits * price8) / 100_000_000n;
+  const gross = quoteGrossOutUnits("evm-to-canton", wbtcUnits, price8);
   return finish(wbtcUnits, gross, price8);
 }
 
 /** cbtc → wbtc : out = in ÷ P × (1 − fee). */
 export async function quoteCbtcToWbtc(cbtcUnits: bigint): Promise<QuoteResult> {
   const price8 = await getWbtcBtcPrice8();
-  const gross = (cbtcUnits * 100_000_000n) / price8;
+  const gross = quoteGrossOutUnits("canton-to-evm", cbtcUnits, price8);
   return finish(cbtcUnits, gross, price8);
 }
 
 function finish(inUnits: bigint, gross: bigint, price8: bigint): QuoteResult {
-  const outUnits = gross - (gross * BigInt(BRIDGE_FEE_BPS)) / 10000n;
+  const outUnits = applyOutputFee(gross, BRIDGE_FEE_BPS);
   return {
     inUnits,
     outUnits,

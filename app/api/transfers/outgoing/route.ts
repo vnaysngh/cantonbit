@@ -1,18 +1,14 @@
 /**
- * GET /api/transfers/pending
+ * GET /api/transfers/outgoing
  *
- * List active TransferOffers where the authenticated user is the receiver.
- * Used by the Receive page to show Accept buttons.
- *
- * Response: { offers: PendingOffer[] }
+ * List active TransferOffers the authenticated user created (sender side).
  */
-
 import { NextResponse } from "next/server";
 
 import { requireManagedTransferSession } from "@/lib/transfer-session";
-import { listPendingOffers } from "@/lib/transfer";
+import { listOutgoingOffers } from "@/lib/transfer";
 
-const TAG = "[transfers/pending]";
+const TAG = "[transfers/outgoing]";
 
 export const dynamic = "force-dynamic";
 
@@ -23,11 +19,11 @@ export async function GET() {
   if (session.error) return session.error;
 
   try {
-    const offers = await listPendingOffers(session.partyId);
+    const offers = await listOutgoingOffers(session.partyId);
     return NextResponse.json({ offers });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`${TAG} listPendingOffers failed:`, err);
+    console.error(`${TAG} listOutgoingOffers failed:`, err);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

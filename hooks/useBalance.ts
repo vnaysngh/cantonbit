@@ -2,6 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 
+import { balanceQueryKey } from "@/lib/balance-query";
 import { readLoopCbtcBalance, readLoopCcBalance } from "@/lib/loop-holdings";
 import { useLoopWallet } from "./useLoopWallet";
 
@@ -58,7 +59,7 @@ export function useBalance(): BalanceState {
   const useLoop = connected && !!provider;
 
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["balance", useLoop ? party : "session"],
+    queryKey: balanceQueryKey(useLoop ? party : "session"),
     queryFn: async (): Promise<Fetched> => {
       if (useLoop && provider) {
         const [{ total, locked, count }, ccTotal] = await Promise.all([
@@ -94,7 +95,8 @@ export function useBalance(): BalanceState {
       };
     },
     refetchInterval: POLL_INTERVAL_MS,
-    refetchIntervalInBackground: false
+    refetchIntervalInBackground: false,
+    refetchOnMount: "always"
   });
 
   const view = data ?? ZERO;

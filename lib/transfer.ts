@@ -17,18 +17,35 @@
 import "server-only";
 
 import { getLedgerJwt } from "./auth";
+import type { InstrumentId } from "./constants";
 import { NETWORK } from "./constants";
-import { formatSatoshis } from "./format";
+import { fetchCcRegistry } from "./cc-registry";
 import { extractCreatedOfferCid } from "./mint-processor-logic";
+import { selectTransferHoldings } from "./transfer-holdings";
+import {
+  buildTransferMeta,
+  DEFAULT_TRANSFER_EXPIRATION_SECONDS
+} from "./transfer-options";
 import type { Holding } from "./types";
 
 const TAG = "[transfer]";
 
-// Concrete package hash for the Holding template — used as the disclosedContracts
-// templateId for the source holding. The v2 commands endpoint rejects the
-// interface-style `#` form there, but accepts it on the ExerciseCommand itself.
-const HOLDING_TEMPLATE_FQN =
+// Concrete package hash for CBTC Holding disclosedContracts (Amulet uses Splice.Amulet).
+const CBTC_HOLDING_TEMPLATE_FQN =
   "8107899ac4723ce986bf7d27416534e576e54b92161e46150a595fb78ff3d3a1:Utility.Registry.Holding.V0.Holding:Holding";
+
+const AMULET_HOLDING_TEMPLATE_FQN =
+  "a31be0483f3175647053f28965a4e6d97e3dbc433ea2338be303fae69bbcff6a:Splice.Amulet:Amulet";
+
+function holdingDisclosedTemplateId(
+  holding: Holding,
+  registryKind: TransferRegistryKind
+): string {
+  if (holding.templateId) return holding.templateId;
+  return registryKind === "cc"
+    ? AMULET_HOLDING_TEMPLATE_FQN
+    : CBTC_HOLDING_TEMPLATE_FQN;
+}
 
 const TRANSFER_FACTORY_INTERFACE =
   "#splice-api-token-transfer-instruction-v1:Splice.Api.Token.TransferInstructionV1:TransferFactory";
@@ -56,6 +73,74 @@ interface TransferFactoryResponse {
   };
 }
 
+/** Which off-ledger registry serves TransferFactory / accept choice-contexts. */
+export type TransferRegistryKind = "cbtc" | "cc";
+
+function cbtcTransferFactoryUrl(registrarAdmin: string): string {
+  return `${NETWORK.registryUrl}/api/token-standard/v0/registrars/${registrarAdmin}/registry/transfer-instruction/v1/transfer-factory`;
+}
+
+function cbtcAcceptChoiceContextUrl(
+  registrarAdmin: string,
+  offerContractId: string
+): string {
+  return `${NETWORK.registryUrl}/api/token-standard/v0/registrars/${registrarAdmin}/registry/transfer-instruction/v1/${offerContractId}/choice-contexts/accept`;
+}
+
+async function fetchTransferFactoryContext(
+  kind: TransferRegistryKind,
+  registrarAdmin: string,
+  transferPayload: Record<string, unknown>
+): Promise<Response> {
+  const body = JSON.stringify({
+    choiceArguments: {
+      expectedAdmin: registrarAdmin,
+      transfer: transferPayload,
+      extraArgs: { context: { values: {} }, meta: { values: {} } }
+    }
+  });
+  if (kind === "cc") {
+    return fetchCcRegistry("/transfer-instruction/v1/transfer-factory", {
+      method: "POST",
+      body
+    });
+  }
+  return fetch(cbtcTransferFactoryUrl(registrarAdmin), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    cache: "no-store"
+  });
+}
+
+async function fetchAcceptChoiceContext(
+  kind: TransferRegistryKind,
+  registrarAdmin: string,
+  offerContractId: string
+): Promise<Response> {
+  const body = JSON.stringify({ meta: {} });
+  if (kind === "cc") {
+    return fetchCcRegistry(
+      `/transfer-instruction/v1/${offerContractId}/choice-contexts/accept`,
+      { method: "POST", body }
+    );
+  }
+  return fetch(cbtcAcceptChoiceContextUrl(registrarAdmin, offerContractId), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    cache: "no-store"
+  });
+}
+
+/** Infer registry kind from an offer's instrument id. */
+export function registryKindForInstrument(
+  instrumentId?: InstrumentId | null
+): TransferRegistryKind {
+  if (instrumentId?.id === "Amulet") return "cc";
+  return "cbtc";
+}
+
 /** Result returned by createTransfer — exposes the new offer contract id. */
 export interface CreateTransferResult {
   updateId: string;
@@ -63,38 +148,6 @@ export interface CreateTransferResult {
   /** Registry transferKind: "offer" needs a receiver accept; "direct"/"self" means
    *  the transfer COMPLETED in one step (receiver preapproval auto-accepted it). */
   transferKind: string;
-}
-
-/**
- * Select holdings to cover `amount` (BTC string).
- * Greedy: largest first, accumulate until amount is met, throw on insufficient.
- * Returns the holdings actually used (callers pass these to inputHoldingCids).
- */
-function selectHoldings(holdings: Holding[], amountBtc: string): Holding[] {
-  const target = BigInt(Math.round(parseFloat(amountBtc) * 1e8));
-  // Sort SMALLEST-first: use small holdings to cover the target, avoiding the
-  // huge registrar/aggregate holding (which the registry can reject as an input)
-  // and keeping good UTXO hygiene. Falls through to larger ones only if needed.
-  const sorted = [...holdings].sort((a, b) => {
-    const aSats = BigInt(Math.round(parseFloat(a.payload.amount ?? "0") * 1e8));
-    const bSats = BigInt(Math.round(parseFloat(b.payload.amount ?? "0") * 1e8));
-    if (aSats > bSats) return 1;
-    if (aSats < bSats) return -1;
-    return 0;
-  });
-  const picked: Holding[] = [];
-  let acc = 0n;
-  for (const h of sorted) {
-    if (acc >= target) break;
-    picked.push(h);
-    acc += BigInt(Math.round(parseFloat(h.payload.amount ?? "0") * 1e8));
-  }
-  if (acc < target) {
-    throw new Error(
-      `Insufficient balance: have ${formatSatoshis(acc)} CBTC, need ${amountBtc} CBTC`,
-    );
-  }
-  return picked;
 }
 
 /**
@@ -112,44 +165,60 @@ export async function createTransfer(params: {
   receiverParty: string;
   amountBtc: string;
   inputHoldings: Holding[];
+  /** Optional human-readable memo (CIP-0056 reason meta). */
+  memo?: string;
+  /** Offer accept window in seconds (maps to executeBefore). Default 1h. */
+  expirationSeconds?: number;
+  instrumentId?: InstrumentId;
+  registrarAdmin?: string;
+  registryKind?: TransferRegistryKind;
+  /** Asset symbol for balance-selection errors. */
+  assetSymbol?: string;
 }): Promise<CreateTransferResult> {
-  const { senderParty, receiverParty, amountBtc, inputHoldings } = params;
+  const {
+    senderParty,
+    receiverParty,
+    amountBtc,
+    inputHoldings,
+    memo,
+    expirationSeconds = DEFAULT_TRANSFER_EXPIRATION_SECONDS,
+    instrumentId = NETWORK.instrumentId,
+    registrarAdmin = NETWORK.decentralizedPartyId,
+    registryKind = "cbtc",
+    assetSymbol = instrumentId.id === "Amulet" ? "CC" : "CBTC"
+  } = params;
   const jwt = await getLedgerJwt();
   const now = new Date().toISOString();
-  const executeBefore = new Date(Date.now() + TRANSFER_TTL_MS).toISOString();
+  const ttlMs = Math.max(60, expirationSeconds) * 1000;
+  const executeBefore = new Date(Date.now() + ttlMs).toISOString();
+  const transferMeta = buildTransferMeta(memo);
 
-  const picked = selectHoldings(inputHoldings, amountBtc);
+  const picked = selectTransferHoldings(inputHoldings, amountBtc, assetSymbol);
   const inputHoldingCids = picked.map((h) => h.contractId);
 
   console.log(
-    `${TAG} createTransfer sender=${senderParty.slice(0, 20)}... receiver=${receiverParty.slice(0, 20)}... amount=${amountBtc} inputs=${inputHoldingCids.length}`,
+    `${TAG} createTransfer sender=${senderParty.slice(0, 20)}... receiver=${receiverParty.slice(0, 20)}... amount=${amountBtc} ttl=${expirationSeconds}s inputs=${inputHoldingCids.length}`,
   );
+
+  const transferPayload = {
+    sender: senderParty,
+    receiver: receiverParty,
+    amount: amountBtc,
+    instrumentId,
+    lock: null,
+    requestedAt: now,
+    executeBefore,
+    inputHoldingCids,
+    meta: transferMeta
+  };
 
   // Step 1: fetch TransferFactory from the registry — gives us the factoryId
   // and the disclosed contracts (instrument config, transfer rule).
-  const registryUrl = `${NETWORK.registryUrl}/api/token-standard/v0/registrars/${NETWORK.decentralizedPartyId}/registry/transfer-instruction/v1/transfer-factory`;
-  const factoryRes = await fetch(registryUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      choiceArguments: {
-        expectedAdmin: NETWORK.decentralizedPartyId,
-        transfer: {
-          sender: senderParty,
-          receiver: receiverParty,
-          amount: amountBtc,
-          instrumentId: NETWORK.instrumentId,
-          lock: null,
-          requestedAt: now,
-          executeBefore,
-          inputHoldingCids,
-          meta: { values: {} },
-        },
-        extraArgs: { context: { values: {} }, meta: { values: {} } },
-      },
-    }),
-    cache: "no-store",
-  });
+  const factoryRes = await fetchTransferFactoryContext(
+    registryKind,
+    registrarAdmin,
+    transferPayload
+  );
 
   if (!factoryRes.ok) {
     const text = await factoryRes.text().catch(() => "<no body>");
@@ -164,9 +233,9 @@ export async function createTransfer(params: {
       ...dc,
       synchronizerId: dc.synchronizerId ?? "",
     })),
-    // Each input holding must be disclosed so the ledger can validate it.
+    // Each input holding must be disclosed — templateId must match createdEventBlob.
     ...picked.map((h) => ({
-      templateId: HOLDING_TEMPLATE_FQN,
+      templateId: holdingDisclosedTemplateId(h, registryKind),
       contractId: h.contractId,
       createdEventBlob: h.createdEventBlob ?? "",
       synchronizerId: "",
@@ -191,18 +260,8 @@ export async function createTransfer(params: {
               contractId: factory.factoryId,
               choice: "TransferFactory_Transfer",
               choiceArgument: {
-                expectedAdmin: NETWORK.decentralizedPartyId,
-                transfer: {
-                  sender: senderParty,
-                  receiver: receiverParty,
-                  amount: amountBtc,
-                  instrumentId: NETWORK.instrumentId,
-                  lock: null,
-                  requestedAt: now,
-                  executeBefore,
-                  inputHoldingCids,
-                  meta: { values: {} },
-                },
+                expectedAdmin: registrarAdmin,
+                transfer: transferPayload,
                 extraArgs: {
                   context: factory.choiceContext.choiceContextData,
                   meta: { values: {} },
@@ -290,6 +349,7 @@ export interface PendingOffer {
   requestedAt: string;
   executeBefore: string;
   inputHoldingCids: string[];
+  instrumentId?: InstrumentId;
 }
 
 /**
@@ -299,6 +359,12 @@ export interface PendingOffer {
 export async function listPendingOffers(partyId: string): Promise<PendingOffer[]> {
   const all = await listPendingOffersAs(partyId);
   return all.filter((o) => o.receiver === partyId);
+}
+
+/** Outgoing offers the sender created and are still pending acceptance. */
+export async function listOutgoingOffers(senderParty: string): Promise<PendingOffer[]> {
+  const all = await listPendingOffersAs(senderParty);
+  return all.filter((o) => o.sender === senderParty);
 }
 
 /**
@@ -356,6 +422,7 @@ async function listPendingOffersAs(partyId: string): Promise<PendingOffer[]> {
               requestedAt?: string;
               executeBefore?: string;
               inputHoldingCids?: string[];
+              instrumentId?: InstrumentId;
             };
           };
         };
@@ -383,6 +450,7 @@ async function listPendingOffersAs(partyId: string): Promise<PendingOffer[]> {
       requestedAt: t.requestedAt ?? "",
       executeBefore: t.executeBefore ?? "",
       inputHoldingCids: t.inputHoldingCids ?? [],
+      instrumentId: t.instrumentId
     });
   }
   return out;
@@ -501,19 +569,22 @@ export async function prepareAcceptCommand(params: {
 export async function acceptTransfer(params: {
   receiverParty: string;
   offerContractId: string;
+  registrarAdmin?: string;
+  registryKind?: TransferRegistryKind;
 }): Promise<{ updateId: string }> {
-  const { receiverParty, offerContractId } = params;
+  const {
+    receiverParty,
+    offerContractId,
+    registrarAdmin = NETWORK.decentralizedPartyId,
+    registryKind = "cbtc"
+  } = params;
   const jwt = await getLedgerJwt();
 
-  // Fetch the accept choice context from the registry — it tells us which
-  // disclosed contracts (transfer rule, instrument config) are needed.
-  const ctxUrl = `${NETWORK.registryUrl}/api/token-standard/v0/registrars/${NETWORK.decentralizedPartyId}/registry/transfer-instruction/v1/${offerContractId}/choice-contexts/accept`;
-  const ctxRes = await fetch(ctxUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ meta: {} }),
-    cache: "no-store",
-  });
+  const ctxRes = await fetchAcceptChoiceContext(
+    registryKind,
+    registrarAdmin,
+    offerContractId
+  );
   if (!ctxRes.ok) {
     const text = await ctxRes.text().catch(() => "<no body>");
     throw new Error(`accept choice-contexts failed (${ctxRes.status}): ${text}`);

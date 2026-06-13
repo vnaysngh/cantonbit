@@ -323,6 +323,7 @@ export async function getHoldings(partyId: string): Promise<Holding[]> {
     out.push({
       contractId: ev.contractId,
       payload,
+      templateId: ev.templateId,
       createdEventBlob: ev.createdEventBlob
     });
   }
@@ -360,6 +361,50 @@ export async function getAmuletBalance(partyId: string): Promise<string> {
     total += parseFloat(amt);
   }
   return total.toFixed(6);
+}
+
+/** Unlocked CC (Amulet) holdings for a party — used for CC P2P transfers. */
+export async function getAmuletHoldings(partyId: string): Promise<Holding[]> {
+  console.log(`${TAG} getAmuletHoldings partyId=${partyId.slice(0, 40)}...`);
+  const activeAtOffset = await getLedgerEnd();
+  const body = buildInterfaceFilterRequest(
+    partyId,
+    HOLDING_INTERFACE_ID,
+    activeAtOffset
+  );
+  const resp = await ledgerFetch<ActiveContractsResponse>(
+    "/v2/state/active-contracts",
+    { method: "POST", jsonBody: body }
+  );
+  const allEntries = unwrapContracts(resp);
+  const out: Holding[] = [];
+  for (const entry of allEntries) {
+    const ev = entry.JsActiveContract.createdEvent;
+    const payload = pickInterfaceView<Holding["payload"]>(
+      ev,
+      HOLDING_INTERFACE_ID
+    );
+    if (!payload || payload.owner !== partyId) continue;
+    const inst = (payload as { instrumentId?: { id?: string } }).instrumentId;
+    if (inst?.id !== "Amulet") continue;
+    const lock = payload.lock as
+      | { expiresAt?: string | null; expiresAfter?: string | null }
+      | null
+      | undefined;
+    if (lock != null) {
+      const nowIso = new Date().toISOString();
+      const locked = lock.expiresAt ? lock.expiresAt > nowIso : true;
+      if (locked) continue;
+    }
+    out.push({
+      contractId: ev.contractId,
+      payload,
+      templateId: ev.templateId,
+      createdEventBlob: ev.createdEventBlob
+    });
+  }
+  console.log(`${TAG} getAmuletHoldings returning ${out.length} holdings`);
+  return out;
 }
 
 /** POST /v2/state/active-contracts filtered to TransferInstruction interface. */

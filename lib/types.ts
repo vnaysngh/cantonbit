@@ -32,6 +32,11 @@ export interface Holding {
   contractId: string;
   payload: HoldingPayload;
   /**
+   * Concrete ledger template id (package hash form). Required for disclosedContracts
+   * — must match the package encoded in createdEventBlob.
+   */
+  templateId?: string;
+  /**
    * Base64-encoded created-event blob. Required when re-using this contract
    * as a `disclosedContracts` entry on a later choice exercise.
    */

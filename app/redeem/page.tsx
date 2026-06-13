@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { useBalance } from "@/hooks/useBalance";
+import { useInvalidateBalances } from "@/hooks/useInvalidateBalances";
 import { useWallet } from "@/hooks/useWallet";
 import { btcAddressKindLabel, validateBtcAddress } from "@/lib/btc-address";
 import { NETWORK } from "@/lib/constants";
@@ -83,7 +84,8 @@ type Stage =
 
 export default function RedeemPage() {
   const { partyId } = useWallet();
-  const { total, refetch: refetchBalance } = useBalance();
+  const { total } = useBalance();
+  const invalidateBalances = useInvalidateBalances();
 
   const [amount, setAmount] = useState("");
   const [btcAddress, setBtcAddress] = useState("");
@@ -232,7 +234,7 @@ export default function RedeemPage() {
         canonicalAmount
       );
 
-      refetchBalance();
+      invalidateBalances();
       // Burn done — dismiss the modal and hand off to the progress tracker.
       setConfirming(false);
       setStage({
@@ -258,7 +260,7 @@ export default function RedeemPage() {
     amountSats,
     amountWellFormed,
     balanceSats,
-    refetchBalance
+    invalidateBalances
   ]);
 
   // Live redeem tracking — two separate polling loops with different cadences:

@@ -6,6 +6,7 @@ import { QRCodeSVG } from "qrcode.react";
 import { BalanceBadge } from "@/components/BalanceBadge";
 import { Button } from "@/components/ui/button";
 import { useBalance } from "@/hooks/useBalance";
+import { useInvalidateBalances } from "@/hooks/useInvalidateBalances";
 import { useWallet } from "@/hooks/useWallet";
 import { useLoopWallet } from "@/hooks/useLoopWallet";
 import { formatSatoshis } from "@/lib/format";
@@ -28,7 +29,8 @@ type Stage =
 export default function MintPage() {
   const { partyId } = useWallet();
   const { provider } = useLoopWallet();
-  const { total, refetch: refetchBalance } = useBalance();
+  const { total } = useBalance();
+  const invalidateBalances = useInvalidateBalances();
 
   // Reads the user's unlocked CBTC balance from their Loop wallet. Used to
   // snapshot a baseline and observe CBTC landing after a deposit. Returns "0"
@@ -181,7 +183,7 @@ export default function MintPage() {
           clearInterval(poll);
           // Trimmed display (no trailing zeros) — consistent with formatBtc.
           const minted = formatSatoshis(BigInt(currentSats - baselineSats));
-          refetchBalance();
+          invalidateBalances();
           setStage({ kind: "minted", amount: minted });
         }
       } catch {
@@ -190,7 +192,7 @@ export default function MintPage() {
     }, 30_000);
 
     return () => clearInterval(poll);
-  }, [stage.kind, partyId, refetchBalance, readBalance]);
+  }, [stage.kind, partyId, invalidateBalances, readBalance]);
 
   // "Mint more" / "Try again": reuse existing account if we have one,
   // otherwise go to idle so user can generate a new address.

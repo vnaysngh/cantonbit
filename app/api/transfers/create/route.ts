@@ -3,17 +3,25 @@
  *
  * Phase 1: create a TransferOffer from the authenticated user's party to a
  * recipient party. Looks up the sender's holdings server-side via the m2m
- * JWT, so the client only sends recipient + amount.
+ * JWT, so the client only sends recipient + amount + asset.
  *
- * Body: { recipient: string, amountBtc: string }
- * Response: { updateId, offerContractId }
+ * Body: { recipient, amount, asset?: "CBTC" | "CC", memo?, expirationSeconds? }
+ * Response: { updateId, offerContractId, transferKind }
  */
 
 import { NextResponse } from "next/server";
 
-import { getHoldings } from "@/lib/canton";
+import { getAmuletHoldings, getHoldings } from "@/lib/canton";
+import {
+  getTransferAsset,
+  parseTransferAssetId,
+  type CantonTransferAssetId
+} from "@/lib/canton-assets";
+import { getDsoPartyId } from "@/lib/cc-registry";
 import { NETWORK } from "@/lib/constants";
-import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
+import { formatSatoshis, parseBtc } from "@/lib/format";
+import { DEFAULT_TRANSFER_EXPIRATION_SECONDS } from "@/lib/transfer-options";
+import { requireManagedTransferSession } from "@/lib/transfer-session";
 import { createTransfer } from "@/lib/transfer";
 
 const TAG = "[transfers/create]";
@@ -23,30 +31,18 @@ export const dynamic = "force-dynamic";
 export async function POST(request: Request) {
   console.log(`${TAG} request received`);
 
-  const supabase = await createSupabaseServerClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const session = await requireManagedTransferSession();
+  if (session.error) return session.error;
+  const senderParty = session.partyId;
 
-  // Look up the user's Canton party from Supabase. Use the service client so
-  // RLS doesn't reject the read — we've already verified the user identity above.
-  const serviceClient = await createSupabaseServiceClient();
-  const { data: partyRow, error: partyErr } = await serviceClient
-    .from("party_mappings")
-    .select("canton_party_id")
-    .eq("user_id", user.id)
-    .single();
-  if (partyErr || !partyRow?.canton_party_id) {
-    console.error(`${TAG} no party mapping for user=${user.id}`);
-    return NextResponse.json(
-      { error: "No Canton party allocated for this account" },
-      { status: 400 },
-    );
-  }
-  const senderParty = partyRow.canton_party_id as string;
-
-  let body: { recipient?: unknown; amountBtc?: unknown };
+  let body: {
+    recipient?: unknown;
+    amount?: unknown;
+    amountBtc?: unknown;
+    asset?: unknown;
+    memo?: unknown;
+    expirationSeconds?: unknown;
+  };
   try {
     body = await request.json();
   } catch {
@@ -54,43 +50,96 @@ export async function POST(request: Request) {
   }
 
   const recipient = typeof body.recipient === "string" ? body.recipient.trim() : "";
-  const amountBtc = typeof body.amountBtc === "string" ? body.amountBtc.trim() : "";
+  const amountRaw =
+    typeof body.amount === "string"
+      ? body.amount.trim()
+      : typeof body.amountBtc === "string"
+        ? body.amountBtc.trim()
+        : "";
+
+  const assetId: CantonTransferAssetId =
+    parseTransferAssetId(body.asset) ?? "CBTC";
+  const asset = getTransferAsset(assetId);
 
   if (!recipient || !recipient.includes("::")) {
     return NextResponse.json(
       { error: "recipient must be a Canton party id (includes '::')" },
-      { status: 400 },
+      { status: 400 }
     );
   }
   if (recipient === senderParty) {
     return NextResponse.json(
       { error: "Cannot transfer to yourself" },
-      { status: 400 },
-    );
-  }
-  const parsedAmount = Number(amountBtc);
-  if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
-    return NextResponse.json(
-      { error: "amountBtc must be a positive decimal number" },
-      { status: 400 },
+      { status: 400 }
     );
   }
 
+  let amountSats: bigint;
   try {
-    // Fetch sender's holdings server-side — never trust the client to pick UTXOs.
-    const allHoldings = await getHoldings(senderParty);
-    const cbtcUnlocked = allHoldings.filter(
-      (h) =>
-        h.payload.instrumentId.id === NETWORK.instrumentId.id &&
-        h.payload.instrumentId.admin === NETWORK.instrumentId.admin &&
-        (h.payload.lock === null || h.payload.lock === undefined),
+    amountSats = parseBtc(amountRaw);
+  } catch {
+    return NextResponse.json(
+      { error: "amount must be a valid decimal amount" },
+      { status: 400 }
     );
+  }
+  if (amountSats <= 0n) {
+    return NextResponse.json(
+      { error: "amount must be greater than zero" },
+      { status: 400 }
+    );
+  }
+  const amount = formatSatoshis(amountSats);
+  const memo = typeof body.memo === "string" ? body.memo.trim() : undefined;
+  let expirationSeconds = DEFAULT_TRANSFER_EXPIRATION_SECONDS;
+  if (body.expirationSeconds != null) {
+    const n = Number(body.expirationSeconds);
+    if (!Number.isFinite(n) || n < 60 || n > 72 * 3600) {
+      return NextResponse.json(
+        { error: "expirationSeconds must be between 60 and 259200" },
+        { status: 400 }
+      );
+    }
+    expirationSeconds = Math.floor(n);
+  }
+
+  try {
+    if (assetId === "CBTC") {
+      const allHoldings = await getHoldings(senderParty);
+      const unlocked = allHoldings.filter(
+        (h) =>
+          h.payload.instrumentId.id === NETWORK.instrumentId.id &&
+          h.payload.instrumentId.admin === NETWORK.instrumentId.admin &&
+          (h.payload.lock === null || h.payload.lock === undefined)
+      );
+
+      const result = await createTransfer({
+        senderParty,
+        receiverParty: recipient,
+        amountBtc: amount,
+        inputHoldings: unlocked,
+        memo,
+        expirationSeconds,
+        assetSymbol: asset.symbol
+      });
+      return NextResponse.json(result);
+    }
+
+    const dsoParty = await getDsoPartyId();
+    const amuletHoldings = await getAmuletHoldings(senderParty);
+    const instrumentId = { admin: dsoParty, id: "Amulet" as const };
 
     const result = await createTransfer({
       senderParty,
       receiverParty: recipient,
-      amountBtc,
-      inputHoldings: cbtcUnlocked,
+      amountBtc: amount,
+      inputHoldings: amuletHoldings,
+      memo,
+      expirationSeconds,
+      instrumentId,
+      registrarAdmin: dsoParty,
+      registryKind: "cc",
+      assetSymbol: asset.symbol
     });
     return NextResponse.json(result);
   } catch (err) {

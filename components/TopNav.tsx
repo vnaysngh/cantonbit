@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
 import { ChainIcon } from "@/components/ChainIcon";
+import { useCantonIdentity } from "@/hooks/useCantonIdentity";
 import { useWallet } from "@/hooks/useWallet";
 import { useEvmWallet } from "@/hooks/useEvmWallet";
 import { useBalance } from "@/hooks/useBalance";
@@ -14,20 +15,49 @@ import { cn } from "@/lib/utils";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
 
-// Surfaced top-level pages. Mint/Redeem/Send/Receive/Dashboard routes still
-// exist but are intentionally NOT linked here — the header stays focused on the
-// swap/bridge product.
-//
-// NOT surfaced yet (pages exist, just unlinked):
-//   /stats    — needs meaningful aggregate data before it's worth showing.
-//   /activity — it's a mint/redeem history view (wrong domain for swaps) and
-//               there's no real swap-history source yet (the solver has no
-//               per-user orders feed). Re-add once swap history is persisted.
-const NAV_LINKS = [
+// Primary nav — Account is shown for email (participant-managed) users only.
+const BASE_NAV_LINKS = [
   { href: "/swap", label: "Swap" },
   { href: "/orders", label: "Orders" },
-  { href: "/how-it-works", label: "How it works" },
+  { href: "/how-it-works", label: "How it works" }
 ] as const;
+
+function NavLinks({ pathname }: { pathname: string }) {
+  const { isManaged } = useCantonIdentity();
+  const links = isManaged
+    ? [
+        BASE_NAV_LINKS[0],
+        { href: "/balances", label: "Account" },
+        ...BASE_NAV_LINKS.slice(1)
+      ]
+    : [...BASE_NAV_LINKS];
+
+  return (
+    <nav className="hidden items-center gap-1 sm:flex">
+      {links.map((link) => {
+        const active =
+          link.href === "/swap"
+            ? pathname === "/swap" || pathname === "/"
+            : pathname.startsWith(link.href);
+        return (
+          <Link
+            key={link.href}
+            href={link.href}
+            aria-current={active ? "page" : undefined}
+            className={cn(
+              "rounded-lg px-3 py-1.5 text-sm font-medium transition-colors",
+              active
+                ? "bg-muted text-foreground"
+                : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+            )}
+          >
+            {link.label}
+          </Link>
+        );
+      })}
+    </nav>
+  );
+}
 
 export function TopNav() {
   const pathname = usePathname();
@@ -61,30 +91,7 @@ export function TopNav() {
           </Link>
         </div>
 
-        {/* Primary nav — absolutely centered in the header. */}
-        <nav className="hidden items-center gap-1 sm:flex">
-          {NAV_LINKS.map((link) => {
-            const active =
-              link.href === "/swap"
-                ? pathname === "/swap" || pathname === "/"
-                : pathname.startsWith(link.href);
-            return (
-              <Link
-                key={link.href}
-                href={link.href}
-                aria-current={active ? "page" : undefined}
-                className={cn(
-                  "rounded-lg px-3 py-1.5 text-sm font-medium transition-colors",
-                  active
-                    ? "bg-muted text-foreground"
-                    : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
-                )}
-              >
-                {link.label}
-              </Link>
-            );
-          })}
-        </nav>
+        <NavLinks pathname={pathname} />
 
         {/* Actions — takes up right third, pushes to the right edge */}
         <div className="flex flex-1 items-center justify-end gap-3">
@@ -100,53 +107,6 @@ export function TopNav() {
       </div>
     </header>
   );
-}
-
-/**
- * The user's Canton identity. Reads from /api/parties/me (server-side, cookie-
- * reliable on first load — client supabase.auth.getUser() races the cookie right
- * after login and would briefly show "Log in"). Falls back to the Loop party.
- * Returns { party, ready }. party=null + ready=true means logged out.
- */
-function useCantonIdentity(): {
-  party: string | null;
-  ready: boolean;
-  isLoop: boolean;
-  isManaged: boolean;
-} {
-  const { partyId: loopParty } = useWallet();
-  const [state, setState] = useState<{
-    party: string | null;
-    ready: boolean;
-    isLoop: boolean;
-    isManaged: boolean;
-  }>({ party: null, ready: false, isLoop: false, isManaged: false });
-  useEffect(() => {
-    let alive = true;
-    fetch("/api/parties/me")
-      .then((r) => r.json())
-      .then((d) => {
-        if (!alive) return;
-        if (d?.partyId) {
-          setState({
-            party: d.partyId,
-            ready: true,
-            isLoop: d.mode === "loop",
-            isManaged: d.mode === "participant-managed"
-          });
-        } else setState({ party: null, ready: true, isLoop: false, isManaged: false });
-      })
-      .catch(() => {
-        if (alive)
-          setState({ party: null, ready: true, isLoop: false, isManaged: false });
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
-  if (!state.party && loopParty)
-    return { party: loopParty, ready: true, isLoop: true, isManaged: false };
-  return state;
 }
 
 /** CC (Amulet) balance for any connected Canton party (Loop or email). */

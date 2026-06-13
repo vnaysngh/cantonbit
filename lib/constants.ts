@@ -25,6 +25,8 @@ export interface NetworkConfig {
   /** Splice validator app (scan-proxy + admin external-party APIs). */
   validatorHost: string;
   registryUrl: string;
+  /** Canton Coin (Amulet) Scan registry — Token Standard `/registry/*` endpoints. */
+  ccRegistryUrl: string;
   coordinatorUrl: string;
   decentralizedPartyId: string;
   instrumentId: InstrumentId;
@@ -66,6 +68,9 @@ export const NETWORKS: Record<NetworkName, NetworkConfig> = {
     ledgerHost: "https://ledger-api.validator.devnet.warpx.fivenorth.io",
     validatorHost: "https://wallet.validator.devnet.warpx.fivenorth.io",
     registryUrl: "https://api.utilities.digitalasset-dev.com",
+    ccRegistryUrl:
+      process.env.CC_REGISTRY_URL ??
+      "https://scan.sv-1.dev.global.canton.network.sync.global",
     coordinatorUrl: "https://api.devnet.bitsafe.finance",
     decentralizedPartyId: CBTC_DEVNET_ADMIN,
     instrumentId: { admin: CBTC_DEVNET_ADMIN, id: "CBTC" },
@@ -82,6 +87,9 @@ export const NETWORKS: Record<NetworkName, NetworkConfig> = {
     ledgerHost: "https://ledger-api.validator.devnet.warpx.fivenorth.io",
     validatorHost: "https://wallet.validator.devnet.warpx.fivenorth.io",
     registryUrl: "https://api.utilities.digitalasset-staging.com",
+    ccRegistryUrl:
+      process.env.CC_REGISTRY_URL ??
+      "https://scan.sv-1.dev.global.canton.network.sync.global",
     coordinatorUrl: "https://api.testnet.bitsafe.finance",
     decentralizedPartyId: CBTC_TESTNET_ADMIN,
     instrumentId: { admin: CBTC_TESTNET_ADMIN, id: "CBTC" },
@@ -96,6 +104,9 @@ export const NETWORKS: Record<NetworkName, NetworkConfig> = {
     ledgerHost: "https://ledger-api.validator.warpx.fivenorth.io",
     validatorHost: "https://wallet.validator.warpx.fivenorth.io",
     registryUrl: "https://api.utilities.digitalasset.com",
+    ccRegistryUrl:
+      process.env.CC_REGISTRY_URL ??
+      "https://scan.sv-1.global.canton.network.sync.global",
     coordinatorUrl: "https://api.mainnet.bitsafe.finance",
     decentralizedPartyId: CBTC_MAINNET_ADMIN,
     instrumentId: { admin: CBTC_MAINNET_ADMIN, id: "CBTC" },

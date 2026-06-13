@@ -11,8 +11,14 @@
 
 import { NextResponse } from "next/server";
 
-import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
-import { acceptTransfer, listPendingOffers } from "@/lib/transfer";
+import { requireManagedTransferSession } from "@/lib/transfer-session";
+import {
+  acceptTransfer,
+  listPendingOffers,
+  registryKindForInstrument
+} from "@/lib/transfer";
+import { getDsoPartyId } from "@/lib/cc-registry";
+import { NETWORK } from "@/lib/constants";
 
 const TAG = "[transfers/accept]";
 
@@ -21,25 +27,9 @@ export const dynamic = "force-dynamic";
 export async function POST(request: Request) {
   console.log(`${TAG} request received`);
 
-  const supabase = await createSupabaseServerClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
-  const serviceClient = await createSupabaseServiceClient();
-  const { data: partyRow } = await serviceClient
-    .from("party_mappings")
-    .select("canton_party_id")
-    .eq("user_id", user.id)
-    .single();
-  if (!partyRow?.canton_party_id) {
-    return NextResponse.json(
-      { error: "No Canton party allocated for this account" },
-      { status: 400 },
-    );
-  }
-  const receiverParty = partyRow.canton_party_id as string;
+  const session = await requireManagedTransferSession();
+  if (session.error) return session.error;
+  const receiverParty = session.partyId;
 
   let body: { offerContractId?: unknown };
   try {
@@ -52,23 +42,32 @@ export async function POST(request: Request) {
   if (!offerContractId) {
     return NextResponse.json(
       { error: "offerContractId is required" },
-      { status: 400 },
+      { status: 400 }
     );
   }
 
   try {
-    // Verify the offer actually exists for this receiver — protects against a
-    // user passing an arbitrary contract id and getting an opaque ledger error.
     const offers = await listPendingOffers(receiverParty);
     const match = offers.find((o) => o.contractId === offerContractId);
     if (!match) {
       return NextResponse.json(
         { error: "No pending offer with that contract id for this party" },
-        { status: 404 },
+        { status: 404 }
       );
     }
 
-    const result = await acceptTransfer({ receiverParty, offerContractId });
+    const registryKind = registryKindForInstrument(match.instrumentId);
+    const registrarAdmin =
+      registryKind === "cc"
+        ? match.instrumentId?.admin ?? (await getDsoPartyId())
+        : NETWORK.decentralizedPartyId;
+
+    const result = await acceptTransfer({
+      receiverParty,
+      offerContractId,
+      registrarAdmin,
+      registryKind
+    });
     return NextResponse.json(result);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

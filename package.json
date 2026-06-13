@@ -13,6 +13,7 @@
     "start": "next start",
     "lint": "eslint",
     "test": "tsx --test lib/**/*.test.ts",
+    "transfer:check:devnet": "bash scripts/with-env.sh devnet npx tsx scripts/transfer-devnet-check.mts",
     "dev:all": "bash scripts/dev-all.sh",
     "stop": "bash scripts/stop-all.sh",
     "solver:api": "npm --prefix swap-solver run api",
