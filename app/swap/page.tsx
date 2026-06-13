@@ -16,7 +16,7 @@ import {
   mintSwapSession
 } from "@/lib/swap-accept";
 import { truncatePartyId } from "@/lib/format";
-import { loopSettingsUrl, MIN_CC_BALANCE, DEFAULT_PLATFORM_FEE_BPS } from "@/lib/constants";
+import { loopSettingsUrl, MIN_CC_BALANCE, BYPASS_CC_CHECK, DEFAULT_PLATFORM_FEE_BPS } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import {
   getQuote,
@@ -130,7 +130,7 @@ type Stage =
   // rev-locking: backend locks the user's CBTC on-ledger, then waits for the
   // solver's WBTC counter-lock. rev-claimable: user claims WBTC in MetaMask
   // (= the secret reveal). rev-done: WBTC claimed; the solver claims the CBTC.
-  | { kind: "rev-locking"; swapId: string; secret: string }
+  | { kind: "rev-locking"; swapId: string; secret: string; phase?: "custody" | "solver" }
   | {
       kind: "rev-claimable";
       swapId: string;
@@ -155,6 +155,19 @@ type Stage =
  *  match the server's PLATFORM_FEE_BPS (default 100 = 1%). The review modal shows
  *  the exact fee from the server quote. */
 const FEE_BPS = Number(process.env.NEXT_PUBLIC_FEE_BPS ?? DEFAULT_PLATFORM_FEE_BPS);
+
+type ReversePollResult = "claimable" | "failed" | "timeout";
+
+async function pollReverseCounterLock(swapId: string): Promise<ReversePollResult> {
+  for (let i = 0; i < 60; i++) {
+    await sleep(3000);
+    const { order } = await htlcApi.getOrder(swapId);
+    const st = (order as { status?: string } | undefined)?.status;
+    if (st === "counter_locked" || st === "counter_claimed") return "claimable";
+    if (st === "refunded" || st === "cancelled" || st === "failed") return "failed";
+  }
+  return "timeout";
+}
 
 export default function SwapPage() {
   const evm = useEvmWallet();
@@ -283,8 +296,14 @@ export default function SwapPage() {
     ccSubsidizedOnDevnet
   } = useBalance();
 
+  // Email users locking CBTC (Canton→EVM) burn CC on each ledger write. Forward
+  // (EVM→Canton) only needs EVM gas for the WBTC lock; CBTC delivery is backend-signed.
   const ccBlocksCantonSwap =
-    isParticipantManaged && ccReady === false && !ccSubsidizedOnDevnet;
+    !BYPASS_CC_CHECK &&
+    isReverse &&
+    isParticipantManaged &&
+    ccReady === false &&
+    !ccSubsidizedOnDevnet;
 
   const wrongChain = evm.chainId != null && evm.chainId !== SWAP_CHAIN.id;
 
@@ -924,27 +943,25 @@ export default function SwapPage() {
             }
           }
           if (!confirmed) {
+            const { order: afterSign } = await htlcApi.getOrder(id);
+            if ((afterSign as { status?: string } | undefined)?.status === "main_locked") {
+              confirmed = true;
+            }
+          }
+          if (!confirmed) {
             retry(
               "Your CBTC allocation was signed but not yet visible on-ledger — reopen this swap from Orders in a moment."
             );
             return;
           }
         }
-        let counterLocked = false;
-        for (let i = 0; i < 60; i++) {
-          await sleep(3000);
-          const { order } = await htlcApi.getOrder(id);
-          const st = (order as { status?: string } | undefined)?.status;
-          if (st === "counter_locked" || st === "counter_claimed") {
-            counterLocked = true;
-            break;
-          }
-          if (st === "refunded" || st === "cancelled" || st === "failed") {
-            retry(`Swap ${st} while waiting for the solver.`);
-            return;
-          }
+        setStage({ kind: "rev-locking", swapId: id, secret, phase: "solver" });
+        const pollResult = await pollReverseCounterLock(id);
+        if (pollResult === "failed") {
+          retry(`Swap ended while waiting for the solver.`);
+          return;
         }
-        if (!counterLocked) {
+        if (pollResult === "timeout") {
           retry(
             "The solver hasn't locked the WBTC yet. Is the daemon running? Your CBTC auto-refunds after the timelock."
           );
@@ -1062,7 +1079,8 @@ export default function SwapPage() {
       stage.kind === "htlc-resume" ||
       stage.kind === "rev-claimable" ||
       stage.kind === "rev-claiming" ||
-      stage.kind === "rev-resume"
+      stage.kind === "rev-resume" ||
+      stage.kind === "rev-locking"
     ) {
       return;
     }
@@ -1078,29 +1096,67 @@ export default function SwapPage() {
         counterMode?: "managed" | "loop";
         revealedPreimage?: string;
         mainLockTx?: string;
+        userCantonParty?: string;
+        userEvmAddress?: string;
+        userTimelock?: number;
+        solverTimelock?: number;
       } | null;
-      if (
-        !o ||
-        !isSwapClaimable({
-          status: o.status as SwapStatus,
-          direction: o.direction ?? "evm-to-canton",
-          counterMode: o.counterMode,
-          revealedPreimage: o.revealedPreimage as `0x${string}` | undefined
-        })
-      ) {
+      if (!o) return;
+
+      const direction = o.direction ?? "evm-to-canton";
+      const claimable = isSwapClaimable({
+        status: o.status as SwapStatus,
+        direction,
+        counterMode: o.counterMode,
+        revealedPreimage: o.revealedPreimage as `0x${string}` | undefined
+      });
+
+      if (claimable) {
+        if (cancelled) return;
+        if (direction === "canton-to-evm") {
+          setStage({ kind: "rev-resume", swapId });
+        } else {
+          setStage({ kind: "htlc-resume", swapId, lockTx: o.mainLockTx ?? "" });
+        }
         return;
       }
-      if (cancelled) return;
-      if (o.direction === "canton-to-evm") {
-        setStage({ kind: "rev-resume", swapId });
-      } else {
-        setStage({ kind: "htlc-resume", swapId, lockTx: o.mainLockTx ?? "" });
+
+      // CBTC locked — pick up where the user left off (same as devnet live flow).
+      if (direction === "canton-to-evm" && o.status === "main_locked") {
+        const secret = await recallSecret(swapId, {
+          ...(await vaultRecallContext()),
+          orderMeta:
+            vaultMetaFromOrder({
+              direction: o.direction ?? "canton-to-evm",
+              counterMode: o.counterMode,
+              userCantonParty: o.userCantonParty,
+              userEvmAddress: o.userEvmAddress,
+              userTimelock: o.userTimelock,
+              solverTimelock: o.solverTimelock
+            }) ?? undefined
+        });
+        if (cancelled) return;
+        if (!secret) {
+          setStage({
+            kind: "rev-resume",
+            swapId,
+            unlockError:
+              "Could not unlock the saved secret. Connect the same wallet or use Orders."
+          });
+          return;
+        }
+        setStage({ kind: "rev-locking", swapId, secret, phase: "solver" });
+        const pollResult = await pollReverseCounterLock(swapId);
+        if (cancelled) return;
+        if (pollResult === "claimable") {
+          setStage({ kind: "rev-claimable", swapId, secret });
+        }
       }
     })().catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [stage.kind]);
+  }, [stage.kind, vaultRecallContext]);
 
   const unlockResumeSecret = useCallback(
     async (
@@ -1275,7 +1331,10 @@ export default function SwapPage() {
       };
     } else if (stage.kind === "rev-locking") {
       primary = {
-        label: "Locking CBTC",
+        label:
+          stage.phase === "solver"
+            ? "Waiting for solver…"
+            : "Locking CBTC",
         onClick: () => {},
         disabled: true,
         busy: true
@@ -1322,15 +1381,13 @@ export default function SwapPage() {
         onClick: () => {},
         disabled: true
       };
-    } else if (isReverse) {
+    } else if (ccBlocksCantonSwap) {
       primary = {
-        label: "Review swap",
-        onClick: handleQuote,
-        disabled: reviewing
+        label: `Need ${MIN_CC_BALANCE} CC for Canton fees`,
+        onClick: () => {},
+        disabled: true
       };
     } else {
-      // Session ready + amount valid. Review checks auto-accept (no signature)
-      // then quotes; if auto-accept is OFF it opens the enable popup.
       primary = {
         label: "Review swap",
         onClick: handleQuote,
@@ -1449,6 +1506,13 @@ export default function SwapPage() {
                 </select>
               </div>
             </div>
+
+            {ccBlocksCantonSwap && (
+              <div className="mb-2 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+                Insufficient CC for Canton network fees (need at least{" "}
+                {MIN_CC_BALANCE} CC).
+              </div>
+            )}
 
             {stage.kind === "error" &&
               (stage.message.startsWith("Swaps are paused") ? (

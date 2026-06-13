@@ -58,6 +58,32 @@ export { EVM_CLAIM_MARGIN_SECONDS };
  *  the sweep returns the custody early (no point holding the user's funds). */
 const LOOP_CUSTODY_GRACE_SECONDS = 30 * 60;
 
+/** Marker when Loop transfer auto-settled via solver TransferPreapproval (no pending offer). */
+const LOOP_PREAPPROVAL_SETTLED = "transfer-preapproval-settled";
+
+function cbtcAmountsMatch(a: string, b: string): boolean {
+  return Math.abs(parseFloat(a) - parseFloat(b)) < 1e-9;
+}
+
+/** Loop sellers: transfer may auto-accept on the solver (preapproval) — custody is a Holding, not an offer. */
+async function detectLoopSellerCustodyHolding(
+  solverParty: string,
+  amountBtc: string,
+  orderId: string,
+  reservedCids: Set<string>
+): Promise<string | null> {
+  const holdings = await getHoldings(solverParty);
+  const matches = holdings
+    .filter(
+      (h) =>
+        cbtcAmountsMatch(h.payload.amount, amountBtc) &&
+        !reservedCids.has(h.contractId)
+    )
+    .sort((a, b) => a.contractId.localeCompare(b.contractId));
+  if (matches.length >= 1) return matches[0].contractId;
+  return null;
+}
+
 /** Raw read of the escrow's lock for a hashLock: { unlockTime, amount, receiver }. */
 async function readEvmLock(
   hashLockRaw: string
@@ -674,6 +700,23 @@ class HtlcService {
     const pollMs = opts?.pollMs ?? 2000;
     const targetAmount = parseFloat(o.cbtcAmount);
 
+    // Holdings already linked to other in-flight loop-seller orders (same amount).
+    const active = await this.store.active();
+    const reservedCids = new Set(
+      active
+        .filter(
+          (x) =>
+            x.id !== id &&
+            x.counterTransferOfferCid &&
+            x.direction === "canton-to-evm" &&
+            x.counterMode === "loop" &&
+            !["refunded", "cancelled", "failed", "main_claimed", "both_claimed"].includes(
+              x.status
+            )
+        )
+        .map((x) => x.counterTransferOfferCid as string)
+    );
+
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const offers = await listPendingOffers(o.solverCantonParty);
       const offer = offers.find(
@@ -692,13 +735,31 @@ class HtlcService {
         await this.store.put(o);
         return o;
       }
+
+      // TransferPreapproval on the solver can auto-accept cross-participant Loop
+      // transfers — CBTC lands as a Holding with no pending TransferInstruction.
+      const custodyHolding = await detectLoopSellerCustodyHolding(
+        o.solverCantonParty,
+        o.cbtcAmount,
+        id,
+        reservedCids
+      );
+      if (custodyHolding) {
+        o.counterTransferOfferCid = custodyHolding;
+        o.counterTransferUpdateId = LOOP_PREAPPROVAL_SETTLED;
+        o.status = "main_locked";
+        await this.store.put(o);
+        return o;
+      }
+
       if (attempt < maxAttempts - 1) {
         await new Promise((r) => setTimeout(r, pollMs));
       }
     }
 
     throw new Error(
-      "transfer offer not visible on-ledger yet — connect Loop and use Retry lock, or wait a moment and confirm again"
+      "transfer offer not visible on-ledger yet — connect Loop and use Retry lock, or wait a moment and confirm again. " +
+        "If you already signed in Loop, tap Confirm CBTC lock on Orders (custody may have auto-settled)."
     );
   }
 

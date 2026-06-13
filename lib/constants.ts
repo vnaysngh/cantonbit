@@ -148,8 +148,12 @@ export const UTXO_WARN_THRESHOLD = 20;
 export const BITCOIN_CONFIRMATIONS_REQUIRED = 6;
 export const JWT_REFRESH_BUFFER_SECONDS = 5 * 60;
 
-/** Recommended minimum CC (Amulet) before Canton ledger writes (lock, claim, refund). */
-export const MIN_CC_BALANCE = 0.001;
+/** Minimum CC (Amulet) before user-signed Canton ledger writes (Canton→EVM lock path). */
+export const MIN_CC_BALANCE = 10;
+
+/** TEMP — skip Canton→EVM CC guard in /swap. Set NEXT_PUBLIC_BYPASS_CC_CHECK=true, revert after testing. */
+export const BYPASS_CC_CHECK =
+  process.env.NEXT_PUBLIC_BYPASS_CC_CHECK === "true";
 
 /** Platform swap fee in basis points (100 = 1% on quoted output). Override server-side
  *  with PLATFORM_FEE_BPS; UI estimate with NEXT_PUBLIC_FEE_BPS. Legacy solver: SOLVER_FEE_BPS. */

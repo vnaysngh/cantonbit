@@ -11,7 +11,8 @@
     "start": "tsx src/index.ts",
     "api": "tsx --env-file=.env --env-file=../.env.local --env-file=.env.mainnet src/serve.ts",
     "watch": "tsx --env-file=.env --env-file=../.env.local --env-file=.env.mainnet src/index.ts",
-    "htlc-daemon": "tsx --env-file=.env --env-file=../.env.local src/htlc-solver-daemon.mts",
+    "htlc-daemon": "tsx --env-file=../.env.local --env-file=../.env.devnet --env-file=.env.htlc-devnet src/htlc-solver-daemon.mts",
+    "htlc-daemon:mainnet": "tsx --env-file=../.env.local --env-file=../.env.mainnet --env-file=.env.htlc-mainnet src/htlc-solver-daemon.mts",
     "api:prod": "tsx src/serve.ts",
     "watch:prod": "tsx src/index.ts"
   },

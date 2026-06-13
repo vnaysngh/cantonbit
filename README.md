@@ -321,17 +321,31 @@ book-kept the EVM claim yet).
 ## 9. Running locally
 
 ```bash
-# Terminal 1 — Next.js app (UI + /api/htlc)
-cp .env.example .env.local   # fill in Supabase, Keycloak, HTLC vars
-npm install
-npm run dev
+npm run dev:devnet        # or: npm run dev:mainnet
 
 # Terminal 2 — HTLC solver daemon (required for swaps to complete)
-npm run solver:htlc
+npm run solver:htlc       # devnet
+# npm run solver:htlc:mainnet
 ```
 
-Copy solver secrets from `swap-solver/.env` (`PRIVATE_KEY`, `HTLC_ESCROW_ADDRESS`, etc.).
-The daemon reads `swap-solver/.env` + `.env.local` via the npm script.
+**Env layout:** [docs/ENV.md](docs/ENV.md) — `.env.devnet` / `.env.mainnet` are the two stacks; `.env.local` is optional overrides only (no more flipping one file back and forth).
+
+Templates: [`.env.devnet.example`](.env.devnet.example), [`.env.mainnet.example`](.env.mainnet.example),
+[`swap-solver/.env.htlc-devnet.example`](swap-solver/.env.htlc-devnet.example),
+[`swap-solver/.env.htlc-mainnet.example`](swap-solver/.env.htlc-mainnet.example).
+
+First-time setup: copy each example to its gitignored target (skip if the file already exists):
+
+```bash
+cp .env.devnet.example .env.devnet
+cp .env.mainnet.example .env.mainnet
+cp swap-solver/.env.htlc-devnet.example swap-solver/.env.htlc-devnet
+cp swap-solver/.env.htlc-mainnet.example swap-solver/.env.htlc-mainnet
+```
+
+Production deploy checklist: [`docs/MAINNET-DEPLOY.md`](docs/MAINNET-DEPLOY.md).
+
+Legacy OIF solver secrets live in `swap-solver/.env`. HTLC daemon uses layered files via npm scripts (see docs/ENV.md).
 
 **Supabase migration 010 (HTLC RLS lockdown):** before mainnet, paste
 `supabase/migrations/010_htlc_orders_rls_lockdown.sql` into the Supabase SQL Editor
@@ -345,14 +359,30 @@ app; HTLC swaps do **not** need this.
 
 ## 10. Deploying on Railway
 
-Use **two services** in one project:
+Use **two services** in one project (duplicate for **parallel** devnet + mainnet stacks — see
+[`docs/MAINNET-DEPLOY.md`](docs/MAINNET-DEPLOY.md)):
 
 | Service | Build | Start |
 | --- | --- | --- |
 | **Web app** | `npm ci && npm run build` | `npm run start -- -p $PORT` |
 | **HTLC solver** | `npm ci --prefix swap-solver` | `npx tsx swap-solver/src/htlc-solver-daemon.mts` |
 
-Do **not** run `npm run build` on the solver service.
+Prefer **not** running `npm run build` on the solver service. If your solver service does run
+`next build`, set **both** `HTLC_ESCROW_ADDRESS` and `NEXT_PUBLIC_HTLC_ESCROW` (same address).
+
+### Network switch (master vars)
+
+| | Devnet | Mainnet |
+| --- | --- | --- |
+| `NEXT_PUBLIC_NETWORK` | `devnet` | `mainnet` |
+| `NEXT_PUBLIC_SWAP_CHAIN` | `base-sepolia` | `arbitrum` |
+| `NEXT_PUBLIC_HTLC_ESCROW` | Base Sepolia escrow | Arbitrum escrow |
+| Solver `SWAP_NETWORK` | `devnet` | `mainnet` |
+| Solver `ALLOW_MAINNET` | unset | `true` |
+| Solver `EVM_CHAIN` | `base-sepolia` | `arbitrum` |
+| Solver `ORIGIN_RPC_URL` | `https://sepolia.base.org` | `https://arb1.arbitrum.io/rpc` |
+
+Use [`.env.devnet.example`](.env.devnet.example) / [`.env.mainnet.example`](.env.mainnet.example) for the full web matrix.
 
 ### Web app env (required)
 
@@ -392,12 +422,19 @@ Also configure Supabase Auth redirect URL: `https://<your-domain>/auth/callback`
 ### HTLC solver worker env
 
 ```bash
-API_BASE=https://<web-app-url>          # or Railway private networking URL
+SWAP_NETWORK=devnet                      # or mainnet (+ ALLOW_MAINNET=true)
+EVM_CHAIN=base-sepolia                   # or arbitrum on mainnet
+API_BASE=https://<web-app-url>           # must match web stack network
 HTLC_DAEMON_SECRET=<same as web>
-SOLVER_EVM_PK=<same as PRIVATE_KEY in swap-solver/.env>
+SOLVER_EVM_PK=<solver hot key>
 ORIGIN_RPC_URL=https://sepolia.base.org
 HTLC_ESCROW_ADDRESS=0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1
+# If solver service runs npm run build:
+NEXT_PUBLIC_HTLC_ESCROW=0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1
 ```
+
+See [`swap-solver/.env.htlc-devnet.example`](swap-solver/.env.htlc-devnet.example) and
+[`.env.htlc-mainnet.example`](swap-solver/.env.htlc-mainnet.example).
 
 Optional: `ALERT_WEBHOOK_URL`, `SOLVER_POLL_MS`.
 
@@ -420,6 +457,7 @@ Optional: `ALERT_WEBHOOK_URL`, `SOLVER_POLL_MS`.
 | --- | --- |
 | [`docs/HTLC-SECRET-VAULT.md`](./docs/HTLC-SECRET-VAULT.md) | Secret vault threat model & v3 design |
 | [`docs/HTLC-SECURITY-AUDIT-2026-06-12.md`](./docs/HTLC-SECURITY-AUDIT-2026-06-12.md) | Security audit & hardening |
+| [`docs/MAINNET-DEPLOY.md`](./docs/MAINNET-DEPLOY.md) | Devnet/mainnet env matrix, Railway, mainnet checklist |
 | [`docs/canton-to-evm-design.md`](./docs/canton-to-evm-design.md) | Reverse-direction design (Canton→EVM) |
 
 ### Operational env vars (quick reference)
@@ -475,27 +513,50 @@ The review modal shows **Platform fee** with the exact deduction before confirm.
 
 ### Canton network fee (CC / Amulet)
 
-Every Canton ledger submission burns **CC (Amulet)** from the party in `actAs`. This is
+Every Canton ledger submission **can** burn **CC (Amulet)** from the party in `actAs`. This is
 **not** platform revenue — it pays Canton synchronizer / validator infrastructure.
 
-**Who pays which leg (typical email / participant-managed flow):**
+**Theoretical `actAs` attribution (email / participant-managed HTLC flow):**
 
-| Direction | User party CC | Solver party CC |
+| Direction | User party (`actAs`) | Solver party (`warpx-mainnet-1`, `actAs`) |
 | --- | --- | --- |
-| **Canton → EVM** | Lock path (~2 ledger txs: allocate + `HtlcLock`) | Claim CBTC after EVM reveal |
-| **EVM → Canton** | Usually none for the user’s lock (user signs EVM only) | Lock + claim CBTC counter |
+| **EVM → Canton** | Claim CBTC (`claim-managed` — backend signs as user receiver) | Lock CBTC counter on Canton |
+| **Canton → EVM** | Lock CBTC (allocate + on-ledger path) | Claim CBTC after user reveals on EVM |
 
 Amount is **variable** (small fractions of CC per tx), not a fixed per-swap line item in the app.
+
+#### Mainnet observations (WarpX hosted parties, Jun 2026)
+
+Full HTLC cross-chain testing on **mainnet** (Base ↔ Canton) with **0 CC visible** on both:
+
+- **Email user party** — `0` CC in the header; **EVM → Canton** and **Canton → EVM** both complete.
+- **Solver Canton party** (`warpx-mainnet-1`) — `0` CC; solver still locks the CBTC counter on
+  **EVM → Canton** and claims CBTC on **Canton → EVM**.
+
+So in practice, **WarpX appears to subsidize synchronizer / Amulet costs** for hosted parties on
+mainnet (same pattern we already saw on devnet), even though the ledger still records burns in
+transaction metadata. Users do **not** need to fund CC before swapping on our current deployment.
+
+**What users still pay directly:**
+
+| Leg | Fee type | Who pays |
+| --- | --- | --- |
+| Lock WBTC (EVM → Canton) | ETH gas on Base | User (MetaMask) |
+| Claim WBTC (Canton → EVM) | ETH gas on Base | User (MetaMask) |
+| Solver WBTC lock / claim (Canton → EVM) | ETH gas on Base | Solver EVM hot wallet |
+| Canton ledger writes (both directions) | CC (Amulet) | **Operator-subsidized** in practice — 0 CC balance OK |
 
 **UI & guardrails:**
 
 - CC balance shown in the header for email users (`/api/parties/balance` → `useBalance`).
-- **Review swap** blocked when `ccReady === false` and balance &lt; `MIN_CC_BALANCE` (0.001).
-- **DevNet bypass:** when `ccSubsidizedOnDevnet` is true, the guard is off — WarpX often
-  subsidizes hosted parties so swaps succeed with **0 CC visible**. On testnet/mainnet the
-  guard applies.
+- **Conservative guard:** **Canton → EVM** **Review swap** is blocked when `ccReady === false` and
+  balance &lt; `MIN_CC_BALANCE` (10). This is a safety rail, not a hard network requirement on our
+  WarpX node — mainnet testing with 0 CC succeeded with the guard temporarily disabled
+  (`NEXT_PUBLIC_BYPASS_CC_CHECK=true`; revert to `false` after testing).
+- **DevNet:** `ccSubsidizedOnDevnet` skips the guard when the balance API reports low CC (devnet
+  subsidy assumed).
 - **EnableCC** (one-time CC opt-in: `ValidatorRight` + `TransferPreapproval`) runs on
-  participant provision (`lib/enable-cc.ts`).
+  participant provision (`lib/enable-cc.ts`); failure is non-fatal when the validator subsidizes.
 
 CC burn does not appear as a separate row in the swap UI; inspect ledger transaction history
 (Splice meta keys such as `splice.lfdecentralizedtrust.org/burned`) to verify per-tx cost.

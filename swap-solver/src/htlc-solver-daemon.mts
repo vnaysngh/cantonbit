@@ -27,12 +27,15 @@ import {
   type Hex
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { baseSepolia } from "viem/chains";
 
 import { HTLC_ESCROW_ABI } from "./htlc-abi.js";
+import {
+  resolveHtlcEvmConfig,
+  resolveWbtcAddress,
+  verifyRpcChainId,
+} from "./htlc-evm-chain.js";
 
 const API_BASE = process.env.API_BASE ?? "http://localhost:3000";
-const RPC = process.env.ORIGIN_RPC_URL ?? "https://sepolia.base.org";
 const ESCROW = (process.env.HTLC_ESCROW_ADDRESS ??
   "0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1") as Address;
 const POLL_MS = Number(process.env.SOLVER_POLL_MS ?? 4000);
@@ -180,12 +183,14 @@ async function jpost(path: string, body?: unknown) {
 }
 
 async function main() {
+  const { network, slug, chain, rpcUrl } = resolveHtlcEvmConfig();
   const account = privateKeyToAccount(norm(solverEvmPk()));
-  const pub = createPublicClient({ chain: baseSepolia, transport: http(RPC) });
+  const pub = createPublicClient({ chain, transport: http(rpcUrl) });
+  await verifyRpcChainId(pub, chain);
   const wallet = createWalletClient({
     account,
-    chain: baseSepolia,
-    transport: http(RPC)
+    chain,
+    transport: http(rpcUrl)
   });
   const escrow = getContract({
     address: ESCROW,
@@ -194,7 +199,7 @@ async function main() {
   });
 
   console.log(
-    `[solver] up. account=${account.address} escrow=${ESCROW} api=${API_BASE}`
+    `[solver] up. network=${network} evm=${slug} chainId=${chain.id} account=${account.address} escrow=${ESCROW} api=${API_BASE} rpc=${rpcUrl}`
   );
   console.log(`[solver] polling every ${POLL_MS}ms…`);
 
@@ -252,7 +257,7 @@ async function main() {
               o.hashLock
             ])) as readonly [bigint, bigint, Address, Address, Address];
             if (existing[1] === 0n) {
-              const wbtc = reqEnv("WBTC_ADDRESS") as Address;
+              const wbtc = resolveWbtcAddress(slug);
               // SOLVENCY (M1): don't lock if the solver's WBTC balance is short — the
               // user's CBTC is already custodied/locked, so it auto-refunds cleanly.
               const balance = (await pub.readContract({

@@ -9,16 +9,18 @@
 # Ctrl-C stops all three together.
 #
 # Usage:
-#   ./scripts/dev-all.sh
+#   ./scripts/dev-all.sh              # devnet (default)
+#   NETWORK=mainnet ./scripts/dev-all.sh
 #
 set -euo pipefail
 
 # repo root = parent of this script's dir
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOLVER="$ROOT/swap-solver"
+NETWORK="${NETWORK:-devnet}"
 
-# Mainnet env-file chain (mainnet last so its addresses win).
-ENV_ARGS=(--env-file=.env --env-file=../.env.local --env-file=.env.mainnet)
+# Web stack for chosen network + legacy swap-solver/.env + optional overrides.
+ENV_ARGS=(--env-file="../.env.${NETWORK}" --env-file=.env --env-file=../.env.local)
 
 pids=()
 cleanup() {
@@ -42,7 +44,7 @@ run() {
 echo "[dev-all] starting solver API, watch loop, and app…"
 ( cd "$SOLVER" && run "api"   "36" npx tsx "${ENV_ARGS[@]}" src/serve.ts )
 ( cd "$SOLVER" && run "watch" "33" npx tsx "${ENV_ARGS[@]}" src/index.ts )
-( cd "$ROOT"   && run "app"   "32" npm run dev )
+( cd "$ROOT"   && run "app"   "32" npm run "dev:${NETWORK}" )
 
 echo "[dev-all] all started. API :8787 · app :3000 · Ctrl-C to stop."
 wait
