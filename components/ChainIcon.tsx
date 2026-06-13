@@ -20,7 +20,7 @@ export function ChainIcon({
 }) {
   const key = network.toLowerCase();
   const logo = key.includes("arbitrum")
-    ? { src: "/arb-logo.jpg", alt: "Arbitrum" }
+    ? { src: "/base-logo.jpg", alt: "Arbitrum" }
     : key.includes("canton")
       ? { src: "/cc-logo.png", alt: "Canton" }
       : null;
