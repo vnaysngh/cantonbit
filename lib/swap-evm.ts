@@ -83,22 +83,32 @@ export const SWAP_CHAIN: SwapChain = (() => {
 
 /**
  * The HTLC escrow contract address — single source of truth (client + server).
- * In PRODUCTION, NEXT_PUBLIC_HTLC_ESCROW is REQUIRED: a missing var must NOT
- * silently fall back to the Base-Sepolia testnet escrow, or a mainnet deploy that
- * forgot to set it would point the EVM leg at the wrong network/contract and
- * strand funds. In dev we allow the documented testnet default for convenience.
+ * In PRODUCTION at runtime, NEXT_PUBLIC_HTLC_ESCROW is REQUIRED: a missing var must
+ * NOT silently fall back to the Base-Sepolia testnet escrow. During `next build`
+ * (NEXT_PHASE=phase-production-build) we allow the documented testnet default so
+ * image builds don't fail when Railway hasn't injected env yet — but NEXT_PUBLIC_*
+ * is still baked at build time, so set it on the web service before deploy.
  */
 const TESTNET_HTLC_ESCROW = "0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1";
-export const HTLC_ESCROW_ADDRESS: string = (() => {
-  const configured = process.env.NEXT_PUBLIC_HTLC_ESCROW;
+
+function isNextProductionBuild(): boolean {
+  return process.env.NEXT_PHASE === "phase-production-build";
+}
+
+/** Resolve escrow address; throws at production runtime if unset. */
+export function resolveHtlcEscrowAddress(): string {
+  const configured = process.env.NEXT_PUBLIC_HTLC_ESCROW?.trim();
   if (configured) return configured;
+  if (isNextProductionBuild()) return TESTNET_HTLC_ESCROW;
   if (process.env.NODE_ENV === "production") {
     throw new Error(
       "NEXT_PUBLIC_HTLC_ESCROW must be set in production — refusing to fall back to the testnet escrow",
     );
   }
   return TESTNET_HTLC_ESCROW;
-})();
+}
+
+export const HTLC_ESCROW_ADDRESS: string = resolveHtlcEscrowAddress();
 
 const MAX_UINT256 = "0x" + "f".repeat(64);
 
