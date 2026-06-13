@@ -333,6 +333,11 @@ npm run solver:htlc
 Copy solver secrets from `swap-solver/.env` (`PRIVATE_KEY`, `HTLC_ESCROW_ADDRESS`, etc.).
 The daemon reads `swap-solver/.env` + `.env.local` via the npm script.
 
+**Supabase migration 010 (HTLC RLS lockdown):** before mainnet, paste
+`supabase/migrations/010_htlc_orders_rls_lockdown.sql` into the Supabase SQL Editor
+so `htlc_orders` and `solver_orders` are not readable via the anon REST key.
+RLS enabled with no policies is intentional — only the service-role key (server) retains access.
+
 **Legacy (mainnet OIF path only — not HTLC):** `npm run dev:all` starts solver API + watch +
 app; HTLC swaps do **not** need this.
 

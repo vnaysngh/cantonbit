@@ -277,6 +277,72 @@ Status: Fixed.
 
 See also: `docs/HTLC-SECRET-VAULT.md` (Issue B) for client vault context.
 
+## Follow-up: whole-codebase review (2026-06-13)
+
+A full security + HTLC-design-conformance review (every API route, the solver
+daemon, keccak parity, the secret vault, env/deploy/RLS, and quote/amount binding)
+confirmed the five core HTLC invariants hold and found no CRITICAL/HIGH auth bypass.
+Fixes applied from that review:
+
+- **Quote tolerance is a drift buffer only (was 1%, now 30bps).**
+  `ORDER_AMOUNT_TOLERANCE_BPS` in `lib/htlc-quote.ts`. The platform fee is already
+  subtracted inside the quote (`finish` → `fresh.outUnits` is net of fee), so the
+  validation slack must cover ONLY ~60s of honest price drift, not also "exceed the
+  fee." The old 1% let a user reclaim the fee as a standing skim against solver
+  float on every order. Status: Fixed.
+
+- **Defense-in-depth EVM-lock check in `recordCounterClaimed`.**
+  `lib/htlc-service-singleton.ts`. The record-only reveal path now calls
+  `verifyEvmLock` for any `evm-to-canton` order. Safe before (forward managed
+  rejected; forward Loop reveals via `claimCounter`), but now a future change that
+  routes a forward order here cannot become a late-reveal solver-robbery path.
+  Status: Fixed.
+
+- **Price cache stale window 10min → 90s + ops alert.** `lib/htlc-quote.ts`.
+  A 10-min-stale price can defeat the de-peg breaker during a fast depeg that starts
+  right after a source failure. Now refuses to quote beyond 90s and `alert()`s when
+  serving stale. Status: Fixed.
+
+- **RLS lockdown for `htlc_orders` + `solver_orders`.**
+  `supabase/migrations/010_htlc_orders_rls_lockdown.sql`. These tables had RLS
+  disabled (server-only by convention); now anon/authenticated grants are revoked
+  and RLS is enabled (deny-all; service_role bypasses) so order data can't be read
+  via the public anon key. Status: Fixed (apply the migration).
+
+- **`NEXT_PUBLIC_HTLC_ESCROW` fails closed in production.**
+  Single resolver `HTLC_ESCROW_ADDRESS` in `lib/swap-evm.ts` (used by the service,
+  swap page, and orders page). A mainnet deploy that forgets the var now throws
+  instead of silently pointing the EVM leg at the Base-Sepolia testnet escrow.
+  Status: Fixed.
+
+- **Credential-adjacent logging removed.** `lib/auth.ts`. `clientId`/`tokenUrl`
+  now log only in dev; the raw Authentik error body is no longer dumped. Status: Fixed.
+
+Still open (tracked, pre-mainnet): rotate the devnet Keycloak secret (confirm it's
+not in git history); add a v1-vault TTL purge; Tier-2 non-extractable IndexedDB vault key.
+
+Closed from the same review (2026-06-13 follow-up):
+
+- **`__setLoopUnlockBypassForTests` production guard.** `lib/secret-vault.ts` throws if
+  called when `NODE_ENV === "production"`. Status: Fixed.
+
+- **`swap-solver/src/htlc-swap-service.ts` marked reference-only.** Header documents that
+  production lifecycle is `lib/htlc-service-singleton.ts`; this file has no margin check
+  and is for tests/docs only. Status: Fixed.
+
+- **App `generateSecret` / `secretToPreimage` canonical vector test.** `lib/htlc-client.test.ts`
+  pins the EVM/Daml hashLock parity vector. Status: Fixed.
+
+- **Stale GET comment removed.** `app/api/htlc/route.ts` now points to `/api/htlc/history`.
+  Status: Fixed.
+
+- **Quote module header doc drift.** `lib/htlc-quote.ts` file comment now says 90s stale window.
+  Status: Fixed.
+
+- **Migration 010 RLS lockdown.** `supabase/migrations/010_htlc_orders_rls_lockdown.sql`
+  — paste into Supabase SQL Editor (revoke anon/authenticated grants + enable RLS with
+  no policies; service_role bypasses). Status: Fixed (applied on dev project).
+
 ## Operational Notes
 
 - Upload `canton-htlc/.daml/dist/cbtc-htlc-hardened-0.1.0.dar` to the participant before enabling on-ledger HTLC flows that use the hardened package id.

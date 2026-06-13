@@ -88,6 +88,9 @@ let loopUnlockBypassForTests = false;
 
 /** @internal test hook — bypass Loop signMessage gate without exposing on prod context type. */
 export function __setLoopUnlockBypassForTests(enabled: boolean): void {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("__setLoopUnlockBypassForTests is disabled in production");
+  }
   loopUnlockBypassForTests = enabled;
 }
 

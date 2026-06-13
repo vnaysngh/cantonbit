@@ -81,6 +81,25 @@ export const SWAP_CHAIN: SwapChain = (() => {
   return override ? { ...base, wbtc: override } : base;
 })();
 
+/**
+ * The HTLC escrow contract address — single source of truth (client + server).
+ * In PRODUCTION, NEXT_PUBLIC_HTLC_ESCROW is REQUIRED: a missing var must NOT
+ * silently fall back to the Base-Sepolia testnet escrow, or a mainnet deploy that
+ * forgot to set it would point the EVM leg at the wrong network/contract and
+ * strand funds. In dev we allow the documented testnet default for convenience.
+ */
+const TESTNET_HTLC_ESCROW = "0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1";
+export const HTLC_ESCROW_ADDRESS: string = (() => {
+  const configured = process.env.NEXT_PUBLIC_HTLC_ESCROW;
+  if (configured) return configured;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "NEXT_PUBLIC_HTLC_ESCROW must be set in production — refusing to fall back to the testnet escrow",
+    );
+  }
+  return TESTNET_HTLC_ESCROW;
+})();
+
 const MAX_UINT256 = "0x" + "f".repeat(64);
 
 /** Left-pad a hex string (no 0x) to 32 bytes. */

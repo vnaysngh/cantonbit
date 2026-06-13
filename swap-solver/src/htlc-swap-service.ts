@@ -1,4 +1,11 @@
 /**
+ * REFERENCE / TEST ONLY — NOT WIRED TO PRODUCTION ROUTES.
+ *
+ * Production HTLC lifecycle (margin checks, Loop paths, on-ledger HtlcLock, etc.)
+ * lives in `lib/htlc-service-singleton.ts`. This module is kept for
+ * `htlc-swap-service.test.ts` and design docs only — it has no `verifyEvmLock` and
+ * must not be imported by daemons or API handlers.
+ *
  * HTLC swap service (B-FE1/B-FE2/B-FE4) — the order lifecycle + the Cancore-style
  * /htlc API, driving the REAL user-claims atomic-swap flow (not a plain transfer).
  *

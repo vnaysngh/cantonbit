@@ -54,10 +54,11 @@ function isFresh(token: CachedToken, nowMs: number): boolean {
 async function fetchNewToken(): Promise<CachedToken> {
   const { tokenUrl, clientId, clientSecret, scope } = readEnv();
 
-  console.log(`[auth] fetching new JWT from Authentik`);
-  console.log(`[auth] tokenUrl=${tokenUrl}`);
-  console.log(`[auth] clientId=${clientId}`);
-  console.log(`[auth] scope=${scope}`);
+  // Don't log clientId/tokenUrl in production — they're half a credential pair in a
+  // shared log sink. Endpoint/client details only at debug.
+  if (process.env.NODE_ENV !== "production") {
+    console.log(`[auth] fetching new JWT from Authentik tokenUrl=${tokenUrl} clientId=${clientId} scope=${scope}`);
+  }
 
   const body = new URLSearchParams({
     grant_type: "client_credentials",
@@ -73,11 +74,10 @@ async function fetchNewToken(): Promise<CachedToken> {
     cache: "no-store",
   });
 
-  console.log(`[auth] Authentik response status=${res.status}`);
-
   if (!res.ok) {
     const text = await res.text().catch(() => "<no body>");
-    console.error(`[auth] Authentik token request failed status=${res.status} body=${text}`);
+    // Log only the status — the error body can echo back submitted OAuth params/hints.
+    console.error(`[auth] Authentik token request failed status=${res.status}`);
     throw new Error(
       `Authentik token request failed (${res.status} ${res.statusText}): ${text}`,
     );

@@ -1,6 +1,6 @@
 /**
  * POST /api/htlc — create an HTLC swap order (Cancore step 1).
- * GET  /api/htlc — list orders (debug / order book).
+ * Order history is GET /api/htlc/history (authenticated), not this route.
  *
  * The user has generated the secret client-side and committed to H + timelocks in
  * a signed order; this records the order server-side so the solver can match it.

@@ -32,12 +32,11 @@ import {
 } from "@/lib/secret-vault";
 import { listLoopCbtcHoldingCids } from "@/lib/loop-holdings";
 import { getSwapErrorMessage } from "@/lib/swap-api";
-import { SWAP_CHAIN } from "@/lib/swap-evm";
+import { SWAP_CHAIN, HTLC_ESCROW_ADDRESS } from "@/lib/swap-evm";
 import { cn } from "@/lib/utils";
 
-const HTLC_ESCROW =
-  process.env.NEXT_PUBLIC_HTLC_ESCROW ??
-  "0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1";
+// Shared resolver — fails closed in production if NEXT_PUBLIC_HTLC_ESCROW is unset.
+const HTLC_ESCROW = HTLC_ESCROW_ADDRESS;
 const EVM_CHAIN = SWAP_CHAIN.name;
 
 interface HistoryOrder {

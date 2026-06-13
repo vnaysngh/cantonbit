@@ -15,7 +15,7 @@ import { keccak_256 } from "@noble/hashes/sha3";
 
 import { getHoldings } from "./canton";
 import { alert } from "./alert";
-import { SWAP_CHAIN } from "./swap-evm";
+import { SWAP_CHAIN, HTLC_ESCROW_ADDRESS } from "./swap-evm";
 import {
   createTransfer,
   findOfferFromSender,
@@ -51,9 +51,7 @@ function toHexLower(bytes: Uint8Array): string {
   );
 }
 
-const HTLC_ESCROW_ADDR =
-  process.env.NEXT_PUBLIC_HTLC_ESCROW ??
-  "0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1";
+const HTLC_ESCROW_ADDR = HTLC_ESCROW_ADDRESS;
 /** Re-export for daemon alignment — defined in htlc-evm-lock-guard. */
 export { EVM_CLAIM_MARGIN_SECONDS };
 /** Loop-seller custody: if the WBTC counter-lock hasn't happened within this grace,
@@ -788,6 +786,15 @@ class HtlcService {
     if (o.status !== "counter_locked" && o.status !== "counter_claimed") {
       throw new Error(`unexpected status ${o.status}`);
     }
+    // DEFENSE-IN-DEPTH (solver-robbery guard): for ANY forward order, re-verify the
+    // EVM WBTC lock has enough margin BEFORE we record the reveal — same guard as
+    // claimCounter/claimCounterAsBackend. Today no forward order reaches this path
+    // without that check already having run (forward managed is rejected above;
+    // forward Loop reveals via claimCounter), so this is belt-and-suspenders: if a
+    // future change ever routes a forward order here, a late reveal still cannot rob
+    // the solver. Reverse orders skip it — there the solver reads the preimage from
+    // the on-chain Claimed event itself and is never robbed by a forged record.
+    if (o.direction === "evm-to-canton") await verifyEvmLock(o);
     // VALIDATE the preimage (same gate as the managed path). The browser supplies it,
     // so reject a junk preimage here — recording a bad one as counter_claimed would
     // stall the solver's EVM claim with an unusable secret. (The on-chain claim also

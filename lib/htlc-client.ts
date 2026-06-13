@@ -34,10 +34,17 @@ const bytesToHex = (b: Uint8Array) =>
     .map((x) => x.toString(16).padStart(2, "0"))
     .join("");
 
-/** Generate a 32-byte secret + its keccak256 hashLock (over the raw bytes). */
-export function generateSecret(): { secret: string; hashLock: string } {
-  const raw = new Uint8Array(32);
-  (globalThis.crypto as Crypto).getRandomValues(raw);
+/** Generate a 32-byte secret + its keccak256 hashLock (over the raw bytes).
+ *  `randomBytes` is injected for testability; defaults to Web Crypto. */
+export function generateSecret(
+  randomBytes: (n: number) => Uint8Array = (n) => {
+    const raw = new Uint8Array(n);
+    (globalThis.crypto as Crypto).getRandomValues(raw);
+    return raw;
+  },
+): { secret: string; hashLock: string } {
+  const raw = randomBytes(32);
+  if (raw.length !== 32) throw new Error("secret must be 32 bytes");
   const secret = bytesToHex(raw);
   const hashLock = bytesToHex(keccak_256(raw));
   return { secret, hashLock };

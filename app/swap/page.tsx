@@ -36,6 +36,7 @@ import {
 import {
   PERMIT2_ADDRESS,
   SWAP_CHAIN,
+  HTLC_ESCROW_ADDRESS,
   encodeApprove,
   encodeAllowance,
   encodeBalanceOf,
@@ -74,10 +75,8 @@ import {
 } from "@/lib/htlc-timelock";
 
 // HTLC EVM leg config (Base Sepolia). The new trustless escrow (replaces the old
-// oracle InputSettlerEscrow for swaps).
-const HTLC_ESCROW =
-  process.env.NEXT_PUBLIC_HTLC_ESCROW ??
-  "0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1";
+// oracle InputSettlerEscrow for swaps). Shared resolver fails closed in production.
+const HTLC_ESCROW = HTLC_ESCROW_ADDRESS;
 const SOLVER_EVM =
   process.env.NEXT_PUBLIC_SOLVER_EVM ??
   "0x0B95ec21579aee6Ef7b712976bD86689D68b5A08";

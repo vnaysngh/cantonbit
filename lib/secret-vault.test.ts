@@ -144,6 +144,19 @@ test("loop recall rejects wrong public_key", async () => {
   }
 });
 
+test("__setLoopUnlockBypassForTests throws in production", () => {
+  const prev = process.env.NODE_ENV;
+  process.env.NODE_ENV = "production";
+  try {
+    assert.throws(
+      () => __setLoopUnlockBypassForTests(true),
+      /disabled in production/,
+    );
+  } finally {
+    process.env.NODE_ENV = prev;
+  }
+});
+
 test("reverse recall requires matching EVM address", async () => {
   __setVaultStorageForTests(mockStorage());
   const meta = {
