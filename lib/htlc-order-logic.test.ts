@@ -55,3 +55,24 @@ test("filterHistoryOrders: drops abandoned drafts and foreign EVM wallets", () =
   assert.equal(filterHistoryOrders(orders).length, 2);
   assert.equal(filterHistoryOrders(orders, { userEvmAddress: "0xaaa" }).length, 1);
 });
+
+test("filterHistoryOrders: hides other EVM wallets when filter is set", () => {
+  const orders = [
+    {
+      direction: "evm-to-canton" as const,
+      status: "main_claimed" as const,
+      mainLockTx: "0xlock",
+      userEvmAddress: "0xbbb",
+    },
+    {
+      direction: "evm-to-canton" as const,
+      status: "main_claimed" as const,
+      mainLockTx: "0xlock",
+      userEvmAddress: "0xaaa",
+    },
+  ];
+  assert.equal(
+    filterHistoryOrders(orders, { userEvmAddress: "0xaaa" }).length,
+    1
+  );
+});

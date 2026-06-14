@@ -21,10 +21,8 @@ export async function POST(
     const { preimage } = await req.json();
     if (!preimage)
       return NextResponse.json({ error: "missing preimage" }, { status: 400 });
-    const { order, updateId } = await htlcService().claimCounterAsBackend(
-      id,
-      preimage
-    );
+    const svc = htlcService();
+    const { order, updateId } = await svc.claimCounterAsBackend(id, preimage);
     return NextResponse.json({ ok: true, updateId, status: order.status });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

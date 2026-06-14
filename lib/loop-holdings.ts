@@ -10,6 +10,8 @@
  */
 
 import { NETWORK } from "@/lib/constants";
+import type { InstrumentId } from "@/lib/constants";
+import { matchesInstrument } from "@/lib/canton-assets";
 
 /** Aggregate holding shape from provider.getHolding(). */
 export interface LoopHolding {
@@ -35,23 +37,32 @@ interface ProviderLike {
   }) => Promise<unknown[]>;
 }
 
+function isInstrument(h: LoopHolding, instrumentId: InstrumentId): boolean {
+  return matchesInstrument(h.instrument_id, instrumentId);
+}
+
 function isOurCbtc(h: LoopHolding): boolean {
-  return (
-    h.instrument_id?.id === NETWORK.instrumentId.id &&
-    h.instrument_id?.admin === NETWORK.instrumentId.admin
-  );
+  return isInstrument(h, NETWORK.instrumentId);
+}
+
+/** Unlocked + locked totals (decimal strings) from the Loop aggregate. */
+export async function readLoopInstrumentBalance(
+  provider: ProviderLike,
+  instrumentId: InstrumentId
+): Promise<{ total: string; locked: string; count: number }> {
+  const all = (await provider.getHolding()) as unknown as LoopHolding[];
+  const matched = all.filter((h) => isInstrument(h, instrumentId));
+  if (matched.length === 0) return { total: "0", locked: "0", count: 0 };
+  const total = sumDecimals(matched.map((h) => h.total_unlocked_coin ?? "0"));
+  const locked = sumDecimals(matched.map((h) => h.total_locked_coin ?? "0"));
+  return { total, locked, count: matched.length };
 }
 
 /** Unlocked + locked CBTC totals (BTC decimal strings) from the Loop aggregate. */
 export async function readLoopCbtcBalance(
   provider: ProviderLike
 ): Promise<{ total: string; locked: string; count: number }> {
-  const all = (await provider.getHolding()) as unknown as LoopHolding[];
-  const cbtc = all.filter(isOurCbtc);
-  if (cbtc.length === 0) return { total: "0", locked: "0", count: 0 };
-  const total = sumDecimals(cbtc.map((h) => h.total_unlocked_coin ?? "0"));
-  const locked = sumDecimals(cbtc.map((h) => h.total_locked_coin ?? "0"));
-  return { total, locked, count: cbtc.length };
+  return readLoopInstrumentBalance(provider, NETWORK.instrumentId);
 }
 
 /** CC (Amulet) total from the Loop wallet aggregate — same instrument id the ledger uses. */
@@ -71,8 +82,9 @@ export async function readLoopCcBalance(provider: ProviderLike): Promise<string>
  *  Defensive shape-matching — the SDK returns per-contract records whose payload
  *  layout varies; we match Holding templates carrying our CBTC instrument id and
  *  skip anything that looks locked. */
-export async function listLoopCbtcHoldingCids(
-  provider: Pick<ProviderLike, "getActiveContracts">
+export async function listLoopInstrumentHoldingCids(
+  provider: Pick<ProviderLike, "getActiveContracts">,
+  instrumentId: InstrumentId
 ): Promise<string[]> {
   const HOLDING_IFACE =
     "#splice-api-token-holding-v1:Splice.Api.Token.HoldingV1:Holding";
@@ -80,14 +92,9 @@ export async function listLoopCbtcHoldingCids(
   const HOLDING_TPL =
     "8107899ac4723ce986bf7d27416534e576e54b92161e46150a595fb78ff3d3a1:Utility.Registry.Holding.V0.Holding:Holding";
 
-  // Loop's backend may or may not support interface filtering — fall through
-  // filtered → template → UNFILTERED until something returns contracts.
+  // Loop requires templateId OR interfaceId — never call unfiltered (400).
   let raw: unknown[] = [];
-  for (const params of [
-    { interfaceId: HOLDING_IFACE },
-    { templateId: HOLDING_TPL },
-    undefined
-  ] as const) {
+  for (const params of [{ interfaceId: HOLDING_IFACE }, { templateId: HOLDING_TPL }] as const) {
     try {
       raw = await provider.getActiveContracts(
         params as { interfaceId?: string } | undefined
@@ -115,27 +122,34 @@ export async function listLoopCbtcHoldingCids(
     const cid = (ev?.contractId ?? ev?.contract_id) as string | undefined;
     const tpl = String(ev?.templateId ?? ev?.template_id ?? "");
     if (!cid) continue;
-    // Loop IGNORES the interface filter (Amulets came back) — filter by template:
-    // the CBTC registry's concrete Holding template (Utility.Registry...:Holding).
-    if (
-      !/Utility\.Registry.*:Holding$/.test(tpl) &&
-      !tpl.startsWith(
+
+    const isRegistryHolding =
+      /Utility\.Registry.*:Holding$/.test(tpl) ||
+      tpl.startsWith(
         "8107899ac4723ce986bf7d27416534e576e54b92161e46150a595fb78ff3d3a1"
-      )
-    )
-      continue;
+      );
+    const isAmuletHolding =
+      instrumentId.id === "Amulet" &&
+      (/Amulet/.test(tpl) ||
+        /Splice\.Api\.Token\.HoldingV1/.test(tpl) ||
+        /Splice\.Amulet/.test(tpl));
+
+    if (!isRegistryHolding && !isAmuletHolding) continue;
     const json = JSON.stringify(ev);
     // If the payload is present, require our instrument id and skip locked holdings
     // ("lock":null is fine). If only the blob is present, the template match above
     // is the discriminator (the CBTC registry template carries only CBTC).
     const hasPayload =
       json.includes("createArgument") || json.includes("interfaceViews");
-    if (hasPayload && !json.includes(NETWORK.instrumentId.id)) continue;
+    if (hasPayload && !json.includes(instrumentId.id)) continue;
+    if (instrumentId.id !== "Amulet" && instrumentId.admin && !json.includes(instrumentId.admin)) {
+      continue;
+    }
     if (/"lock"\s*:\s*\{/.test(json)) continue;
     out.push(cid);
   }
   console.debug(
-    `[loop-holdings] matched ${out.length} unlocked CBTC holding(s) of ${raw.length} contract(s)`
+    `[loop-holdings] matched ${out.length} unlocked ${instrumentId.id} holding(s) of ${raw.length} contract(s)`
   );
   if (out.length === 0 && raw.length > 0) {
     // Diagnostics for the next failure: show what the wallet actually returned.
@@ -145,6 +159,13 @@ export async function listLoopCbtcHoldingCids(
     );
   }
   return out;
+}
+
+/** LOOP SELLER: individual UNLOCKED CBTC holding contract-ids (default instrument). */
+export async function listLoopCbtcHoldingCids(
+  provider: Pick<ProviderLike, "getActiveContracts">
+): Promise<string[]> {
+  return listLoopInstrumentHoldingCids(provider, NETWORK.instrumentId);
 }
 
 /** Sum decimal BTC strings via integer sats (no float drift, 8dp). */

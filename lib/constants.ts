@@ -162,6 +162,9 @@ export const JWT_REFRESH_BUFFER_SECONDS = 5 * 60;
 /** Display threshold for CC badge (informational only — swaps do not block on CC). */
 export const MIN_CC_BALANCE = 10;
 
+/** Minimum CC balance before EnableCC onboarding (Cancore-style gate). */
+export const MIN_CC_TO_ENABLE = 2;
+
 /** Platform swap fee in basis points (100 = 1% on quoted output). Override server-side
  *  with PLATFORM_FEE_BPS; UI estimate with NEXT_PUBLIC_FEE_BPS. Legacy solver: SOLVER_FEE_BPS. */
 export const DEFAULT_PLATFORM_FEE_BPS = 100;

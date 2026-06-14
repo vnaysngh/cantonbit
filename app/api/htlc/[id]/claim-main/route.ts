@@ -16,11 +16,9 @@ export async function POST(
   try {
     const auth = requireDaemon(req);
     if (auth.error) return auth.error;
+    const svc = htlcService();
     const body = await req.json().catch(() => ({}));
-    const { order, updateId } = await htlcService().claimMainAsSolver(
-      id,
-      body.preimage
-    );
+    const { order, updateId } = await svc.claimMainAsSolver(id, body.preimage);
     return NextResponse.json({ order, updateId });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

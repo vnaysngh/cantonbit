@@ -17,6 +17,7 @@
 import "server-only";
 
 import { getLedgerJwt } from "./auth";
+import { getPendingTransfers } from "./canton";
 import type { InstrumentId } from "./constants";
 import { NETWORK } from "./constants";
 import { fetchCcRegistry } from "./cc-registry";
@@ -63,6 +64,8 @@ interface DisclosedContract {
   createdEventBlob: string;
   synchronizerId: string;
 }
+
+export type { DisclosedContract as TransferDisclosedContract };
 
 interface TransferFactoryResponse {
   factoryId: string;
@@ -133,6 +136,33 @@ async function fetchAcceptChoiceContext(
   });
 }
 
+function cbtcRejectChoiceContextUrl(
+  registrarAdmin: string,
+  offerContractId: string
+): string {
+  return `${NETWORK.registryUrl}/api/token-standard/v0/registrars/${registrarAdmin}/registry/transfer-instruction/v1/${offerContractId}/choice-contexts/reject`;
+}
+
+async function fetchRejectChoiceContext(
+  kind: TransferRegistryKind,
+  registrarAdmin: string,
+  offerContractId: string
+): Promise<Response> {
+  const body = JSON.stringify({ meta: {}, excludeDebugFields: true });
+  if (kind === "cc") {
+    return fetchCcRegistry(
+      `/transfer-instruction/v1/${offerContractId}/choice-contexts/reject`,
+      { method: "POST", body }
+    );
+  }
+  return fetch(cbtcRejectChoiceContextUrl(registrarAdmin, offerContractId), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    cache: "no-store"
+  });
+}
+
 /** Infer registry kind from an offer's instrument id. */
 export function registryKindForInstrument(
   instrumentId?: InstrumentId | null
@@ -149,6 +179,345 @@ export interface CreateTransferResult {
    *  the transfer COMPLETED in one step (receiver preapproval auto-accepted it). */
   transferKind: string;
 }
+
+export interface BuiltTransferLeg {
+  command: unknown;
+  disclosedContracts: DisclosedContract[];
+  transferKind: string;
+  synchronizerId: string;
+  registrarAdmin: string;
+  registryKind: TransferRegistryKind;
+  instrumentId: InstrumentId;
+}
+
+export interface BuiltAcceptLeg {
+  command: unknown;
+  disclosedContracts: DisclosedContract[];
+  synchronizerId: string;
+}
+
+function mergeDisclosed(
+  batches: DisclosedContract[][]
+): DisclosedContract[] {
+  const seen = new Set<string>();
+  const out: DisclosedContract[] = [];
+  for (const batch of batches) {
+    for (const dc of batch) {
+      if (seen.has(dc.contractId)) continue;
+      seen.add(dc.contractId);
+      out.push(dc);
+    }
+  }
+  return out;
+}
+
+function pickSynchronizerId(batches: DisclosedContract[][]): string {
+  for (const batch of batches) {
+    const hit = batch.find((d) => d.synchronizerId)?.synchronizerId;
+    if (hit) return hit;
+  }
+  return "";
+}
+
+/** All legs must share one synchronizer for atomic multi-command submit. */
+export function assertSameSynchronizer(
+  legs: { synchronizerId: string }[],
+  label = "transfer legs"
+): string {
+  const ids = legs.map((l) => l.synchronizerId).filter(Boolean);
+  if (ids.length === 0) {
+    throw new Error(`${label}: missing synchronizerId`);
+  }
+  const syncId = ids[0]!;
+  for (const id of ids) {
+    if (id !== syncId) {
+      throw new Error(
+        `${label}: different synchronizers (${syncId.slice(0, 12)}… vs ${id.slice(0, 12)}…) — cannot submit atomically`
+      );
+    }
+  }
+  return syncId;
+}
+
+export function stampDisclosedSynchronizer(
+  disclosed: DisclosedContract[],
+  synchronizerId: string
+): DisclosedContract[] {
+  return disclosed.map((dc) => ({
+    ...dc,
+    synchronizerId: dc.synchronizerId || synchronizerId
+  }));
+}
+
+/** Build TransferFactory_Transfer without submitting (for atomic multi-leg settlement). */
+export async function buildTransferExercise(params: {
+  senderParty: string;
+  receiverParty: string;
+  amount: string;
+  inputHoldings: Holding[];
+  expirationSeconds?: number;
+  instrumentId?: InstrumentId;
+  registrarAdmin?: string;
+  registryKind?: TransferRegistryKind;
+  assetSymbol?: string;
+  memo?: string;
+}): Promise<BuiltTransferLeg> {
+  const {
+    senderParty,
+    receiverParty,
+    amount,
+    inputHoldings,
+    expirationSeconds = DEFAULT_TRANSFER_EXPIRATION_SECONDS,
+    instrumentId = NETWORK.instrumentId,
+    registrarAdmin = NETWORK.decentralizedPartyId,
+    registryKind = "cbtc",
+    assetSymbol = instrumentId.id === "Amulet" ? "CC" : "CBTC",
+    memo
+  } = params;
+  const now = new Date().toISOString();
+  const ttlMs = Math.max(60, expirationSeconds) * 1000;
+  const executeBefore = new Date(Date.now() + ttlMs).toISOString();
+  const transferMeta = buildTransferMeta(memo);
+  const picked = selectTransferHoldings(inputHoldings, amount, assetSymbol);
+  const inputHoldingCids = picked.map((h) => h.contractId);
+  const transferPayload = {
+    sender: senderParty,
+    receiver: receiverParty,
+    amount,
+    instrumentId,
+    lock: null,
+    requestedAt: now,
+    executeBefore,
+    inputHoldingCids,
+    meta: transferMeta
+  };
+  const factoryRes = await fetchTransferFactoryContext(
+    registryKind,
+    registrarAdmin,
+    transferPayload
+  );
+  if (!factoryRes.ok) {
+    const text = await factoryRes.text().catch(() => "<no body>");
+    throw new Error(
+      `TransferFactory registry call failed (${factoryRes.status}): ${text}`
+    );
+  }
+  const factory = (await factoryRes.json()) as TransferFactoryResponse;
+  const disclosedContracts: DisclosedContract[] = [
+    ...factory.choiceContext.disclosedContracts.map((dc) => ({
+      ...dc,
+      synchronizerId: dc.synchronizerId ?? ""
+    })),
+    ...picked.map((h) => ({
+      templateId: holdingDisclosedTemplateId(h, registryKind),
+      contractId: h.contractId,
+      createdEventBlob: h.createdEventBlob ?? "",
+      synchronizerId: ""
+    }))
+  ];
+  const synchronizerId = pickSynchronizerId([disclosedContracts]);
+  const command = {
+    ExerciseCommand: {
+      templateId: TRANSFER_FACTORY_INTERFACE,
+      contractId: factory.factoryId,
+      choice: "TransferFactory_Transfer",
+      choiceArgument: {
+        expectedAdmin: registrarAdmin,
+        transfer: transferPayload,
+        extraArgs: {
+          context: factory.choiceContext.choiceContextData,
+          meta: { values: {} }
+        }
+      }
+    }
+  };
+  return {
+    command,
+    disclosedContracts,
+    transferKind: factory.transferKind ?? "",
+    synchronizerId,
+    registrarAdmin,
+    registryKind,
+    instrumentId
+  };
+}
+
+/** Build TransferInstruction_Accept without submitting. */
+export async function buildAcceptExercise(params: {
+  offerContractId: string;
+  registrarAdmin?: string;
+  registryKind?: TransferRegistryKind;
+}): Promise<BuiltAcceptLeg> {
+  const {
+    offerContractId,
+    registrarAdmin = NETWORK.decentralizedPartyId,
+    registryKind = "cbtc"
+  } = params;
+  const ctxRes = await fetchAcceptChoiceContext(
+    registryKind,
+    registrarAdmin,
+    offerContractId
+  );
+  if (!ctxRes.ok) {
+    const text = await ctxRes.text().catch(() => "<no body>");
+    throw new Error(`accept choice-contexts failed (${ctxRes.status}): ${text}`);
+  }
+  const ctx = (await ctxRes.json()) as {
+    choiceContextData: unknown;
+    disclosedContracts: DisclosedContract[];
+  };
+  const disclosedContracts = (ctx.disclosedContracts ?? []).map((dc) => ({
+    ...dc,
+    synchronizerId: dc.synchronizerId ?? ""
+  }));
+  const synchronizerId = pickSynchronizerId([disclosedContracts]);
+  const command = {
+    ExerciseCommand: {
+      templateId: TRANSFER_INSTRUCTION_INTERFACE,
+      contractId: offerContractId,
+      choice: "TransferInstruction_Accept",
+      choiceArgument: {
+        extraArgs: { context: ctx.choiceContextData, meta: { values: {} } }
+      }
+    }
+  };
+  return { command, disclosedContracts, synchronizerId };
+}
+
+/** Build TransferInstruction_Reject (receiver declines an inbound offer). */
+export async function buildRejectExercise(params: {
+  offerContractId: string;
+  registrarAdmin?: string;
+  registryKind?: TransferRegistryKind;
+}): Promise<BuiltAcceptLeg> {
+  const {
+    offerContractId,
+    registrarAdmin = NETWORK.decentralizedPartyId,
+    registryKind = "cbtc"
+  } = params;
+  const ctxRes = await fetchRejectChoiceContext(
+    registryKind,
+    registrarAdmin,
+    offerContractId
+  );
+  if (!ctxRes.ok) {
+    const text = await ctxRes.text().catch(() => "<no body>");
+    throw new Error(`reject choice-contexts failed (${ctxRes.status}): ${text}`);
+  }
+  const ctx = (await ctxRes.json()) as {
+    choiceContextData: unknown;
+    disclosedContracts: DisclosedContract[];
+  };
+  const disclosedContracts = (ctx.disclosedContracts ?? []).map((dc) => ({
+    ...dc,
+    synchronizerId: dc.synchronizerId ?? ""
+  }));
+  const synchronizerId = pickSynchronizerId([disclosedContracts]);
+  const command = {
+    ExerciseCommand: {
+      templateId: TRANSFER_INSTRUCTION_INTERFACE,
+      contractId: offerContractId,
+      choice: "TransferInstruction_Reject",
+      choiceArgument: {
+        extraArgs: { context: ctx.choiceContextData, meta: { values: {} } }
+      }
+    }
+  };
+  return { command, disclosedContracts, synchronizerId };
+}
+
+/** Receiver rejects a pending TransferInstruction (unlocks sender funds). */
+export async function rejectTransferOffer(params: {
+  offerContractId: string;
+  actAs: string[];
+  registrarAdmin?: string;
+  registryKind?: TransferRegistryKind;
+  commandId?: string;
+}): Promise<{ updateId: string }> {
+  const built = await buildRejectExercise(params);
+  const commandId =
+    params.commandId ??
+    `reject-${params.offerContractId.slice(0, 16)}-${Date.now()}`;
+  const { updateId } = await submitLedgerCommands({
+    actAs: params.actAs,
+    commands: [built.command],
+    disclosedContracts: built.disclosedContracts,
+    commandId,
+    workflowId: commandId,
+    applicationId: "canton-swap",
+    synchronizerId: built.synchronizerId || undefined
+  });
+  return { updateId };
+}
+
+/** Submit multiple ledger commands atomically (same synchronizer). */
+export async function submitLedgerCommands(params: {
+  actAs: string[];
+  commands: unknown[];
+  disclosedContracts: DisclosedContract[];
+  commandId: string;
+  workflowId?: string;
+  applicationId?: string;
+  /** Pin submission to one synchronizer (stamped on disclosed contracts too). */
+  synchronizerId?: string;
+}): Promise<{
+  updateId: string;
+  eventsById: Record<string, unknown>;
+}> {
+  const jwt = await getLedgerJwt();
+  const disclosedContracts = params.synchronizerId
+    ? stampDisclosedSynchronizer(params.disclosedContracts, params.synchronizerId)
+    : params.disclosedContracts;
+  const body: Record<string, unknown> = {
+    applicationId: params.applicationId ?? "cbtc-app",
+    workflowId: params.workflowId ?? `canton-cmd-${params.commandId}`,
+    commandId: params.commandId,
+    actAs: params.actAs,
+    readAs: params.actAs,
+    commands: params.commands,
+    disclosedContracts
+  };
+  if (params.synchronizerId) {
+    body.synchronizerId = params.synchronizerId;
+  }
+  const res = await fetch(
+    `${NETWORK.ledgerHost}/v2/commands/submit-and-wait-for-transaction-tree`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${jwt}`
+      },
+      cache: "no-store",
+      body: JSON.stringify(body)
+    }
+  );
+  const text = await res.text();
+  if (!res.ok) {
+    if (
+      text.includes("DUPLICATE_COMMAND") ||
+      text.includes("SUBMISSION_ALREADY_IN_FLIGHT")
+    ) {
+      throw new Error(`duplicate command: ${params.commandId}`);
+    }
+    throw new Error(`ledger submit failed (${res.status}): ${text}`);
+  }
+  const json = JSON.parse(text) as {
+    transactionTree?: {
+      updateId: string;
+      eventsById?: Record<string, unknown>;
+    };
+  };
+  return {
+    updateId: json.transactionTree?.updateId ?? "",
+    eventsById: json.transactionTree?.eventsById ?? {}
+  };
+}
+
+export {
+  mergeDisclosed,
+  pickSynchronizerId
+};
 
 /**
  * Phase 1: sender exercises TransferFactory_Transfer to create a TransferInstruction.
@@ -353,18 +722,102 @@ export interface PendingOffer {
 }
 
 /**
- * List active TransferInstruction (a.k.a. TransferOffer) contracts where the
- * given party is the receiver.
+ * List active TransferInstruction contracts where the given party is the receiver.
+ * Uses the Canton interface-filter ACS path (same as getPendingTransfers).
  */
 export async function listPendingOffers(partyId: string): Promise<PendingOffer[]> {
-  const all = await listPendingOffersAs(partyId);
-  return all.filter((o) => o.receiver === partyId);
+  const transfers = await getPendingTransfers(partyId);
+  return transfers.map((t) => ({
+    contractId: t.contractId,
+    sender: t.payload.sender,
+    receiver: t.payload.receiver,
+    amountBtc: t.payload.amount,
+    requestedAt: "",
+    executeBefore: "",
+    inputHoldingCids: [] as string[],
+    instrumentId: t.payload.instrumentId
+  }));
 }
 
 /** Outgoing offers the sender created and are still pending acceptance. */
 export async function listOutgoingOffers(senderParty: string): Promise<PendingOffer[]> {
   const all = await listPendingOffersAs(senderParty);
   return all.filter((o) => o.sender === senderParty);
+}
+
+type RawTransferFields = {
+  sender?: string;
+  receiver?: string;
+  amount?: string;
+  requestedAt?: string;
+  executeBefore?: string;
+  inputHoldingCids?: string[];
+  instrumentId?: InstrumentId;
+};
+
+function pickTransferInstructionSuffix(interfaceId: string): string {
+  return interfaceId.split(":").slice(1).join(":");
+}
+
+/** Read transfer fields from createArgument or Splice interfaceViews (required for ACS). */
+function readTransferInstructionFields(ev: {
+  createArgument?: { transfer?: RawTransferFields };
+  interfaceViews?: Array<{
+    interfaceId?: string;
+    viewValue?: unknown;
+    viewStatus?: { code?: number };
+  }>;
+}): RawTransferFields | null {
+  const arg = ev.createArgument?.transfer;
+  if (arg?.receiver) return arg;
+
+  const wantSuffix = pickTransferInstructionSuffix(TRANSFER_INSTRUCTION_INTERFACE);
+  for (const view of ev.interfaceViews ?? []) {
+    if (view.viewStatus?.code) continue;
+    const id = view.interfaceId ?? "";
+    if (
+      id !== TRANSFER_INSTRUCTION_INTERFACE &&
+      pickTransferInstructionSuffix(id) !== wantSuffix
+    ) {
+      continue;
+    }
+    const vv = view.viewValue as
+      | { transfer?: RawTransferFields }
+      | RawTransferFields
+      | undefined;
+    if (!vv || typeof vv !== "object") continue;
+    const t = ("transfer" in vv ? vv.transfer : vv) as RawTransferFields | undefined;
+    if (t?.receiver) return t;
+  }
+  return null;
+}
+
+function unwrapAcsEntries(raw: unknown): Array<{
+  JsActiveContract: {
+    createdEvent: {
+      contractId: string;
+      templateId?: string;
+      createArgument?: { transfer?: RawTransferFields };
+      interfaceViews?: Array<{
+        interfaceId?: string;
+        viewValue?: unknown;
+        viewStatus?: { code?: number };
+      }>;
+    };
+  };
+}> {
+  if (!Array.isArray(raw)) return [];
+  const out: ReturnType<typeof unwrapAcsEntries> = [];
+  for (const item of raw) {
+    const entry =
+      (item as { contractEntry?: { JsActiveContract?: unknown } })?.contractEntry
+        ?.JsActiveContract ??
+      (item as { JsActiveContract?: unknown })?.JsActiveContract;
+    if (entry && typeof entry === "object") {
+      out.push(entry as ReturnType<typeof unwrapAcsEntries>[number]);
+    }
+  }
+  return out;
 }
 
 /**
@@ -390,7 +843,13 @@ async function listPendingOffersAs(partyId: string): Promise<PendingOffer[]> {
             cumulative: [
               {
                 identifierFilter: {
-                  WildcardFilter: { value: { includeCreatedEventBlob: false } },
+                  InterfaceFilter: {
+                    value: {
+                      interfaceId: TRANSFER_INSTRUCTION_INTERFACE,
+                      includeInterfaceView: true,
+                      includeCreatedEventBlob: false,
+                    },
+                  },
                 },
               },
             ],
@@ -408,39 +867,11 @@ async function listPendingOffersAs(partyId: string): Promise<PendingOffer[]> {
     throw new Error(`listPendingOffers ACS query failed (${acsRes.status}): ${text}`);
   }
 
-  const items = (await acsRes.json()) as Array<{
-    contractEntry?: {
-      JsActiveContract?: {
-        createdEvent?: {
-          contractId: string;
-          templateId: string;
-          createArgument?: {
-            transfer?: {
-              sender?: string;
-              receiver?: string;
-              amount?: string;
-              requestedAt?: string;
-              executeBefore?: string;
-              inputHoldingCids?: string[];
-              instrumentId?: InstrumentId;
-            };
-          };
-        };
-      };
-    };
-  }>;
-
   const out: PendingOffer[] = [];
-  for (const item of items) {
-    const ev = item.contractEntry?.JsActiveContract?.createdEvent;
-    if (!ev) continue;
-    if (
-      !ev.templateId.includes("TransferOffer") &&
-      !ev.templateId.includes("TransferInstruction")
-    ) {
-      continue;
-    }
-    const t = ev.createArgument?.transfer;
+  for (const entry of unwrapAcsEntries(await acsRes.json())) {
+    const ev = entry.JsActiveContract.createdEvent;
+    if (!ev?.contractId) continue;
+    const t = readTransferInstructionFields(ev);
     if (!t?.receiver) continue;
     out.push({
       contractId: ev.contractId,
@@ -450,7 +881,7 @@ async function listPendingOffersAs(partyId: string): Promise<PendingOffer[]> {
       requestedAt: t.requestedAt ?? "",
       executeBefore: t.executeBefore ?? "",
       inputHoldingCids: t.inputHoldingCids ?? [],
-      instrumentId: t.instrumentId
+      instrumentId: t.instrumentId,
     });
   }
   return out;
@@ -464,54 +895,71 @@ async function listPendingOffersAs(partyId: string): Promise<PendingOffer[]> {
  * contracts are disclosed via the factory choice-context.
  */
 export async function prepareTransferCommand(params: {
-  senderParty: string;     // the Loop user
-  receiverParty: string;   // our venue/solver party
+  senderParty: string;
+  receiverParty: string;
   amountBtc: string;
   inputHoldingCids: string[];
+  instrumentId?: InstrumentId;
+  registrarAdmin?: string;
+  registryKind?: TransferRegistryKind;
+  expirationSeconds?: number;
 }): Promise<{ command: unknown; disclosedContracts: DisclosedContract[]; synchronizerId: string }> {
+  const instrumentId = params.instrumentId ?? NETWORK.instrumentId;
+  const registryKind =
+    params.registryKind ?? registryKindForInstrument(instrumentId);
+  const registrarAdmin =
+    params.registrarAdmin ??
+    instrumentId.admin ??
+    NETWORK.decentralizedPartyId;
+  const ttlMs =
+    Math.max(60, params.expirationSeconds ?? DEFAULT_TRANSFER_EXPIRATION_SECONDS) *
+    1000;
   const now = new Date().toISOString();
-  const executeBefore = new Date(Date.now() + TRANSFER_TTL_MS).toISOString();
+  const executeBefore = new Date(Date.now() + ttlMs).toISOString();
   const transfer = {
     sender: params.senderParty,
     receiver: params.receiverParty,
     amount: params.amountBtc,
-    instrumentId: NETWORK.instrumentId,
+    instrumentId,
     lock: null,
     requestedAt: now,
     executeBefore,
     inputHoldingCids: params.inputHoldingCids,
-    meta: { values: {} },
+    meta: { values: {} }
   };
-  const registryUrl = `${NETWORK.registryUrl}/api/token-standard/v0/registrars/${NETWORK.decentralizedPartyId}/registry/transfer-instruction/v1/transfer-factory`;
-  const factoryRes = await fetch(registryUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      choiceArguments: {
-        expectedAdmin: NETWORK.decentralizedPartyId,
-        transfer,
-        extraArgs: { context: { values: {} }, meta: { values: {} } },
-      },
-    }),
-    cache: "no-store",
-  });
-  if (!factoryRes.ok) throw new Error(`TransferFactory registry call failed (${factoryRes.status}): ${await factoryRes.text()}`);
+  const factoryRes = await fetchTransferFactoryContext(
+    registryKind,
+    registrarAdmin,
+    transfer
+  );
+  if (!factoryRes.ok) {
+    throw new Error(
+      `TransferFactory registry call failed (${factoryRes.status}): ${await factoryRes.text()}`
+    );
+  }
   const factory = (await factoryRes.json()) as TransferFactoryResponse;
-  const disclosedContracts = factory.choiceContext.disclosedContracts.map((dc) => ({
-    ...dc, synchronizerId: dc.synchronizerId ?? "",
-  }));
-  const synchronizerId = disclosedContracts.find((d) => d.synchronizerId)?.synchronizerId ?? "";
+  const disclosedContracts = factory.choiceContext.disclosedContracts.map(
+    (dc) => ({
+      ...dc,
+      synchronizerId: dc.synchronizerId ?? ""
+    })
+  );
+  const synchronizerId =
+    disclosedContracts.find((d) => d.synchronizerId)?.synchronizerId ?? "";
   const command = {
     ExerciseCommand: {
       templateId: TRANSFER_FACTORY_INTERFACE,
       contractId: factory.factoryId,
       choice: "TransferFactory_Transfer",
       choiceArgument: {
-        expectedAdmin: NETWORK.decentralizedPartyId,
+        expectedAdmin: registrarAdmin,
         transfer,
-        extraArgs: { context: factory.choiceContext.choiceContextData, meta: { values: {} } },
-      },
-    },
+        extraArgs: {
+          context: factory.choiceContext.choiceContextData,
+          meta: { values: {} }
+        }
+      }
+    }
   };
   return { command, disclosedContracts, synchronizerId };
 }
@@ -529,37 +977,19 @@ export async function prepareTransferCommand(params: {
  */
 export async function prepareAcceptCommand(params: {
   offerContractId: string;
+  registrarAdmin?: string;
+  registryKind?: TransferRegistryKind;
 }): Promise<{ command: unknown; disclosedContracts: DisclosedContract[]; synchronizerId: string }> {
-  const { offerContractId } = params;
-  const ctxUrl = `${NETWORK.registryUrl}/api/token-standard/v0/registrars/${NETWORK.decentralizedPartyId}/registry/transfer-instruction/v1/${offerContractId}/choice-contexts/accept`;
-  const ctxRes = await fetch(ctxUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ meta: {} }),
-    cache: "no-store",
+  const built = await buildAcceptExercise({
+    offerContractId: params.offerContractId,
+    registrarAdmin: params.registrarAdmin,
+    registryKind: params.registryKind
   });
-  if (!ctxRes.ok) {
-    const text = await ctxRes.text().catch(() => "<no body>");
-    throw new Error(`accept choice-contexts failed (${ctxRes.status}): ${text}`);
-  }
-  const ctx = (await ctxRes.json()) as {
-    choiceContextData: unknown;
-    disclosedContracts: DisclosedContract[];
+  return {
+    command: built.command,
+    disclosedContracts: built.disclosedContracts,
+    synchronizerId: built.synchronizerId
   };
-  const disclosedContracts = (ctx.disclosedContracts ?? []).map((dc) => ({
-    ...dc,
-    synchronizerId: dc.synchronizerId ?? "",
-  }));
-  const synchronizerId = disclosedContracts.find((d) => d.synchronizerId)?.synchronizerId ?? "";
-  const command = {
-    ExerciseCommand: {
-      templateId: TRANSFER_INSTRUCTION_INTERFACE,
-      contractId: offerContractId,
-      choice: "TransferInstruction_Accept",
-      choiceArgument: { extraArgs: { context: ctx.choiceContextData, meta: { values: {} } } },
-    },
-  };
-  return { command, disclosedContracts, synchronizerId };
 }
 
 /**

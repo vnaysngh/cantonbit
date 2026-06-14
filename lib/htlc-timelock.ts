@@ -15,9 +15,12 @@ const CANTON_SKEW_MAX_SECONDS = 60;
 const EVM_FINALITY_SECONDS = 15 * 60;
 /** Execution buffer (read reveal + submit EVM claim + mine). */
 const EXEC_BUFFER_SECONDS = 5 * 60;
-/** The minimum safe gap between the two legs. */
+/** The minimum safe gap between the two legs (EVM↔Canton — includes EVM finality). */
 export const MIN_GAP =
   CANTON_SKEW_MAX_SECONDS + EVM_FINALITY_SECONDS + EXEC_BUFFER_SECONDS; // ~20m
+/** Same-Canton swaps — no EVM finality budget. */
+export const MIN_GAP_CANTON =
+  CANTON_SKEW_MAX_SECONDS + EXEC_BUFFER_SECONDS; // ~6m
 /** Default gap — 1h, comfortably > MIN_GAP. */
 const DEFAULT_GAP = 60 * 60;
 
@@ -55,7 +58,8 @@ export interface Timelocks {
 export function assertValidTimelocks(
   nowSeconds: number,
   userTimelock: number,
-  solverTimelock: number
+  solverTimelock: number,
+  minGap: number = MIN_GAP
 ): void {
   if (!Number.isFinite(userTimelock) || !Number.isFinite(solverTimelock)) {
     throw new Error("timelocks must be finite unix seconds");
@@ -63,9 +67,9 @@ export function assertValidTimelocks(
   if (solverTimelock <= nowSeconds + 60) {
     throw new Error("solverTimelock is in the past / too soon");
   }
-  if (userTimelock - solverTimelock < MIN_GAP) {
+  if (userTimelock - solverTimelock < minGap) {
     throw new Error(
-      `timelock ladder invalid: userTimelock must exceed solverTimelock by at least ${MIN_GAP}s (got ${userTimelock - solverTimelock}s)`
+      `timelock ladder invalid: userTimelock must exceed solverTimelock by at least ${minGap}s (got ${userTimelock - solverTimelock}s)`
     );
   }
   // Sanity upper bound — reject absurd far-future locks (≤ 7 days).
@@ -91,6 +95,30 @@ export function timelocksFromExpiration(
   // never below MIN_GAP. For a 2h expiration → 1h gap leaves a 1h Canton window.
   const gap = Math.max(
     MIN_GAP,
+    Math.min(DEFAULT_GAP, Math.floor(expirationSeconds / 4))
+  );
+  const userTimelock = nowSeconds + expirationSeconds;
+  const solverTimelock = userTimelock - gap;
+  if (solverTimelock <= nowSeconds) {
+    throw new Error(
+      "derived solverTimelock is in the past — expiration/gap misconfigured"
+    );
+  }
+  return { userTimelock, solverTimelock };
+}
+
+/** Derive timelocks for same-Canton swaps (no EVM finality in the gap). */
+export function timelocksFromExpirationCanton(
+  nowSeconds: number,
+  expirationSeconds: number
+): Timelocks {
+  if (expirationSeconds < MIN_CANTON_EXPIRATION_SECONDS) {
+    throw new Error(
+      `expiration too short — Canton swaps need at least ${MIN_CANTON_EXPIRATION_SECONDS / 3600}h`
+    );
+  }
+  const gap = Math.max(
+    MIN_GAP_CANTON,
     Math.min(DEFAULT_GAP, Math.floor(expirationSeconds / 4))
   );
   const userTimelock = nowSeconds + expirationSeconds;

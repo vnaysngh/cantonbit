@@ -16,15 +16,16 @@ export interface HtlcOrderInput {
   id: string;
   direction: "evm-to-canton" | "canton-to-evm";
   hashLock: string;
-  userEvmAddress: string;
-  solverEvmAddress: string;
-  wbtcAmount: string; // base units (string)
   userTimelock: number;
   userCantonParty: string;
   solverCantonParty: string;
-  cbtcAmount: string; // BTC decimal string
   solverTimelock: number;
-  // "managed" (email, on-ledger HtlcLock) | "loop" (standard transfer + accept).
+  /** Cross-chain EVM leg fields */
+  userEvmAddress?: string;
+  solverEvmAddress?: string;
+  wbtcAmount?: string;
+  cbtcAmount?: string;
+  /** "managed" (email, on-ledger HtlcLock) | "loop" (standard transfer + accept). */
   counterMode?: "managed" | "loop";
 }
 

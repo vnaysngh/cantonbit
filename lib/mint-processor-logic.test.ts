@@ -13,6 +13,8 @@ import { test } from "node:test";
 import {
   decideMintAction,
   extractCreatedOfferCid,
+  extractEventsByIdFromSubmitResult,
+  extractLastCreatedOfferCid
 } from "./mint-processor-logic";
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -77,6 +79,65 @@ test("extractCreatedOfferCid: null/undefined/empty are safe", () => {
   assert.equal(extractCreatedOfferCid(undefined), null);
   assert.equal(extractCreatedOfferCid(null), null);
   assert.equal(extractCreatedOfferCid({}), null);
+});
+
+test("extractEventsByIdFromSubmitResult: transaction.eventsById (Loop SDK)", () => {
+  const tree = {
+    "0": {
+      CreatedEvent: {
+        contractId: "loop-offer",
+        templateId: "p:TransferInstruction"
+      }
+    }
+  };
+  const result = {
+    transaction: { eventsById: tree, updateId: "upd-1" }
+  };
+  assert.deepEqual(extractEventsByIdFromSubmitResult(result), tree);
+  assert.equal(extractCreatedOfferCid(extractEventsByIdFromSubmitResult(result)), "loop-offer");
+});
+
+test("extractEventsByIdFromSubmitResult: update_data.eventsById (Loop submitAndWait)", () => {
+  const tree = {
+    "1": {
+      CreatedTreeEvent: {
+        value: {
+          contractId: "loop-wait-offer",
+          templateId: "p:Splice.Api.Token.TransferInstructionV1:TransferInstruction"
+        }
+      }
+    }
+  };
+  const result = {
+    command_id: "cmd-1",
+    update_id: "upd-2",
+    update_data: { eventsById: tree, workflowId: "wf" }
+  };
+  assert.deepEqual(extractEventsByIdFromSubmitResult(result), tree);
+  assert.equal(extractCreatedOfferCid(extractEventsByIdFromSubmitResult(result)), "loop-wait-offer");
+});
+
+test("extractLastCreatedOfferCid: returns last TransferInstruction", () => {
+  const tree = {
+    "0": {
+      CreatedTreeEvent: {
+        value: {
+          contractId: "user-offer",
+          templateId: "p:TransferInstruction"
+        }
+      }
+    },
+    "1": {
+      CreatedTreeEvent: {
+        value: {
+          contractId: "counter-offer",
+          templateId: "p:TransferInstruction"
+        }
+      }
+    }
+  };
+  assert.equal(extractCreatedOfferCid(tree), "user-offer");
+  assert.equal(extractLastCreatedOfferCid(tree), "counter-offer");
 });
 
 // ─────────────────────────────────────────────────────────────────────────

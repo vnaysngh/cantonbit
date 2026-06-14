@@ -2,8 +2,12 @@ import "server-only";
 
 import { randomUUID } from "node:crypto";
 
+import { fromBaseUnits, toBaseUnitsFloor } from "./amount-units";
 import { getLedgerJwt } from "./auth";
+import { CC_ASSET, matchesInstrument } from "./canton-assets";
+import type { InstrumentId } from "./constants";
 import { NETWORK } from "./constants";
+import { readTransferInstructionPayload } from "./transfer-instruction-read";
 import type {
   DAMLCommand,
   Holding,
@@ -245,8 +249,13 @@ function pickInterfaceView<T>(
 }
 
 /** POST /v2/state/active-contracts filtered to Holding interface. */
-export async function getHoldings(partyId: string): Promise<Holding[]> {
-  console.log(`${TAG} getHoldings partyId=${partyId.slice(0, 40)}...`);
+export async function getHoldings(
+  partyId: string,
+  instrumentId: InstrumentId = NETWORK.instrumentId
+): Promise<Holding[]> {
+  console.log(
+    `${TAG} getHoldings partyId=${partyId.slice(0, 40)}... instrument=${instrumentId.id}`
+  );
   const activeAtOffset = await getLedgerEnd();
   console.log(`${TAG} getHoldings activeAtOffset=${activeAtOffset}`);
   const body = buildInterfaceFilterRequest(
@@ -283,19 +292,11 @@ export async function getHoldings(partyId: string): Promise<Holding[]> {
       );
       continue;
     }
-    // Filter to only the CBTC instrument. The party also holds CC/Amulet
-    // (admin=DSO::…, id=Amulet) which implements the same Holding interface — but
-    // it is NOT CBTC, and feeding it to the CBTC TransferFactory makes the
-    // registry reject the inputs ("Given holdings are invalid").
     const inst = (payload as { instrumentId?: { admin?: string; id?: string } })
       .instrumentId;
-    if (
-      !inst ||
-      inst.admin !== NETWORK.instrumentId.admin ||
-      inst.id !== NETWORK.instrumentId.id
-    ) {
+    if (!inst || !matchesInstrument(inst, instrumentId)) {
       console.log(
-        `${TAG} getHoldings skipping contractId=${ev.contractId} instrument=${inst?.admin?.slice(0, 12)}…/${inst?.id} (not CBTC)`
+        `${TAG} getHoldings skipping contractId=${ev.contractId} instrument=${inst?.admin?.slice(0, 12)}…/${inst?.id} (not target ${instrumentId.id})`
       );
       continue;
     }
@@ -347,7 +348,7 @@ export async function getAmuletBalance(partyId: string): Promise<string> {
     { method: "POST", jsonBody: body }
   );
   const allEntries = unwrapContracts(resp);
-  let total = 0;
+  let totalUnits = 0n;
   for (const entry of allEntries) {
     const ev = entry.JsActiveContract.createdEvent;
     const payload = pickInterfaceView<Holding["payload"]>(
@@ -358,9 +359,9 @@ export async function getAmuletBalance(partyId: string): Promise<string> {
     const inst = (payload as { instrumentId?: { id?: string } }).instrumentId;
     if (inst?.id !== "Amulet") continue;
     const amt = (payload as { amount?: string }).amount ?? "0";
-    total += parseFloat(amt);
+    totalUnits += toBaseUnitsFloor(amt, CC_ASSET.decimals);
   }
-  return total.toFixed(6);
+  return fromBaseUnits(totalUnits, CC_ASSET.decimals);
 }
 
 /** Unlocked CC (Amulet) holdings for a party — used for CC P2P transfers. */
@@ -407,6 +408,15 @@ export async function getAmuletHoldings(partyId: string): Promise<Holding[]> {
   return out;
 }
 
+/** Route to the correct holdings query for a swap/transfer asset. */
+export async function getInstrumentHoldings(
+  partyId: string,
+  instrumentId: InstrumentId
+): Promise<Holding[]> {
+  if (instrumentId.id === "Amulet") return getAmuletHoldings(partyId);
+  return getHoldings(partyId, instrumentId);
+}
+
 /** POST /v2/state/active-contracts filtered to TransferInstruction interface. */
 export async function getPendingTransfers(
   partyId: string
@@ -433,13 +443,10 @@ export async function getPendingTransfers(
   const out: Transfer[] = [];
   for (const entry of allEntries) {
     const ev = entry.JsActiveContract.createdEvent;
-    const payload = pickInterfaceView<Transfer["payload"]>(
-      ev,
-      TRANSFER_INSTRUCTION_INTERFACE_ID
-    );
+    const payload = readTransferInstructionPayload(ev);
     if (!payload) {
       console.log(
-        `${TAG} getPendingTransfers skipping contractId=${ev.contractId} (no interface view)`
+        `${TAG} getPendingTransfers skipping contractId=${ev.contractId} (no transfer payload)`
       );
       continue;
     }

@@ -57,7 +57,12 @@ export interface QuoteResponse {
   cantonParty: string;
   cbtcAmount: string;
   wbtcAmount?: string;
-  direction?: "evm-to-canton" | "canton-to-evm";
+  direction?: "evm-to-canton" | "canton-to-evm" | "canton-to-canton";
+  /** canton-to-canton quote fields */
+  fromAsset?: string;
+  toAsset?: string;
+  inAmount?: string;
+  outAmount?: string;
   feeBps: number;
   /** Live WBTC/BTC price used for this quote: price = wbtcPriceRaw / 10^wbtcPriceDecimals. */
   wbtcPriceRaw?: string;

@@ -41,7 +41,6 @@ const ESCROW = (process.env.HTLC_ESCROW_ADDRESS ??
 const POLL_MS = Number(process.env.SOLVER_POLL_MS ?? 4000);
 const API_AUTH_TOKEN =
   process.env.HTLC_DAEMON_SECRET ??
-  process.env.CRON_SECRET ??
   process.env.API_AUTH_TOKEN ??
   "";
 

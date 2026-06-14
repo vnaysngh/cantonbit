@@ -34,7 +34,6 @@ const ESCROW = (process.env.HTLC_ESCROW_ADDRESS ??
 const API_BASE = process.env.API_BASE ?? "http://localhost:3000";
 const API_AUTH_TOKEN =
   process.env.HTLC_DAEMON_SECRET ??
-  process.env.CRON_SECRET ??
   process.env.API_AUTH_TOKEN ??
   "";
 

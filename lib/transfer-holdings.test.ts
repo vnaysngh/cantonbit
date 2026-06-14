@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { selectTransferHoldings } from "./transfer-holdings";
+import type { Holding } from "./types";
 
 function holding(contractId: string, amountBtc: string): Holding {
   return {
@@ -33,4 +34,30 @@ test("selectTransferHoldings throws on insufficient balance", () => {
     () => selectTransferHoldings([holding("a", "0.00001")], "0.1"),
     /Insufficient balance/
   );
+});
+
+test("selectTransferHoldings uses CC precision (10dp)", () => {
+  const ccHolding = (contractId: string, amount: string): Holding => ({
+    contractId,
+    payload: {
+      owner: "test::1220",
+      instrumentId: { admin: "DSO::1220", id: "Amulet" },
+      amount
+    }
+  });
+  assert.throws(
+    () =>
+      selectTransferHoldings(
+        [ccHolding("a", "44.75769868")],
+        "44.757699",
+        "CC"
+      ),
+    /Insufficient balance: have 44\.75769868 CC, need 44\.757699 CC/
+  );
+  const picked = selectTransferHoldings(
+    [ccHolding("a", "44.75769868")],
+    "44.75769868",
+    "CC"
+  );
+  assert.equal(picked.length, 1);
 });

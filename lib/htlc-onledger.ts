@@ -21,7 +21,15 @@
 import "server-only";
 
 import { getLedgerJwt } from "./auth";
+import { fetchCcRegistry, getDsoPartyId } from "./cc-registry";
+import type { InstrumentId } from "./constants";
 import { NETWORK } from "./constants";
+import {
+  AMULET_HOLDING_TEMPLATE_FQN,
+  isAllocationContract,
+  isPlainChangeOutput,
+  pickAllocationCid
+} from "./htlc-allocation-pick";
 import type { Holding } from "./types";
 
 const TAG = "[htlc-onledger]";
@@ -43,6 +51,12 @@ const ALLOCATION_FACTORY_INTERFACE =
 const HOLDING_TEMPLATE_FQN =
   "8107899ac4723ce986bf7d27416534e576e54b92161e46150a595fb78ff3d3a1:Utility.Registry.Holding.V0.Holding:Holding";
 
+function holdingDisclosedTemplateId(holding: Holding): string {
+  if (holding.templateId) return holding.templateId;
+  const id = (holding.payload as { instrumentId?: { id?: string } }).instrumentId?.id;
+  return id === "Amulet" ? AMULET_HOLDING_TEMPLATE_FQN : HOLDING_TEMPLATE_FQN;
+}
+
 interface DisclosedContract {
   templateId: string;
   contractId: string;
@@ -50,8 +64,54 @@ interface DisclosedContract {
   synchronizerId: string;
 }
 
-function reg(path: string): string {
-  return `${NETWORK.registryUrl}/api/token-standard/v0/registrars/${NETWORK.decentralizedPartyId}${path}`;
+function reg(path: string, registrarAdmin: string = NETWORK.decentralizedPartyId): string {
+  return `${NETWORK.registryUrl}/api/token-standard/v0/registrars/${registrarAdmin}${path}`;
+}
+
+function isAmuletInstrument(instrumentId?: InstrumentId): boolean {
+  return instrumentId?.id === "Amulet";
+}
+
+async function fetchAllocationFactory(
+  registrarAdmin: string,
+  instrumentId: InstrumentId,
+  body: string
+): Promise<Response> {
+  if (isAmuletInstrument(instrumentId)) {
+    return fetchCcRegistry("/allocation-instruction/v1/allocation-factory", {
+      method: "POST",
+      body
+    });
+  }
+  return fetch(reg(`/registry/allocation-instruction/v1/allocation-factory`, registrarAdmin), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    cache: "no-store"
+  });
+}
+
+async function fetchAllocationChoiceContext(
+  allocationCid: string,
+  kind: "execute-transfer" | "withdraw",
+  instrumentId?: InstrumentId
+): Promise<Response> {
+  if (isAmuletInstrument(instrumentId)) {
+    return fetchCcRegistry(
+      `/allocations/v1/${encodeURIComponent(allocationCid)}/choice-contexts/${kind}`,
+      { method: "POST", body: JSON.stringify({}) }
+    );
+  }
+  return fetch(
+    reg(
+      `/registry/allocations/v1/${encodeURIComponent(allocationCid)}/choice-contexts/${kind}`
+    ),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({})
+    }
+  );
 }
 
 async function submit(
@@ -110,14 +170,7 @@ async function submit(
       templateId: tpl,
       createdEventBlob: c.createdEventBlob ?? ""
     });
-    // Skip plain Holding change-outputs (the leftover CBTC from an allocation) —
-    // otherwise createdCids[0] would be a Holding, not the Allocation, and the
-    // registry's execute-transfer choice-context can't decode it ("Unknown field
-    // registrar"). Match the entity name, since the Allocation path also contains
-    // "Holding" (…Holding.Allocation:DvpLegAllocation).
-    const isPlainHolding =
-      tpl.endsWith(":Holding") || tpl.includes("Holding.V0.Holding:Holding");
-    if (!isPlainHolding) createdCids.push(c.contractId);
+    if (!isPlainChangeOutput(tpl)) createdCids.push(c.contractId);
   }
   return {
     updateId: tree?.transactionTree?.updateId ?? "",
@@ -210,16 +263,10 @@ export async function listSolverAllocations(
 /** Registry choice-context for an Allocation lifecycle choice. */
 async function allocationChoiceContext(
   allocationCid: string,
-  kind: "execute-transfer" | "withdraw"
+  kind: "execute-transfer" | "withdraw",
+  instrumentId?: InstrumentId
 ): Promise<{ data: unknown; disclosed: DisclosedContract[] }> {
-  const url = reg(
-    `/registry/allocations/v1/${encodeURIComponent(allocationCid)}/choice-contexts/${kind}`
-  );
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({}) // this registry version wants an empty body, not {meta:{}}
-  });
+  const r = await fetchAllocationChoiceContext(allocationCid, kind, instrumentId);
   if (!r.ok)
     throw new Error(
       `choice-context ${kind} failed (${r.status}): ${await r.text()}`
@@ -254,8 +301,14 @@ export async function allocate(params: {
   allocateBefore: Date;
   /** transferLeg.sender + actAs party. Defaults to solverParty (forward direction). */
   senderParty?: string;
+  /** Defaults to CBTC on this network. */
+  instrumentId?: InstrumentId;
 }): Promise<{ updateId: string; allocationCid: string }> {
   const sender = params.senderParty ?? params.solverParty;
+  const instrumentId = params.instrumentId ?? NETWORK.instrumentId;
+  const registrarAdmin = isAmuletInstrument(instrumentId)
+    ? await getDsoPartyId()
+    : instrumentId.admin;
   const jwt = await getLedgerJwt();
   const now = new Date().toISOString();
   const allocation = {
@@ -272,26 +325,24 @@ export async function allocate(params: {
       sender,
       receiver: params.receiverParty,
       amount: params.amountBtc,
-      instrumentId: NETWORK.instrumentId,
+      instrumentId,
       meta: { values: {} }
     }
   };
 
-  const factoryRes = await fetch(
-    reg(`/registry/allocation-instruction/v1/allocation-factory`),
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        choiceArguments: {
-          expectedAdmin: NETWORK.decentralizedPartyId,
-          allocation,
-          requestedAt: now,
-          inputHoldingCids: params.inputHoldingCids,
-          extraArgs: { context: { values: {} }, meta: { values: {} } }
-        }
-      })
+  const factoryBody = JSON.stringify({
+    choiceArguments: {
+      expectedAdmin: registrarAdmin,
+      allocation,
+      requestedAt: now,
+      inputHoldingCids: params.inputHoldingCids,
+      extraArgs: { context: { values: {} }, meta: { values: {} } }
     }
+  });
+  const factoryRes = await fetchAllocationFactory(
+    registrarAdmin,
+    instrumentId,
+    factoryBody
   );
   if (!factoryRes.ok)
     throw new Error(
@@ -313,14 +364,14 @@ export async function allocate(params: {
     ...params.inputHoldings
       .filter((h) => params.inputHoldingCids.includes(h.contractId))
       .map((h) => ({
-        templateId: HOLDING_TEMPLATE_FQN,
+        templateId: holdingDisclosedTemplateId(h),
         contractId: h.contractId,
         createdEventBlob: h.createdEventBlob ?? "",
         synchronizerId: ""
       }))
   ];
 
-  const { updateId, createdCids } = await submit(
+  const { updateId, created } = await submit(
     jwt,
     [sender], // sender authority locks the holdings (CanActAs covers hosted users)
     [
@@ -330,7 +381,7 @@ export async function allocate(params: {
           contractId: factory.factoryId,
           choice: "AllocationFactory_Allocate",
           choiceArgument: {
-            expectedAdmin: NETWORK.decentralizedPartyId,
+            expectedAdmin: registrarAdmin,
             allocation,
             requestedAt: now,
             inputHoldingCids: params.inputHoldingCids,
@@ -344,10 +395,10 @@ export async function allocate(params: {
     ],
     disclosed
   );
-  const allocationCid = createdCids[0] ?? "";
+  const allocationCid = pickAllocationCid(created);
   if (!allocationCid) throw new Error("allocate: no Allocation created");
   console.log(
-    `${TAG} allocated ${params.amountBtc} CBTC → alloc ${allocationCid.slice(0, 20)}…`
+    `${TAG} allocated ${params.amountBtc} ${instrumentId.id} → alloc ${allocationCid.slice(0, 20)}…`
   );
   return { updateId, allocationCid };
 }
@@ -364,8 +415,11 @@ export async function createHtlcLock(params: {
   unlockTime: Date;
   /** HtlcLock.locker + actAs party. Defaults to solverParty (forward direction). */
   lockerParty?: string;
+  /** Defaults to CBTC on this network. */
+  instrumentId?: InstrumentId;
 }): Promise<{ htlcCid: string; htlcBlob: string }> {
   const locker = params.lockerParty ?? params.solverParty;
+  const instrumentId = params.instrumentId ?? NETWORK.instrumentId;
   const jwt = await getLedgerJwt();
   const { created } = await submit(
     jwt,
@@ -380,7 +434,7 @@ export async function createHtlcLock(params: {
             executor: params.solverParty,
             allocationCid: params.allocationCid,
             amount: params.amountBtc,
-            instrumentId: NETWORK.instrumentId,
+            instrumentId,
             hashLock: params.hashLock.startsWith("0x")
               ? params.hashLock.slice(2)
               : params.hashLock,
@@ -409,6 +463,7 @@ export async function prepareClaimCommand(params: {
   allocationCid: string;
   solverParty: string; // to read the Allocation blob from the solver's ACS for disclosure
   preimageHex: string; // lowercase hex of the raw secret bytes, no 0x
+  instrumentId?: InstrumentId;
 }): Promise<{
   command: unknown;
   disclosedContracts: DisclosedContract[];
@@ -416,7 +471,8 @@ export async function prepareClaimCommand(params: {
 }> {
   const ctx = await allocationChoiceContext(
     params.allocationCid,
-    "execute-transfer"
+    "execute-transfer",
+    params.instrumentId
   );
   const preimage = params.preimageHex.startsWith("0x")
     ? params.preimageHex.slice(2)
@@ -536,6 +592,7 @@ export async function claimAsReceiver(params: {
   htlcBlob?: string;
   allocationCid: string;
   preimageHex: string;
+  instrumentId?: InstrumentId;
 }): Promise<{ updateId: string }> {
   const jwt = await getLedgerJwt();
   const { command, disclosedContracts } = await prepareClaimCommand({
@@ -543,7 +600,8 @@ export async function claimAsReceiver(params: {
     htlcBlob: params.htlcBlob,
     allocationCid: params.allocationCid,
     solverParty: params.solverParty,
-    preimageHex: params.preimageHex
+    preimageHex: params.preimageHex,
+    instrumentId: params.instrumentId
   });
   const { updateId } = await submit(
     jwt,
@@ -577,11 +635,15 @@ export async function prepareAllocateCommand(params: {
   settlementId: string;
   settleBefore: Date;
   allocateBefore: Date;
+  /** Defaults to CBTC on this network. */
+  instrumentId?: InstrumentId;
 }): Promise<{
   command: unknown;
   disclosedContracts: DisclosedContract[];
   synchronizerId: string;
 }> {
+  const instrumentId = params.instrumentId ?? NETWORK.instrumentId;
+  const registrarAdmin = instrumentId.admin;
   const now = new Date().toISOString();
   const allocation = {
     settlement: {
@@ -597,18 +659,18 @@ export async function prepareAllocateCommand(params: {
       sender: params.senderParty,
       receiver: params.solverParty,
       amount: params.amountBtc,
-      instrumentId: NETWORK.instrumentId,
+      instrumentId,
       meta: { values: {} }
     }
   };
   const factoryRes = await fetch(
-    reg(`/registry/allocation-instruction/v1/allocation-factory`),
+    reg(`/registry/allocation-instruction/v1/allocation-factory`, registrarAdmin),
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         choiceArguments: {
-          expectedAdmin: NETWORK.decentralizedPartyId,
+          expectedAdmin: registrarAdmin,
           allocation,
           requestedAt: now,
           inputHoldingCids: params.inputHoldingCids,
@@ -642,7 +704,7 @@ export async function prepareAllocateCommand(params: {
       contractId: factory.factoryId,
       choice: "AllocationFactory_Allocate",
       choiceArgument: {
-        expectedAdmin: NETWORK.decentralizedPartyId,
+        expectedAdmin: registrarAdmin,
         allocation,
         requestedAt: now,
         inputHoldingCids: params.inputHoldingCids,
@@ -697,8 +759,7 @@ export async function findAllocationBySettlement(params: {
   for (const e of entries) {
     const c = e?.contractEntry?.JsActiveContract?.createdEvent;
     const tpl = c?.templateId ?? "";
-    if (!c?.contractId || !/Allocation/i.test(tpl) || /:Holding$/.test(tpl))
-      continue;
+    if (!c?.contractId || !isAllocationContract(tpl)) continue;
     const a = c.createArgument ?? {};
     const settlement = a.settlement ?? a.allocation?.settlement;
     const leg = a.transferLeg ?? a.allocation?.transferLeg;
@@ -801,9 +862,14 @@ export async function refundHtlcLock(params: {
   htlcCid: string;
   allocationCid: string;
   lockerParty?: string;
+  instrumentId?: InstrumentId;
 }): Promise<{ updateId: string }> {
   const jwt = await getLedgerJwt();
-  const ctx = await allocationChoiceContext(params.allocationCid, "withdraw");
+  const ctx = await allocationChoiceContext(
+    params.allocationCid,
+    "withdraw",
+    params.instrumentId
+  );
   const { updateId } = await submit(
     jwt,
     [params.lockerParty ?? params.solverParty],

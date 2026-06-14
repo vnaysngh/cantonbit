@@ -8,8 +8,9 @@
  * Production table view + a portal-rendered detail drawer (portal escapes any
  * ancestor containing-block so the drawer is never clipped/collapsed).
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
+import { useSearchParams } from "next/navigation";
 
 import { useWallet } from "@/hooks/useWallet";
 import { useEvmWallet } from "@/hooks/useEvmWallet";
@@ -21,8 +22,23 @@ import {
   fetchMergedSwapHistory,
   htlcApi
 } from "@/lib/htlc-client";
+import { cantonSwapApi } from "@/lib/canton-swap-client";
+import {
+  cantonSwapPayReceive,
+  isCantonSwapHistoryRow,
+  mapCantonSwapToHistoryRow,
+  needsCantonSwapCounterAccept,
+  type CantonSwapHistoryRow
+} from "@/lib/canton-swap-history";
 import { isSwapClaimable } from "@/lib/htlc-order-logic";
-import type { SwapStatus } from "@/lib/htlc-types";
+import type { SwapOrder, SwapStatus } from "@/lib/htlc-types";
+import {
+  deriveHtlcProgress,
+  htlcPayReceive,
+  htlcStepIndex,
+  HTLC_PROGRESS_COPY,
+  HTLC_SWAP_STEPS
+} from "@/lib/htlc-track-order";
 import {
   forgetSecret,
   hasStoredSecret,
@@ -41,7 +57,7 @@ const EVM_CHAIN = SWAP_CHAIN.name;
 
 interface HistoryOrder {
   id: string;
-  direction: "evm-to-canton" | "canton-to-evm";
+  direction: "evm-to-canton" | "canton-to-evm" | "canton-swap";
   status: string;
   wbtcAmount: string; // 8dp base units
   cbtcAmount: string; // decimal string
@@ -61,18 +77,41 @@ interface HistoryOrder {
   userTimelock?: number;
   solverTimelock?: number;
   revealedPreimage?: string;
+  mainLeg?: { asset: string; amount: string };
+  counterLeg?: { asset: string; amount: string };
+  failureReason?: string;
+  walletMode?: string;
+}
+
+function isCantonSwapOrder(o: HistoryOrder): o is HistoryOrder & CantonSwapHistoryRow {
+  return isCantonSwapHistoryRow(o);
+}
+
+function orderPayReceive(o: HistoryOrder): { pay: string; receive: string } {
+  if (isCantonSwapOrder(o)) return cantonSwapPayReceive(o);
+  const reverse = o.direction === "canton-to-evm";
+  return {
+    pay: reverse
+      ? `${fmtCbtc(o.cbtcAmount)} CBTC`
+      : `${fmtWbtc(o.wbtcAmount)} WBTC`,
+    receive: reverse
+      ? `${fmtWbtc(o.wbtcAmount)} WBTC`
+      : `${fmtCbtc(o.cbtcAmount)} CBTC`
+  };
 }
 
 /** True if the user actually has funds locked that a refund/retake would return. */
 function hasLockedFunds(o: HistoryOrder): boolean {
+  if (isCantonSwapOrder(o)) return o.status === "user_locked";
   if (o.direction === "evm-to-canton") return !!o.mainLockTx; // user's WBTC on EVM
   return !!o.htlcCid || !!o.counterTransferUpdateId || !!o.allocationCid; // user's CBTC on Canton
 }
 
 function isClaimableOrder(o: HistoryOrder): boolean {
+  if (isCantonSwapOrder(o)) return false;
   return isSwapClaimable({
     status: o.status as SwapStatus,
-    direction: o.direction,
+    direction: o.direction as "evm-to-canton" | "canton-to-evm",
     counterMode:
       o.counterMode === "loop" || o.counterMode === "managed"
         ? o.counterMode
@@ -113,8 +152,19 @@ function recoveryAction(o: HistoryOrder): "retake-wbtc" | "refund-cbtc" | null {
   const live = o.status === "main_locked" || o.status === "counter_locked";
   if (!live || o.revealedPreimage || !hasLockedFunds(o)) return null;
   if (!o.userTimelock || now < o.userTimelock) return null;
+  if (isCantonSwapOrder(o)) return null;
   return o.direction === "evm-to-canton" ? "retake-wbtc" : "refund-cbtc";
 }
+
+const TERMINAL_STATUSES = new Set([
+  "main_claimed",
+  "both_claimed",
+  "refunded",
+  "cancelled",
+  "failed",
+  "filled",
+  "expired"
+]);
 
 const STATUS_STYLE: Record<string, string> = {
   main_claimed: "bg-green-500/12 text-green-600 ring-green-500/20",
@@ -126,7 +176,11 @@ const STATUS_STYLE: Record<string, string> = {
   open: "bg-foreground/8 text-foreground/60 ring-foreground/10",
   refunded: "bg-foreground/8 text-foreground/55 ring-foreground/10",
   cancelled: "bg-foreground/8 text-foreground/55 ring-foreground/10",
-  failed: "bg-red-500/12 text-red-600 ring-red-500/20"
+  failed: "bg-red-500/12 text-red-600 ring-red-500/20",
+  filled: "bg-green-500/12 text-green-600 ring-green-500/20",
+  user_locked: "bg-amber-500/12 text-amber-600 ring-amber-500/20",
+  settling: "bg-blue-500/12 text-blue-600 ring-blue-500/20",
+  expired: "bg-foreground/8 text-foreground/55 ring-foreground/10"
 };
 const STATUS_LABEL: Record<string, string> = {
   open: "Open",
@@ -136,6 +190,10 @@ const STATUS_LABEL: Record<string, string> = {
   counter_claimed: "Settling",
   main_claimed: "Completed",
   both_claimed: "Completed",
+  filled: "Completed",
+  user_locked: "Filling",
+  settling: "Settling",
+  expired: "Expired",
   refunded: "Refunded",
   cancelled: "Cancelled",
   failed: "Failed"
@@ -188,7 +246,38 @@ function StatusPill({ status }: { status: string }) {
 }
 
 /** A small chain→chain pill pair. */
-function Route({ reverse }: { reverse: boolean }) {
+function Route({ order }: { order: HistoryOrder }) {
+  if (isCantonSwapOrder(order)) {
+    const pay = order.mainLeg?.asset ?? "Canton";
+    const recv = order.counterLeg?.asset ?? "Canton";
+    return (
+      <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-xs">
+        <span className="rounded-md bg-foreground/[0.06] px-1.5 py-0.5 font-medium text-foreground/75">
+          {pay}
+        </span>
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          className="text-foreground/35"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+        >
+          <path
+            d="M5 12h14M13 6l6 6-6 6"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+        <span className="rounded-md bg-foreground/[0.06] px-1.5 py-0.5 font-medium text-foreground/75">
+          {recv}
+        </span>
+        <span className="text-foreground/40">· Canton</span>
+      </span>
+    );
+  }
+  const reverse = order.direction === "canton-to-evm";
   const from = reverse ? "Canton" : EVM_CHAIN;
   const to = reverse ? EVM_CHAIN : "Canton";
   return (
@@ -221,6 +310,7 @@ function Route({ reverse }: { reverse: boolean }) {
 export default function OrdersPage() {
   const wallet = useWallet();
   const evm = useEvmWallet();
+  const searchParams = useSearchParams();
   const [orders, setOrders] = useState<HistoryOrder[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -229,6 +319,7 @@ export default function OrdersPage() {
   >({});
   const [reload, setReload] = useState(0);
   const [openId, setOpenId] = useState<string | null>(null);
+  const [deepLinkOrder, setDeepLinkOrder] = useState<HistoryOrder | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [mounted, setMounted] = useState(false);
   const [sessionParty, setSessionParty] = useState<string | null>(null);
@@ -240,6 +331,94 @@ export default function OrdersPage() {
     setMounted(true);
     purgeExpiredSecrets();
   }, []);
+
+  useEffect(() => {
+    const id = searchParams.get("id")?.trim();
+    if (!id) {
+      setDeepLinkOrder(null);
+      return;
+    }
+    setOpenId(id);
+  }, [searchParams]);
+
+  // Deep-link ?id=… — fetch the order even if history filter hid it.
+  useEffect(() => {
+    const id = searchParams.get("id")?.trim();
+    if (!id || orders?.some((o) => o.id === id)) {
+      if (id && orders?.some((o) => o.id === id)) setDeepLinkOrder(null);
+      return;
+    }
+    let alive = true;
+    const kind = searchParams.get("kind");
+    const fetchOrder =
+      kind === "canton-swap"
+        ? cantonSwapApi.get(id).then(({ order }) =>
+            mapCantonSwapToHistoryRow(order)
+          )
+        : htlcApi.getOrder(id).then(({ order }) => order as HistoryOrder);
+    void fetchOrder
+      .then((row) => {
+        if (!alive || !row) return;
+        setDeepLinkOrder(row);
+        setOrders((prev) => {
+          const list = prev ?? [];
+          if (list.some((o) => o.id === id)) return list;
+          return [row, ...list].sort((a, b) => b.createdAt - a.createdAt);
+        });
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [searchParams, orders]);
+
+  const liveOrderIds = useMemo(() => {
+    if (!orders) return [];
+    return orders
+      .filter((o) => {
+        const status = optimisticStatus[o.id] ?? o.status;
+        return !TERMINAL_STATUSES.has(status);
+      })
+      .map((o) => o.id);
+  }, [orders, optimisticStatus]);
+
+  useEffect(() => {
+    if (liveOrderIds.length === 0) return;
+    let alive = true;
+    const poll = async () => {
+      const updates = await Promise.allSettled(
+        liveOrderIds.map(async (id) => {
+          const existing = orders?.find((o) => o.id === id);
+          if (existing && isCantonSwapOrder(existing)) {
+            const { order } = await cantonSwapApi.get(id);
+            return mapCantonSwapToHistoryRow(order);
+          }
+          const { order } = await htlcApi.getOrder(id);
+          return order as HistoryOrder;
+        })
+      );
+      if (!alive) return;
+      setOrders((prev) => {
+        if (!prev) return prev;
+        const byId = new Map(prev.map((o) => [o.id, o]));
+        for (const result of updates) {
+          if (result.status !== "fulfilled" || !result.value?.id) continue;
+          const existing = byId.get(result.value.id);
+          byId.set(
+            result.value.id,
+            existing ? { ...existing, ...result.value } : result.value
+          );
+        }
+        return [...byId.values()].sort((a, b) => b.createdAt - a.createdAt);
+      });
+    };
+    void poll();
+    const id = setInterval(poll, 4000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [liveOrderIds.join("|")]);
 
   useEffect(() => {
     let alive = true;
@@ -288,13 +467,28 @@ export default function OrdersPage() {
       loopParty: wallet.partyId,
       userEvmAddress: sessionAuthed ? evm.account : null,
     })
-      .then((d) => {
+      .then(async (d) => {
         if (!alive) return;
-        const nextOrders = (d.orders ?? []) as HistoryOrder[];
-        setOrders(nextOrders);
+        const htlcOrders = (d.orders ?? []) as HistoryOrder[];
+        let cantonRows: HistoryOrder[] = [];
+        const party = sessionParty ?? wallet.partyId;
+        if (party) {
+          try {
+            const cs = await cantonSwapApi.history(party);
+            cantonRows = (cs.orders ?? []).map((o) =>
+              mapCantonSwapToHistoryRow(o)
+            );
+          } catch {
+            /* optional */
+          }
+        }
+        const merged = [...htlcOrders, ...cantonRows].sort(
+          (a, b) => b.createdAt - a.createdAt
+        );
+        setOrders(merged);
         setOptimisticStatus((prev) => {
           const next = { ...prev };
-          for (const order of nextOrders) {
+          for (const order of merged) {
             if (!next[order.id]) continue;
             if (
               [
@@ -302,7 +496,9 @@ export default function OrdersPage() {
                 "both_claimed",
                 "refunded",
                 "cancelled",
-                "failed"
+                "failed",
+                "filled",
+                "expired"
               ].includes(order.status)
             ) {
               delete next[order.id];
@@ -431,11 +627,24 @@ export default function OrdersPage() {
   // the /swap page runs, so a swap can be completed from /orders / after a refresh.
   const doClaim = useCallback(
     async (o: HistoryOrder, manualSecret?: string) => {
+      if (isCantonSwapOrder(o)) {
+        setError("Canton swaps settle automatically — no claim step.");
+        return;
+      }
       let secret = manualSecret?.trim() ?? null;
       if (!secret) {
+        const crossChain = o;
         const ctx = await vaultContext();
-        const orderMeta = vaultMetaFromOrder(o) ?? undefined;
-        secret = await recallSecret(o.id, { ...ctx, orderMeta });
+        const orderMeta =
+          vaultMetaFromOrder({
+            direction: crossChain.direction as "evm-to-canton" | "canton-to-evm",
+            counterMode: crossChain.counterMode,
+            userCantonParty: crossChain.userCantonParty,
+            userEvmAddress: crossChain.userEvmAddress,
+            userTimelock: crossChain.userTimelock,
+            solverTimelock: crossChain.solverTimelock
+          }) ?? undefined;
+        secret = await recallSecret(crossChain.id, { ...ctx, orderMeta });
       }
       if (!secret) {
         setError(
@@ -466,7 +675,6 @@ export default function OrdersPage() {
           } | null
         });
         forgetSecret(o.id);
-        // User leg stops at counter_claimed (Settling). Completed needs the HTLC daemon.
         setOptimisticStatus((prev) => ({ ...prev, [o.id]: "counter_claimed" }));
         setReload((n) => n + 1);
         setOpenId(null);
@@ -477,6 +685,39 @@ export default function OrdersPage() {
       }
     },
     [evm, wallet.provider, vaultContext]
+  );
+
+  const doCantonCounterAccept = useCallback(
+    async (o: HistoryOrder) => {
+      if (!isCantonSwapOrder(o) || !needsCantonSwapCounterAccept(o)) return;
+      const loop = wallet.provider;
+      if (!loop) {
+        setError("Connect Loop wallet to accept incoming tokens.");
+        return;
+      }
+      setBusy(o.id);
+      setError(null);
+      try {
+        const prep = await cantonSwapApi.prepareCounterAccept(o.id);
+        const userParty = o.userCantonParty ?? wallet.partyId ?? "";
+        await loop.submitAndWaitForTransaction({
+          commands: [prep.command],
+          disclosedContracts: prep.disclosedContracts,
+          packageIdSelectionPreference: [],
+          actAs: [userParty],
+          readAs: [userParty],
+          synchronizerId: prep.synchronizerId
+        });
+        await cantonSwapApi.confirmCounterAccept(o.id);
+        setOptimisticStatus((prev) => ({ ...prev, [o.id]: "filled" }));
+        setReload((n) => n + 1);
+      } catch (e) {
+        setError(getSwapErrorMessage(e));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [wallet.provider, wallet.partyId]
   );
 
   const doLoopAccept = useCallback(
@@ -526,8 +767,13 @@ export default function OrdersPage() {
   }, []);
 
   const explorer = SWAP_CHAIN.blockExplorerUrls?.[0] ?? "";
-  const activeBase =
-    openId && orders ? (orders.find((x) => x.id === openId) ?? null) : null;
+  const activeBase = useMemo(() => {
+    if (!openId) return null;
+    const fromList = orders?.find((x) => x.id === openId);
+    if (fromList) return fromList;
+    if (deepLinkOrder?.id === openId) return deepLinkOrder;
+    return null;
+  }, [openId, orders, deepLinkOrder]);
   const active =
     activeBase && optimisticStatus[activeBase.id]
       ? { ...activeBase, status: optimisticStatus[activeBase.id] }
@@ -592,13 +838,7 @@ export default function OrdersPage() {
                 const displayOrder = optimisticStatus[o.id]
                   ? { ...o, status: optimisticStatus[o.id] }
                   : o;
-                const reverse = displayOrder.direction === "canton-to-evm";
-                const pay = reverse
-                  ? `${fmtCbtc(displayOrder.cbtcAmount)} CBTC`
-                  : `${fmtWbtc(displayOrder.wbtcAmount)} WBTC`;
-                const recv = reverse
-                  ? `${fmtWbtc(displayOrder.wbtcAmount)} WBTC`
-                  : `${fmtCbtc(displayOrder.cbtcAmount)} CBTC`;
+                const { pay, receive } = orderPayReceive(displayOrder);
                 const action = recoveryAction(displayOrder);
                 const claimable = isClaimableOrder(displayOrder);
                 return (
@@ -625,18 +865,18 @@ export default function OrdersPage() {
                             strokeLinejoin="round"
                           />
                         </svg>
-                        <span>{recv}</span>
+                        <span>{receive}</span>
                       </div>
                       {/* mobile: route + date inline under the amounts */}
                       <div className="mt-1 flex items-center gap-2 sm:hidden">
-                        <Route reverse={reverse} />
+                        <Route order={displayOrder} />
                         <span className="text-xs text-foreground/40">
                           · {fmtDateShort(displayOrder.createdAt)}
                         </span>
                       </div>
                     </td>
                     <td className="hidden px-4 py-3.5 sm:table-cell">
-                      <Route reverse={reverse} />
+                      <Route order={displayOrder} />
                     </td>
                     <td className="hidden px-4 py-3.5 text-xs text-foreground/60 md:table-cell">
                       {displayOrder.counterMode === "loop"
@@ -703,6 +943,7 @@ export default function OrdersPage() {
             onConfirmLock={doConfirmLock}
             onRetryLoopLock={doRetryLoopLock}
             onLoopAccept={doLoopAccept}
+            onCantonCounterAccept={doCantonCounterAccept}
             loopConnected={!!wallet.provider}
             busy={busy === active.id}
           />,
@@ -723,6 +964,7 @@ function DetailDrawer({
   onConfirmLock,
   onRetryLoopLock,
   onLoopAccept,
+  onCantonCounterAccept,
   loopConnected,
   busy
 }: {
@@ -736,17 +978,22 @@ function DetailDrawer({
   onConfirmLock: (o: HistoryOrder) => void;
   onRetryLoopLock: (o: HistoryOrder) => void;
   onLoopAccept: (o: HistoryOrder) => void;
+  onCantonCounterAccept: (o: HistoryOrder) => void;
   loopConnected: boolean;
   busy: boolean;
 }) {
-  const reverse = o.direction === "canton-to-evm";
+  const cantonSwap = isCantonSwapOrder(o);
+  const reverse = !cantonSwap && o.direction === "canton-to-evm";
   const action = recoveryAction(o);
   const claimable = isClaimableOrder(o);
-  const lockConfirm = needsLoopLockConfirm(o);
-  const loopAccept = needsLoopAccept(o);
-  const awaitingSolver = isAwaitingSolverFinalize(o);
+  const lockConfirm = !cantonSwap && needsLoopLockConfirm(o);
+  const loopAccept = !cantonSwap && needsLoopAccept(o);
+  const awaitingSolver = !cantonSwap && isAwaitingSolverFinalize(o);
+  const cantonCounterAccept =
+    cantonSwap && needsCantonSwapCounterAccept(o);
   const vaultReady = hasStoredSecret(o.id);
   const [manualSecret, setManualSecret] = useState("");
+  const cantonAmounts = cantonSwap ? cantonSwapPayReceive(o) : null;
 
   const Row = ({
     label,
@@ -831,32 +1078,48 @@ function DetailDrawer({
         <div className="px-5 py-4">
           {/* Headline: route + status */}
           <div className="mb-4 flex items-center justify-between gap-3">
-            <Route reverse={reverse} />
+            <Route order={o} />
             <StatusPill status={o.status} />
           </div>
+
+          {cantonSwap && !TERMINAL_STATUSES.has(o.status) && (
+            <div className="mb-4 rounded-xl bg-foreground/[0.04] px-4 py-3 text-xs text-foreground/60">
+              {o.status === "user_locked" &&
+                "Your sell leg is locked — the solver is delivering the counter asset."}
+              {o.status === "open" && "Swap order created."}
+              {o.status === "settling" && "Settling on Canton…"}
+              {o.failureReason ? (
+                <p className="mt-2 text-amber-700">{o.failureReason}</p>
+              ) : null}
+            </div>
+          )}
 
           {/* Amounts */}
           <div className="mb-4 grid grid-cols-2 gap-3">
             <div className="rounded-xl bg-foreground/[0.04] px-3 py-2.5">
               <div className="text-xs text-foreground/45">You send</div>
               <div className="mt-0.5 text-sm font-semibold text-foreground">
-                {reverse
-                  ? `${fmtCbtc(o.cbtcAmount)} CBTC`
-                  : `${fmtWbtc(o.wbtcAmount)} WBTC`}
+                {cantonSwap && cantonAmounts?.pay
+                  ? cantonAmounts.pay
+                  : reverse
+                    ? `${fmtCbtc(o.cbtcAmount)} CBTC`
+                    : `${fmtWbtc(o.wbtcAmount)} WBTC`}
               </div>
               <div className="text-xs text-foreground/45">
-                {reverse ? "Canton" : EVM_CHAIN}
+                {cantonSwap ? "Canton" : reverse ? "Canton" : EVM_CHAIN}
               </div>
             </div>
             <div className="rounded-xl bg-foreground/[0.04] px-3 py-2.5">
               <div className="text-xs text-foreground/45">You receive</div>
               <div className="mt-0.5 text-sm font-semibold text-foreground">
-                {reverse
-                  ? `${fmtWbtc(o.wbtcAmount)} WBTC`
-                  : `${fmtCbtc(o.cbtcAmount)} CBTC`}
+                {cantonSwap && cantonAmounts?.receive
+                  ? cantonAmounts.receive
+                  : reverse
+                    ? `${fmtWbtc(o.wbtcAmount)} WBTC`
+                    : `${fmtCbtc(o.cbtcAmount)} CBTC`}
               </div>
               <div className="text-xs text-foreground/45">
-                {reverse ? EVM_CHAIN : "Canton"}
+                {cantonSwap ? "Canton" : reverse ? EVM_CHAIN : "Canton"}
               </div>
             </div>
           </div>
@@ -865,9 +1128,11 @@ function DetailDrawer({
             <Row
               label="Type"
               value={
-                o.counterMode === "loop"
-                  ? "Loop wallet (external)"
-                  : "Account (managed)"
+                cantonSwap
+                  ? "Canton ↔ Canton"
+                  : o.counterMode === "loop"
+                    ? "Loop wallet (external)"
+                    : "Account (managed)"
               }
             />
             <Row label="Order ID" value={shortId(o.id)} mono copyText={o.id} />
@@ -890,18 +1155,18 @@ function DetailDrawer({
             )}
             {o.userTimelock ? (
               <Row
-                label={`Your timelock (${reverse ? "Canton" : "EVM"})`}
+                label={`Your timelock${cantonSwap ? "" : ` (${reverse ? "Canton" : "EVM"})`}`}
                 value={fmtTime(o.userTimelock)}
               />
             ) : null}
             {o.solverTimelock ? (
               <Row
-                label={`Solver timelock (${reverse ? "EVM" : "Canton"})`}
+                label={`Solver timelock${cantonSwap ? "" : ` (${reverse ? "EVM" : "Canton"})`}`}
                 value={fmtTime(o.solverTimelock)}
               />
             ) : null}
             {/* EVM-side lock tx is the explorer-linkable one. */}
-            {!reverse && o.mainLockTx && (
+            {!cantonSwap && !reverse && o.mainLockTx && (
               <Row
                 label="WBTC lock (EVM)"
                 value={shortId(o.mainLockTx)}
@@ -909,7 +1174,7 @@ function DetailDrawer({
                 href={txHref(o.mainLockTx)}
               />
             )}
-            {reverse && o.counterLockTx && (
+            {!cantonSwap && reverse && o.counterLockTx && (
               <Row
                 label="WBTC lock (EVM)"
                 value={shortId(o.counterLockTx)}
@@ -930,7 +1195,25 @@ function DetailDrawer({
             ) : null}
           </div>
 
-          {claimable ? (
+          {cantonCounterAccept ? (
+            <div className="mt-4 space-y-2">
+              <p className="rounded-xl bg-amber-500/10 px-4 py-3 text-center text-xs text-amber-700">
+                The solver delivered your {o.counterLeg?.asset ?? "tokens"} — accept
+                the incoming transfer in Loop to complete the swap.
+              </p>
+              <button
+                onClick={() => onCantonCounterAccept(o)}
+                disabled={busy || !loopConnected}
+                className="w-full rounded-xl bg-[#b04a2a] px-4 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+              >
+                {busy
+                  ? "Waiting for Loop…"
+                  : loopConnected
+                    ? `Accept ${o.counterLeg?.asset ?? "tokens"} in Loop`
+                    : "Connect Loop to accept"}
+              </button>
+            </div>
+          ) : claimable ? (
             <div className="mt-4 space-y-2">
               <p className="rounded-xl bg-amber-500/10 px-4 py-3 text-center text-xs text-amber-700">
                 {vaultReady

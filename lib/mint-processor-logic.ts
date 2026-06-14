@@ -9,22 +9,69 @@
  *   - whether to create a new offer or accept an existing one
  */
 
-/**
- * Extract the contractId of the created TransferOffer / TransferInstruction
- * from a Canton v2 transaction-tree `eventsById` map.
- *
- * `eventsById` is keyed by nodeId; each value is one of:
- *   { CreatedTreeEvent: { value: { contractId, templateId, ... } } }
- *   { ExercisedTreeEvent: { value: { ... } } }
- * Some Canton builds also surface a flat `CreatedEvent`. We scan for any
- * created event whose templateId names a transfer offer / instruction.
- *
- * Returns the first matching contractId, or null if none.
- */
-export function extractCreatedOfferCid(
-  eventsById: Record<string, unknown> | undefined | null,
-): string | null {
-  if (!eventsById) return null;
+function isTransferOfferTemplate(templateId: string): boolean {
+  return (
+    templateId.includes("TransferOffer") ||
+    templateId.includes("TransferInstruction")
+  );
+}
+
+function eventsByIdFromTreeLike(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object") return null;
+  const v = value as Record<string, unknown>;
+  if (v.eventsById && typeof v.eventsById === "object") {
+    return v.eventsById as Record<string, unknown>;
+  }
+  const nested = v.transactionTree as { eventsById?: Record<string, unknown> } | undefined;
+  if (nested?.eventsById) return nested.eventsById;
+  const txn = v.transaction as { eventsById?: Record<string, unknown> } | undefined;
+  if (txn?.eventsById) return txn.eventsById;
+  return null;
+}
+
+/** Normalize Loop wallet / JSON API submit shapes to an eventsById map. */
+export function extractEventsByIdFromSubmitResult(
+  result: unknown
+): Record<string, unknown> | null {
+  if (!result || typeof result !== "object") return null;
+  const r = result as Record<string, unknown>;
+
+  // Loop SDK submitAndWaitForTransaction → { update_data: transactionTree, update_id }
+  const fromUpdateData = eventsByIdFromTreeLike(r.update_data);
+  if (fromUpdateData) return fromUpdateData;
+
+  const fromTree = eventsByIdFromTreeLike(r.transactionTree);
+  if (fromTree) return fromTree;
+
+  const txn = r.transaction as { eventsById?: Record<string, unknown> } | undefined;
+  if (txn?.eventsById) return txn.eventsById;
+
+  const updateTree = (
+    r.update as { transactionTree?: { eventsById?: Record<string, unknown> } }
+  )?.transactionTree;
+  if (updateTree?.eventsById) return updateTree.eventsById;
+
+  const body = r.body as
+    | {
+        transactionTree?: { eventsById?: Record<string, unknown> };
+        transaction?: { eventsById?: Record<string, unknown> };
+        update_data?: unknown;
+      }
+    | undefined;
+  if (body) {
+    const fromBodyUpdate = eventsByIdFromTreeLike(body.update_data);
+    if (fromBodyUpdate) return fromBodyUpdate;
+    if (body.transactionTree?.eventsById) return body.transactionTree.eventsById;
+    if (body.transaction?.eventsById) return body.transaction.eventsById;
+  }
+  return null;
+}
+
+function scanCreatedOffers(
+  eventsById: Record<string, unknown> | undefined | null
+): string[] {
+  if (!eventsById) return [];
+  const out: string[] = [];
   for (const node of Object.values(eventsById)) {
     const n = node as {
       CreatedTreeEvent?: { value?: { contractId?: string; templateId?: string } };
@@ -32,14 +79,35 @@ export function extractCreatedOfferCid(
     };
     const created = n.CreatedTreeEvent?.value ?? n.CreatedEvent;
     if (!created?.contractId || !created.templateId) continue;
-    if (
-      created.templateId.includes("TransferOffer") ||
-      created.templateId.includes("TransferInstruction")
-    ) {
-      return created.contractId;
+    if (isTransferOfferTemplate(created.templateId)) {
+      out.push(created.contractId);
     }
   }
-  return null;
+  return out;
+}
+
+/**
+ * Extract the contractId of the created TransferOffer / TransferInstruction
+ * from a Canton v2 transaction-tree `eventsById` map.
+ *
+ * Returns the first matching contractId, or null if none.
+ */
+export function extractCreatedOfferCid(
+  eventsById: Record<string, unknown> | undefined | null
+): string | null {
+  const hits = scanCreatedOffers(eventsById);
+  return hits[0] ?? null;
+}
+
+/**
+ * Like extractCreatedOfferCid but returns the *last* matching offer in the tree.
+ * Use when multiple TransferInstructions are created (e.g. accept + deliver fill).
+ */
+export function extractLastCreatedOfferCid(
+  eventsById: Record<string, unknown> | undefined | null
+): string | null {
+  const hits = scanCreatedOffers(eventsById);
+  return hits.length ? hits[hits.length - 1]! : null;
 }
 
 /**
@@ -48,9 +116,6 @@ export function extractCreatedOfferCid(
  *  - "skip"           — already transferred, or owned by another worker
  *  - "accept-existing"— an offer was already recorded; accept it (NEVER recreate)
  *  - "create"         — no offer yet; create one then accept
- *
- * This is the core duplicate-offer guard, expressed as pure logic so it can be
- * exhaustively tested.
  */
 export function decideMintAction(row: {
   status?: string | null;

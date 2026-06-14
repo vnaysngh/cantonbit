@@ -38,7 +38,6 @@ async function sweep() {
     } catch (e) {
       const detail = e instanceof Error ? e.message.slice(0, 120) : String(e);
       results.push({ id, kind, ok: false, detail });
-      // A refund that's DUE but keeps failing = funds may be stuck; alert.
       void alert("error", "Auto-refund FAILED for an expired swap", {
         order: id.slice(0, 18),
         kind,
@@ -52,12 +51,8 @@ async function sweep() {
     await run(o.id, "refund-main", () => svc.refundMainCanton(o.id));
   for (const o of staleForwardMain)
     await run(o.id, "mark-stale", () => svc.markRefunded(o.id));
-  // Loop-seller custody (Variant A): WE hold the CBTC, so send it straight back
-  // via direct transfer; the user's preapproval auto-accepts.
   for (const o of staleLoopSeller)
     await run(o.id, "refund-loop-custody", () => svc.refundMainCanton(o.id));
-  // Early custody return for stalled loop-seller swaps with no WBTC counter-lock.
-  // The method verifies safety on-chain before returning custody.
   for (const o of loopCustodyStalled)
     await run(o.id, "early-refund-loop", () =>
       svc.earlyRefundLoopCustody(o.id)

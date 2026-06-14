@@ -134,6 +134,9 @@ async function readEvmLock(
  * user collect CBTC and still retake WBTC after the solver runs out of time.
  */
 async function verifyEvmLock(o: SwapOrder): Promise<void> {
+  if (!o.wbtcAmount || !o.solverEvmAddress) {
+    throw new Error("EVM leg fields missing on order");
+  }
   const { unlockTime, amount, receiver } = await readEvmLock(o.hashLock);
   assertEvmLockSafeForReveal(
     { unlockTime, amount, receiver },
@@ -199,7 +202,7 @@ class HtlcService {
           s + BigInt(Math.round(parseFloat(h.payload.amount ?? "0") * 1e8)),
         0n
       );
-      const needSats = BigInt(Math.round(parseFloat(o.cbtcAmount) * 1e8));
+      const needSats = BigInt(Math.round(parseFloat(o.cbtcAmount ?? "0") * 1e8));
       if (floatSats < needSats) {
         o.status = "failed";
         await this.store.put(o);
@@ -258,7 +261,7 @@ class HtlcService {
         solverParty: o.solverCantonParty,
         receiverParty: o.userCantonParty,
         allocationCid: o.allocationCid,
-        amountBtc: o.cbtcAmount,
+        amountBtc: o.cbtcAmount!,
         hashLock: hashLockHex0,
         unlockTime: new Date(o.solverTimelock * 1000 - 60_000)
       });
@@ -270,6 +273,10 @@ class HtlcService {
     }
     if (o.status !== "main_locked")
       throw new Error(`main not locked (${o.status})`);
+
+    if (o.direction === "evm-to-canton") {
+      await verifyEvmLock(o);
+    }
 
     const holdings = await getHoldings(o.solverCantonParty);
     const inputHoldingCids = holdings.map((h) => h.contractId);
@@ -287,7 +294,7 @@ class HtlcService {
     const { allocationCid } = await allocate({
       solverParty: o.solverCantonParty,
       receiverParty: o.userCantonParty,
-      amountBtc: o.cbtcAmount,
+      amountBtc: o.cbtcAmount!,
       inputHoldings: holdings,
       inputHoldingCids,
       settlementId: `htlc-${o.id.slice(0, 18)}-${now}`,
@@ -305,7 +312,7 @@ class HtlcService {
       solverParty: o.solverCantonParty,
       receiverParty: o.userCantonParty,
       allocationCid,
-      amountBtc: o.cbtcAmount,
+      amountBtc: o.cbtcAmount!,
       hashLock: hashLockHex,
       unlockTime
     });
@@ -383,7 +390,7 @@ class HtlcService {
       const { updateId, offerContractId, transferKind } = await createTransfer({
         senderParty: o.solverCantonParty,
         receiverParty: o.userCantonParty, // the Loop party (cross-participant)
-        amountBtc: o.cbtcAmount,
+        amountBtc: o.cbtcAmount!,
         inputHoldings: holdings
       });
       o.counterTransferUpdateId = updateId;
@@ -524,7 +531,7 @@ class HtlcService {
         receiverParty: o.solverCantonParty,
         lockerParty: o.userCantonParty,
         allocationCid: o.allocationCid,
-        amountBtc: o.cbtcAmount,
+        amountBtc: o.cbtcAmount!,
         hashLock: hashLockHex,
         unlockTime: new Date(o.userTimelock * 1000 - 60_000)
       });
@@ -544,7 +551,7 @@ class HtlcService {
       solverParty: o.solverCantonParty, // executor
       senderParty: o.userCantonParty, // the user locks THEIR holdings
       receiverParty: o.solverCantonParty, // solver receives on claim
-      amountBtc: o.cbtcAmount,
+      amountBtc: o.cbtcAmount!,
       inputHoldings: holdings,
       inputHoldingCids: holdings.map((h) => h.contractId),
       settlementId: `htlc-rev-${o.id.slice(0, 18)}-${now}`,
@@ -560,7 +567,7 @@ class HtlcService {
       receiverParty: o.solverCantonParty,
       lockerParty: o.userCantonParty,
       allocationCid,
-      amountBtc: o.cbtcAmount,
+      amountBtc: o.cbtcAmount!,
       hashLock: hashLockHex,
       unlockTime: new Date(settleBeforeMs - 60_000)
     });
@@ -675,7 +682,7 @@ class HtlcService {
     return prepareTransferCommand({
       senderParty: o.userCantonParty,
       receiverParty: o.solverCantonParty,
-      amountBtc: o.cbtcAmount,
+      amountBtc: o.cbtcAmount!,
       inputHoldingCids: holdingCids
     });
   }
@@ -698,7 +705,7 @@ class HtlcService {
 
     const maxAttempts = opts?.maxAttempts ?? 15;
     const pollMs = opts?.pollMs ?? 2000;
-    const targetAmount = parseFloat(o.cbtcAmount);
+    const targetAmount = parseFloat(o.cbtcAmount!);
 
     // Holdings already linked to other in-flight loop-seller orders (same amount).
     const active = await this.store.active();
@@ -740,7 +747,7 @@ class HtlcService {
       // transfers — CBTC lands as a Holding with no pending TransferInstruction.
       const custodyHolding = await detectLoopSellerCustodyHolding(
         o.solverCantonParty,
-        o.cbtcAmount,
+        o.cbtcAmount!,
         id,
         reservedCids
       );
@@ -784,8 +791,9 @@ class HtlcService {
     id: string
   ): Promise<{ order: SwapOrder; updateId: string }> {
     const o = await this.must(id);
-    if (o.direction !== "canton-to-evm")
+    if (o.direction !== "canton-to-evm") {
       throw new Error("refund-main is canton-to-evm only");
+    }
     if (o.status !== "main_locked" && o.status !== "counter_locked") {
       throw new Error(`not refundable (${o.status})`);
     }
@@ -808,7 +816,7 @@ class HtlcService {
       ({ updateId } = await createTransfer({
         senderParty: o.solverCantonParty,
         receiverParty: o.userCantonParty,
-        amountBtc: o.cbtcAmount,
+        amountBtc: o.cbtcAmount!,
         inputHoldings: holdings
       }));
     } else {
@@ -902,7 +910,9 @@ class HtlcService {
     const o = await this.must(id);
     if (o.status !== "counter_locked")
       throw new Error(`nothing to refund (status ${o.status})`);
-    if (!o.htlcCid || !o.allocationCid)
+    const htlcCid = o.htlcCid;
+    const allocationCid = o.allocationCid;
+    if (!htlcCid || !allocationCid)
       throw new Error("on-ledger HtlcLock not present");
     const now = Math.floor(Date.now() / 1000);
     if (now < o.solverTimelock) {
@@ -912,8 +922,8 @@ class HtlcService {
     }
     const { updateId } = await refundHtlcLock({
       solverParty: o.solverCantonParty,
-      htlcCid: o.htlcCid,
-      allocationCid: o.allocationCid
+      htlcCid,
+      allocationCid
     });
     o.status = "refunded";
     await this.store.put(o);
@@ -1038,7 +1048,7 @@ class HtlcService {
     const { updateId } = await createTransfer({
       senderParty: o.solverCantonParty,
       receiverParty: o.userCantonParty,
-      amountBtc: o.cbtcAmount,
+      amountBtc: o.cbtcAmount!,
       inputHoldings: holdings
     });
     o.status = "refunded";

@@ -5,7 +5,7 @@
  *   1. allocate a party on warpx (isLocal=true, on our participant where our DAR is vetted)
  *   2. grant the backend's ledger user CanActAs over it (so the backend signs the
  *      HtlcLock.Claim for them — the oranjswap-proven path)
- *   3. set up the CBTC TransferPreapproval (auto-accept) so CBTC delivery lands
+ *   3. set up CC + CBTC transfer preapprovals (auto-accept) for atomic swaps
  *
  * The party id is then stored in party_mappings against the user's Supabase row.
  */
@@ -14,6 +14,7 @@ import "server-only";
 import { getLedgerJwt } from "./auth";
 import { NETWORK } from "./constants";
 import { enableCcForParty } from "./enable-cc";
+import { enableCbtcPreapprovalForParty } from "./enable-cbtc-preapproval";
 
 const TAG = "[party-onboarding]";
 
@@ -79,7 +80,7 @@ export async function grantCanActAs(party: string): Promise<void> {
 }
 
 /**
- * Onboard a user party: allocate + grant CanActAs + EnableCC (CC preapproval).
+ * Onboard a user party: allocate + grant CanActAs + EnableCC + CBTC preapproval.
  */
 export async function onboardParticipantManagedParty(
   hint?: string
@@ -92,6 +93,14 @@ export async function onboardParticipantManagedParty(
     // Non-fatal on devnet (validator may subsidize fees anyway) — log and continue.
     console.warn(
       `${TAG} EnableCC failed for ${party.slice(0, 28)}…:`,
+      e instanceof Error ? e.message : e
+    );
+  }
+  try {
+    await enableCbtcPreapprovalForParty(party);
+  } catch (e) {
+    console.warn(
+      `${TAG} Enable CBTC failed for ${party.slice(0, 28)}…:`,
       e instanceof Error ? e.message : e
     );
   }

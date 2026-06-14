@@ -34,7 +34,10 @@ export async function hasCcEnabled(party: string): Promise<boolean> {
     );
     return false;
   }
-  return true;
+  const j = (await r.json().catch(() => null)) as {
+    transfer_preapproval?: unknown;
+  } | null;
+  return !!j?.transfer_preapproval;
 }
 
 async function findPendingSetupProposal(

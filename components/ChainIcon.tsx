@@ -19,8 +19,8 @@ export function ChainIcon({
   className?: string;
 }) {
   const key = network.toLowerCase();
-  const logo = key.includes("arbitrum")
-    ? { src: "/base-logo.jpg", alt: "Arbitrum" }
+  const logo = key.includes("arbitrum") || key.includes("base")
+    ? { src: "/base-logo.jpg", alt: "Base" }
     : key.includes("canton")
       ? { src: "/cc-logo.png", alt: "Canton" }
       : null;

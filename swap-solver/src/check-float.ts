@@ -39,8 +39,12 @@ async function main() {
   );
 
   const tokenUrl = envReq("KEYCLOAK_TOKEN_URL");
-  const clientId = envReq("KEYCLOAK_CLIENT_ID");
-  // On devnet prefer the *_DEVNET secret; on mainnet use the default secret.
+  // Pair devnet id + secret — using KEYCLOAK_CLIENT_ID (often mainnet in
+  // .env.local) with KEYCLOAK_CLIENT_SECRET_DEVNET yields invalid_grant.
+  const clientId =
+    !isMainnet && process.env.KEYCLOAK_CLIENT_ID_DEVNET
+      ? process.env.KEYCLOAK_CLIENT_ID_DEVNET
+      : envReq("KEYCLOAK_CLIENT_ID");
   const clientSecret =
     !isMainnet && process.env.KEYCLOAK_CLIENT_SECRET_DEVNET
       ? process.env.KEYCLOAK_CLIENT_SECRET_DEVNET

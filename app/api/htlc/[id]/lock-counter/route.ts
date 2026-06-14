@@ -18,11 +18,6 @@ export async function POST(
     if (auth.error) return auth.error;
     const svc = htlcService();
     const existing = await svc.getOrder(id);
-    // LOOP orders: NO Canton action here. Custody ordering (solver-robbery guard):
-    // the CBTC is delivered only AFTER the user reveals the secret (claim-counter →
-    // claimCounter does reveal-then-deliver). Returning the order unchanged lets the
-    // daemon mark this step done; the UI drives the reveal.
-    // Managed (email) orders keep the proven on-ledger HtlcLock path, untouched.
     const order =
       existing?.counterMode === "loop" ? existing : await svc.lockCounter(id);
     return NextResponse.json({ order });

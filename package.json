@@ -14,12 +14,16 @@
     "lint": "eslint",
     "test": "tsx --test lib/**/*.test.ts",
     "transfer:check:devnet": "bash scripts/with-env.sh devnet npx tsx scripts/transfer-devnet-check.mts",
+    "enable-cc:devnet": "bash scripts/with-env.sh devnet npx tsx scripts/enable-cc-party.mts",
+    "enable-cbtc:devnet": "bash scripts/with-env.sh devnet npx tsx scripts/enable-cbtc-party.mts",
+    "check-swap-preapprovals:devnet": "bash scripts/with-env.sh devnet npx tsx scripts/check-swap-preapprovals.mts",
     "dev:all": "bash scripts/dev-all.sh",
     "stop": "bash scripts/stop-all.sh",
     "solver:api": "npm --prefix swap-solver run api",
     "solver:watch": "npm --prefix swap-solver run watch",
     "solver:htlc": "npm --prefix swap-solver run htlc-daemon",
-    "solver:htlc:mainnet": "npm --prefix swap-solver run htlc-daemon:mainnet"
+    "solver:htlc:mainnet": "npm --prefix swap-solver run htlc-daemon:mainnet",
+    "solver:canton-swap": "npm --prefix swap-solver run canton-swap-daemon"
   },
   "dependencies": {
     "@base-ui/react": "^1.5.0",

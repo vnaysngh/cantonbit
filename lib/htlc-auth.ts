@@ -16,7 +16,7 @@ function unauthorized(message = "Unauthorized", status = 401): GuardErr {
 }
 
 export function daemonSecret(): string {
-  return process.env.HTLC_DAEMON_SECRET ?? process.env.CRON_SECRET ?? "";
+  return process.env.HTLC_DAEMON_SECRET ?? "";
 }
 
 export function isDaemonAuthorized(req: Request): boolean {
