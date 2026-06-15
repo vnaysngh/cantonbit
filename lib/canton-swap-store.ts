@@ -25,8 +25,11 @@ function rowToOrder(r: Record<string, unknown>): CantonSwapOrder {
     ),
     userParty: r.user_party as string,
     solverParty: r.solver_party as string,
+    settlementParty: (r.settlement_party as string) ?? undefined,
     walletMode: r.wallet_mode as CantonSwapWalletMode,
     userLegOfferCid: (r.user_leg_offer_cid as string) ?? undefined,
+    userLegSubmitUpdateId: (r.user_leg_submit_update_id as string) ?? undefined,
+    userLegInboundHoldingCid: (r.user_leg_inbound_holding_cid as string) ?? undefined,
     counterLegOfferCid: (r.counter_leg_offer_cid as string) ?? undefined,
     settlementUpdateId: (r.settlement_update_id as string) ?? undefined,
     failureReason: (r.failure_reason as string) ?? undefined,
@@ -48,8 +51,11 @@ function orderToRow(o: CantonSwapOrder): Record<string, unknown> {
     quote_expires_at: new Date(o.quoteExpiresAt * 1000).toISOString(),
     user_party: o.userParty,
     solver_party: o.solverParty,
+    settlement_party: o.settlementParty ?? null,
     wallet_mode: o.walletMode,
     user_leg_offer_cid: o.userLegOfferCid ?? null,
+    user_leg_submit_update_id: o.userLegSubmitUpdateId ?? null,
+    user_leg_inbound_holding_cid: o.userLegInboundHoldingCid ?? null,
     counter_leg_offer_cid: o.counterLegOfferCid ?? null,
     settlement_update_id: o.settlementUpdateId ?? null,
     failure_reason: o.failureReason ?? null,
@@ -64,7 +70,7 @@ export interface CantonSwapStore {
   putIfStatus(o: CantonSwapOrder, expectedStatus: CantonSwapStatus): Promise<boolean>;
   byStatus(status: CantonSwapStatus): Promise<CantonSwapOrder[]>;
   byParty(party: string, limit?: number): Promise<CantonSwapOrder[]>;
-  /** Sum out_amount reserved by committed orders (excludes draft `open` intents). */
+  /** Sum out_amount reserved by in-flight orders (includes open Loop intents). */
   sumReservedOut(
     solverParty: string,
     toAsset: CantonSwapOrder["toAsset"]
@@ -138,7 +144,7 @@ export class SupabaseCantonSwapStore implements CantonSwapStore {
       .select("out_amount")
       .eq("solver_party", solverParty)
       .eq("to_asset", toAsset)
-      .in("status", ["settling", "filling", "user_locked"]);
+      .in("status", ["open", "settling", "filling", "user_locked"]);
     if (error) {
       throw new Error(`canton_swap_orders sumReservedOut: ${error.message}`);
     }

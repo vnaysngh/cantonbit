@@ -21,13 +21,16 @@ function authHeaders(): HeadersInit {
   };
 }
 
-async function fillPending(): Promise<void> {
+async function fillStatus(status: "user_locked" | "filling"): Promise<void> {
   const res = await fetch(
-    `${APP_URL}/api/canton/swap/pending?status=user_locked`,
+    `${APP_URL}/api/canton/swap/pending?status=${status}`,
     { headers: authHeaders() }
   );
   if (!res.ok) {
-    console.warn("[canton-swap-daemon] pending list failed", await res.text());
+    console.warn(
+      `[canton-swap-daemon] pending list (${status}) failed`,
+      await res.text()
+    );
     return;
   }
   const { orders } = (await res.json()) as {
@@ -40,7 +43,7 @@ async function fillPending(): Promise<void> {
   };
   for (const o of orders ?? []) {
     if (o.walletMode !== "loop") continue;
-    if (o.settlementUpdateId && o.counterLegOfferCid) {
+    if (status === "user_locked" && o.settlementUpdateId && o.counterLegOfferCid) {
       continue;
     }
     const fillRes = await fetch(`${APP_URL}/api/canton/swap/${o.id}/fill`, {
@@ -56,6 +59,11 @@ async function fillPending(): Promise<void> {
       console.log(`[canton-swap-daemon] fill ${o.id.slice(0, 12)} ok`);
     }
   }
+}
+
+async function fillPending(): Promise<void> {
+  await fillStatus("user_locked");
+  await fillStatus("filling");
 }
 
 async function expireAndReconcile(): Promise<void> {

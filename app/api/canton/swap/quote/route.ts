@@ -3,6 +3,10 @@
  */
 import { NextResponse } from "next/server";
 
+import {
+  cantonSwapQuoteRateLimitOk,
+  clientIpFromRequest
+} from "@/lib/canton-swap-rate-limit";
 import { quoteMvpCantonSwap } from "@/lib/canton-swap-quote";
 import { CantonQuoteUnavailableError } from "@/lib/canton-quote";
 import type { CantonSwapMvpAssetId } from "@/lib/canton-swap-types";
@@ -16,6 +20,10 @@ function parseMvpAsset(raw: unknown): CantonSwapMvpAssetId | null {
 
 export async function POST(req: Request) {
   try {
+    if (!cantonSwapQuoteRateLimitOk(clientIpFromRequest(req))) {
+      return NextResponse.json({ error: "rate limit exceeded" }, { status: 429 });
+    }
+
     const body = await req.json();
     const fromAsset = parseMvpAsset(body.fromAsset);
     const toAsset = parseMvpAsset(body.toAsset);

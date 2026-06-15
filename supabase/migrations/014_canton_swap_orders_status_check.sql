@@ -8,6 +8,7 @@ alter table canton_swap_orders
     status in (
       'open',
       'settling',
+      'filling',
       'user_locked',
       'filled',
       'expired',

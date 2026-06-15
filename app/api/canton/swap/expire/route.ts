@@ -12,7 +12,8 @@ export async function POST(req: Request) {
   const auth = requireDaemon(req);
   if (auth.error) return auth.error;
   const reconciled = await cantonSwapService().reconcileSettling();
+  const filling = await cantonSwapService().reconcileFilling();
   const counters = await cantonSwapService().reconcileLoopCounters();
   const expired = await cantonSwapService().expireStale();
-  return NextResponse.json({ reconciled, counters, expired });
+  return NextResponse.json({ reconciled, filling, counters, expired });
 }

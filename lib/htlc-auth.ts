@@ -113,6 +113,15 @@ export function expectedSolverCanton(): string {
   return process.env.SOLVER_CANTON_PARTY ?? process.env.NEXT_PUBLIC_SOLVER_CANTON ?? "";
 }
 
+/** Loop swap user-leg receiver — must NOT have TransferPreapproval (offer-only path). */
+export function expectedSettlementParty(): string {
+  return (
+    process.env.CANTON_SWAP_SETTLEMENT_PARTY ??
+    process.env.NEXT_PUBLIC_CANTON_SWAP_SETTLEMENT_PARTY ??
+    ""
+  );
+}
+
 export function expectedSolverEvm(): string {
   return process.env.SOLVER_EVM ?? process.env.NEXT_PUBLIC_SOLVER_EVM ?? "";
 }

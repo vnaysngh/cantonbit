@@ -91,7 +91,7 @@ import {
   resolveSwapKind
 } from "@/lib/swap-leg";
 import { quoteOutUnits, quoteGrossOutUnits } from "@/lib/htlc-quote-math";
-import { extractCreatedOfferCid, extractEventsByIdFromSubmitResult, extractLastCreatedOfferCid } from "@/lib/mint-processor-logic";
+import { extractCreatedOfferCid, extractEventsByIdFromSubmitResult, extractLastCreatedOfferCid, extractSubmitUpdateId } from "@/lib/mint-processor-logic";
 
 // HTLC EVM leg config (Base Sepolia). The new trustless escrow (replaces the old
 // oracle InputSettlerEscrow for swaps). Shared resolver fails closed in production.
@@ -176,6 +176,7 @@ type Stage =
       toAsset: string;
       inAmount: string;
       outAmount: string;
+      walletMode: "managed" | "loop";
     }
   | {
       kind: "c2c-waiting";
@@ -519,7 +520,8 @@ export default function SwapPage() {
             fromAsset,
             toAsset,
             inAmount,
-            outAmount
+            outAmount,
+            walletMode: "loop"
           });
           return;
         }
@@ -994,7 +996,8 @@ export default function SwapPage() {
             fromAsset,
             toAsset,
             inAmount,
-            outAmount: quote.outAmount
+            outAmount: quote.outAmount,
+            walletMode: "managed"
           });
           return;
         }
@@ -1036,6 +1039,7 @@ export default function SwapPage() {
           synchronizerId: prep.synchronizerId
         });
         const asset = getSwapAsset(fromAsset);
+        const submitUpdateId = extractSubmitUpdateId(submitResult);
         let offerCid = extractLoopSubmitOfferCid(submitResult);
         if (!offerCid) {
           offerCid =
@@ -1043,7 +1047,7 @@ export default function SwapPage() {
               provider,
               {
                 senderParty: loopParty,
-                receiverParty: order.solverParty,
+                receiverParty: order.settlementParty ?? order.solverParty,
                 amount: order.inAmount,
                 instrumentId: asset.instrumentId,
                 amountDecimals: asset.decimals
@@ -1054,7 +1058,10 @@ export default function SwapPage() {
         let confirmed = false;
         for (let i = 0; i < 4; i++) {
           try {
-            await cantonSwapApi.confirmUserLeg(order.id, offerCid);
+            await cantonSwapApi.confirmUserLeg(order.id, {
+              offerContractId: offerCid,
+              submitUpdateId
+            });
             confirmed = true;
             break;
           } catch {
@@ -1069,7 +1076,7 @@ export default function SwapPage() {
         }
         if (!confirmed) {
           retry(
-            "Signed in Loop but your sell offer is not visible on the solver yet — wait a few seconds and try again."
+            "Signed in Loop but we couldn't verify the transfer yet — wait a few seconds and try again."
           );
           return;
         }
@@ -1834,6 +1841,11 @@ export default function SwapPage() {
     return "ok";
   })();
 
+  const fetchingQuote =
+    stage.kind === "quoting" ||
+    (amountState === "ok" &&
+      ((isC2c && c2cQuoteLoading) || (!isC2c && !wbtcPrice)));
+
   // Single context-aware primary action.
   let primary: {
     label: string;
@@ -1857,9 +1869,9 @@ export default function SwapPage() {
         disabled: true,
         busy: true
       };
-    } else if (stage.kind === "quoting") {
+    } else if (fetchingQuote) {
       primary = {
-        label: "Getting quote…",
+        label: "Fetching quote…",
         onClick: () => {},
         disabled: true,
         busy: true
@@ -1915,7 +1927,7 @@ export default function SwapPage() {
       primary = {
         label: "Review swap",
         onClick: handleQuote,
-        disabled: reviewing
+        disabled: reviewing || fetchingQuote
       };
     }
   }
@@ -2319,13 +2331,13 @@ export default function SwapPage() {
                   Finishing your swap
                 </h3>
                 <p className="mt-0.5 text-sm text-muted-foreground">
-                  Sell leg locked — waiting for solver fill
+                  Pending sell offer — waiting for solver settlement
                 </p>
               </div>
             </div>
             <p className="text-sm leading-6 text-muted-foreground">
               {stage.note ??
-                "Your Canton sell leg is on-ledger. The solver is filling the other side — this usually takes under a minute."}
+                "Your sell leg is a pending transfer offer on Canton. The solver will accept it and deliver the counter asset in one settlement transaction — usually under a minute."}
             </p>
             <div className="mt-5 overflow-hidden rounded-2xl bg-muted/40">
               <div className="flex items-center justify-between gap-3 border-b border-foreground/5 px-4 py-3">
@@ -2353,9 +2365,17 @@ export default function SwapPage() {
         {stage.kind === "c2c-done" && (
           <SwapResultCard
             title="Swap complete"
-            subtitle="Atomic swap settled"
+            subtitle={
+              stage.walletMode === "managed"
+                ? "Atomic swap settled"
+                : "Swap settled"
+            }
             badge="Completed"
-            description="Your Canton swap settled atomically. Both legs executed in one transaction."
+            description={
+              stage.walletMode === "managed"
+                ? "Both legs executed in one Canton transaction on your managed account."
+                : "Your swap is complete on Canton."
+            }
             rows={[
               {
                 label: "You paid",
@@ -2397,7 +2417,7 @@ export default function SwapPage() {
                     ? isParticipantManaged
                       ? "Settling swap…"
                       : stage.c2cPhase === "confirm"
-                        ? "Confirming sell leg…"
+                        ? "Verifying your transfer…"
                         : "Sign in Loop wallet…"
                     : stage.quote.direction === "canton-to-evm"
                       ? "Locking CBTC on Canton…"

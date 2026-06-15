@@ -3,9 +3,10 @@
  */
 import "server-only";
 
-import { extractLastCreatedOfferCid } from "./mint-processor-logic";
-import { toBaseUnits, toBaseUnitsFloor } from "./amount-units";
+import { fetchTransactionTreeByCommandId } from "./canton-command-recovery";
+import { toBaseUnitsFloor } from "./amount-units";
 import type { CantonSwapOrder } from "./canton-swap-types";
+import { loopFillActAsParties, userLegReceiverParty } from "./canton-swap-types";
 import {
   holdingsForSwapAsset,
   registrarAdminForAsset,
@@ -13,17 +14,24 @@ import {
   resolveSwapInstrumentId
 } from "./canton-swap-holdings";
 import {
+  assertFillIncludesUserLegConsumption,
+  assertOfferOnlyUserLegEvidence,
+  buildLoopFillResultFromEvents,
+  extractCounterOfferCidFromEvents
+} from "./canton-swap-leg-verify-logic";
+import { verifyUserLegFromSubmitUpdate } from "./canton-swap-leg-verify";
+import {
   isDirectTransferKind,
+  previewLoopSwapReadiness,
   previewManagedSwapReadiness
 } from "./canton-swap-preapproval";
 import { getSwapAsset } from "./canton-assets";
-import { validateUserLegOfferSnapshot, findUserLegOfferForOrder } from "./canton-swap-offer-verify";
+import { findUserLegOfferForOrder } from "./canton-swap-offer-verify";
 import {
   isLoopFillPendingCounterAccept,
   isLoopUserLegPreapprovalSettled,
   LOOP_COUNTER_OFFER_TTL_SECONDS,
-  LOOP_USER_LEG_OFFER_TTL_SECONDS,
-  LOOP_USER_LEG_PREAPPROVAL_SETTLED
+  LOOP_USER_LEG_OFFER_TTL_SECONDS
 } from "./canton-swap-order-logic";
 import {
   assertSameSynchronizer,
@@ -45,42 +53,75 @@ export async function safeListPendingOffers(
     return await listPendingOffers(partyId);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    // m2m JWT cannot read external Loop parties — treat as empty, not fatal.
     if (msg.includes("(403)") || msg.includes("security-sensitive")) return [];
     throw e;
   }
 }
 
-function parseCounterOfferCid(eventsById: Record<string, unknown>): string {
-  return extractLastCreatedOfferCid(eventsById) ?? "";
-}
-
-function swapAmountsMatch(
-  orderAmount: string,
-  holdingAmount: string,
-  decimals: number
-): boolean {
+/** Like safeListPendingOffers but fails closed when ACS is unreadable (Loop external party). */
+export async function listPendingOffersStrict(
+  partyId: string
+): Promise<Awaited<ReturnType<typeof listPendingOffers>>> {
   try {
-    return (
-      toBaseUnitsFloor(holdingAmount, decimals) === toBaseUnits(orderAmount, decimals)
-    );
-  } catch {
-    return false;
+    return await listPendingOffers(partyId);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes("(403)") || msg.includes("security-sensitive")) {
+      throw new Error("cannot verify pending transfers — party ACS unreadable");
+    }
+    throw e;
   }
 }
 
-/** Solver already received user sell via TransferPreapproval (no pending offer). */
-async function detectLoopUserLegCustody(
-  order: CantonSwapOrder,
-  reservedCids: Set<string>
-): Promise<boolean> {
-  const decimals = getSwapAsset(order.fromAsset).decimals;
-  const holdings = await holdingsForSwapAsset(order.solverParty, order.fromAsset);
-  return holdings.some(
-    (h) =>
-      swapAmountsMatch(order.inAmount, h.payload.amount, decimals) &&
-      !reservedCids.has(h.contractId)
+function parseCounterOfferCid(
+  eventsById: Record<string, unknown>,
+  order: CantonSwapOrder
+): string {
+  const asset = getSwapAsset(order.toAsset);
+  return (
+    extractCounterOfferCidFromEvents(eventsById, {
+      senderParty: order.solverParty,
+      receiverParty: order.userParty,
+      amount: order.outAmount,
+      amountDecimals: asset.decimals
+    }) ?? ""
   );
+}
+
+async function recoverCommittedFill(
+  commandId: string,
+  order: CantonSwapOrder,
+  deliverTransferKind: string
+): Promise<{
+  updateId: string;
+  counterLegOfferCid?: string;
+  counterLegPendingAccept: boolean;
+}> {
+  const recovered = await fetchTransactionTreeByCommandId(
+    commandId,
+    order.solverParty
+  );
+  if (!recovered?.updateId) {
+    throw new Error(
+      `duplicate command committed but fill transaction not found (${commandId})`
+    );
+  }
+  return buildLoopFillResultFromEvents(
+    order,
+    recovered.updateId,
+    recovered.eventsById,
+    deliverTransferKind
+  );
+}
+
+async function isPendingUserLegOffer(
+  order: CantonSwapOrder,
+  cid: string
+): Promise<boolean> {
+  if (isLoopUserLegPreapprovalSettled(cid)) return false;
+  const receiver = userLegReceiverParty(order);
+  const pending = await safeListPendingOffers(receiver);
+  return pending.some((p) => p.contractId === cid);
 }
 
 async function buildLeg(params: {
@@ -172,12 +213,24 @@ export async function settleManagedSwap(
     }));
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    if (msg.includes("duplicate command")) {
+    if (msg.includes("duplicate command committed")) {
+      const recovered = await fetchTransactionTreeByCommandId(
+        commandId,
+        order.solverParty
+      );
+      if (!recovered?.updateId) {
+        throw new Error(
+          `duplicate command committed but settle transaction not found (${commandId})`
+        );
+      }
       return {
-        updateId: order.settlementUpdateId ?? "",
+        updateId: recovered.updateId,
+        counterLegOfferCid:
+          parseCounterOfferCid(recovered.eventsById, order) || undefined,
         counterLegPendingAccept: false
       };
     }
+    if (msg.includes("submission in flight")) throw e;
     throw e;
   }
 
@@ -186,7 +239,7 @@ export async function settleManagedSwap(
   );
   return {
     updateId,
-    counterLegOfferCid: parseCounterOfferCid(eventsById) || undefined,
+    counterLegOfferCid: parseCounterOfferCid(eventsById, order) || undefined,
     counterLegPendingAccept: false
   };
 }
@@ -200,6 +253,22 @@ export async function fillLoopSwap(order: CantonSwapOrder): Promise<{
   if (!order.userLegOfferCid) {
     throw new Error("user leg offer missing");
   }
+  if (isLoopUserLegPreapprovalSettled(order.userLegOfferCid)) {
+    throw new Error("legacy preapproval sentinel — reconfirm user leg");
+  }
+
+  const pendingOffer = await isPendingUserLegOffer(order, order.userLegOfferCid);
+  if (!pendingOffer) {
+    throw new Error(
+      "user leg pending offer not found on settlement receiver — cannot fill atomically"
+    );
+  }
+
+  const acceptLeg = await buildAcceptExercise({
+    offerContractId: order.userLegOfferCid,
+    registrarAdmin: await registrarAdminForAsset(order.fromAsset),
+    registryKind: registryKindForAsset(order.fromAsset)
+  });
 
   const deliverLeg = await buildLeg({
     senderParty: order.solverParty,
@@ -209,35 +278,25 @@ export async function fillLoopSwap(order: CantonSwapOrder): Promise<{
     expirationSeconds: LOOP_COUNTER_OFFER_TTL_SECONDS
   });
 
-  const preapprovalSettled = isLoopUserLegPreapprovalSettled(order.userLegOfferCid);
-  let acceptLeg: Awaited<ReturnType<typeof buildAcceptExercise>> | null = null;
-  if (!preapprovalSettled) {
-    acceptLeg = await buildAcceptExercise({
-      offerContractId: order.userLegOfferCid,
-      registrarAdmin: await registrarAdminForAsset(order.fromAsset),
-      registryKind: registryKindForAsset(order.fromAsset)
-    });
-  }
+  assertFillIncludesUserLegConsumption({
+    userLegOfferCid: order.userLegOfferCid,
+    acceptLegIncluded: true,
+    isPendingOffer: true
+  });
 
-  const synchronizerId = assertSameSynchronizer(
-    acceptLeg ? [acceptLeg, deliverLeg] : [deliverLeg],
-    "fill legs"
-  );
-  const commands: unknown[] = acceptLeg
-    ? [acceptLeg.command, deliverLeg.command]
-    : [deliverLeg.command];
-  const disclosed = mergeDisclosed(
-    acceptLeg
-      ? [acceptLeg.disclosedContracts, deliverLeg.disclosedContracts]
-      : [deliverLeg.disclosedContracts]
-  );
+  const synchronizerId = assertSameSynchronizer([acceptLeg, deliverLeg], "fill legs");
+  const commands = [acceptLeg.command, deliverLeg.command];
+  const disclosed = mergeDisclosed([
+    acceptLeg.disclosedContracts,
+    deliverLeg.disclosedContracts
+  ]);
   const commandId = `canton-swap-fill-${order.id}`;
 
   let updateId: string;
   let eventsById: Record<string, unknown>;
   try {
     ({ updateId, eventsById } = await submitLedgerCommands({
-      actAs: [order.solverParty],
+      actAs: loopFillActAsParties(order),
       commands,
       disclosedContracts: disclosed,
       commandId,
@@ -247,29 +306,22 @@ export async function fillLoopSwap(order: CantonSwapOrder): Promise<{
     }));
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    if (msg.includes("duplicate command")) {
-      return {
-        updateId: order.settlementUpdateId ?? "",
-        counterLegOfferCid: order.counterLegOfferCid,
-        counterLegPendingAccept: isLoopFillPendingCounterAccept(order)
-      };
+    if (msg.includes("duplicate command committed")) {
+      return recoverCommittedFill(commandId, order, deliverLeg.transferKind);
     }
+    if (msg.includes("submission in flight")) throw e;
     throw e;
   }
 
-  const counterLegOfferCid = parseCounterOfferCid(eventsById) || undefined;
-  let counterLegPendingAccept = false;
-  if (counterLegOfferCid && !isDirectTransferKind(deliverLeg.transferKind)) {
-    counterLegPendingAccept = true;
-  }
-
-  console.log(
-    `${TAG} loop fill ok order=${order.id.slice(0, 12)}… update=${updateId.slice(0, 16)}… pendingAccept=${counterLegPendingAccept}`
+  return buildLoopFillResultFromEvents(
+    order,
+    updateId,
+    eventsById,
+    deliverLeg.transferKind
   );
-  return { updateId, counterLegOfferCid, counterLegPendingAccept };
 }
 
-/** Re-deliver counter asset when the prior counter offer expired (user leg already taken). */
+/** Re-deliver counter asset when the prior counter offer expired (user sell leg already taken). */
 export async function reissueLoopCounterLeg(order: CantonSwapOrder): Promise<{
   counterLegOfferCid?: string;
   counterLegPendingAccept: boolean;
@@ -301,7 +353,7 @@ export async function reissueLoopCounterLeg(order: CantonSwapOrder): Promise<{
     synchronizerId: deliverLeg.synchronizerId || undefined
   });
 
-  const counterLegOfferCid = parseCounterOfferCid(eventsById) || undefined;
+  const counterLegOfferCid = parseCounterOfferCid(eventsById, order) || undefined;
   console.log(
     `${TAG} counter reissue ok order=${order.id.slice(0, 12)}… update=${updateId.slice(0, 16)}… cid=${counterLegOfferCid?.slice(0, 16) ?? "direct"}…`
   );
@@ -312,18 +364,22 @@ export async function reissueLoopCounterLeg(order: CantonSwapOrder): Promise<{
  * Solver rejects a pending user→solver sell offer (receiver-only), unlocking user funds.
  */
 export async function rejectUserLegOffer(order: CantonSwapOrder): Promise<void> {
-  if (!order.userLegOfferCid || isLoopUserLegPreapprovalSettled(order.userLegOfferCid)) {
+  if (
+    !order.userLegOfferCid ||
+    isLoopUserLegPreapprovalSettled(order.userLegOfferCid)
+  ) {
     return;
   }
 
-  const pending = await listPendingOffers(order.solverParty);
+  const receiver = userLegReceiverParty(order);
+  const pending = await listPendingOffers(receiver);
   if (!pending.some((p) => p.contractId === order.userLegOfferCid)) {
     return;
   }
 
   await rejectTransferOffer({
     offerContractId: order.userLegOfferCid,
-    actAs: [order.solverParty],
+    actAs: [receiver],
     registrarAdmin: await registrarAdminForAsset(order.fromAsset),
     registryKind: registryKindForAsset(order.fromAsset),
     commandId: `canton-swap-reject-${order.id}`
@@ -333,37 +389,94 @@ export async function rejectUserLegOffer(order: CantonSwapOrder): Promise<void> 
   );
 }
 
-/** Poll solver ACS for the user's sell offer after a Loop wallet submit. */
-export async function resolveUserLegOfferCid(
+export interface ResolveUserLegResult {
+  userLegOfferCid: string;
+  userLegSubmitUpdateId?: string;
+}
+
+/** Poll settlement receiver ACS for the user's sell offer after a Loop wallet submit. */
+export async function resolveUserLegEvidence(
   order: CantonSwapOrder,
-  opts?: { maxAttempts?: number; pollMs?: number; reservedCids?: Set<string> }
-): Promise<string> {
+  opts?: {
+    maxAttempts?: number;
+    pollMs?: number;
+    reservedCids?: Set<string>;
+    offerCidHint?: string;
+    submitUpdateId?: string;
+  }
+): Promise<ResolveUserLegResult> {
   const expectedInstrument = await resolveSwapInstrumentId(order.fromAsset);
+  const receiver = userLegReceiverParty(order);
   const maxAttempts = opts?.maxAttempts ?? 10;
   const pollMs = opts?.pollMs ?? 1500;
   const reservedCids = opts?.reservedCids ?? new Set<string>();
 
+  if (opts?.submitUpdateId) {
+    try {
+      const evidence = await verifyUserLegFromSubmitUpdate(opts.submitUpdateId, {
+        userParty: order.userParty,
+        solverParty: receiver,
+        inAmount: order.inAmount,
+        fromAsset: order.fromAsset,
+        expectedInstrument
+      });
+      assertOfferOnlyUserLegEvidence(evidence);
+      if (reservedCids.has(evidence.offerCid!)) {
+        throw new Error("user leg offer already reserved by another order");
+      }
+      return {
+        userLegOfferCid: evidence.offerCid!,
+        userLegSubmitUpdateId: opts.submitUpdateId
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (
+        msg.includes("already reserved by another order") ||
+        msg.includes("preapproval auto-accept") ||
+        msg.includes("does not prove pending offer")
+      ) {
+        throw e;
+      }
+      console.warn(
+        `${TAG} submitUpdateId proof unavailable order=${order.id.slice(0, 12)}…: ${msg} — falling back to ACS`
+      );
+    }
+  }
+
+  const hint = opts?.offerCidHint?.trim();
+  if (hint) {
+    for (let attempt = 0; attempt < Math.min(maxAttempts, 5); attempt++) {
+      try {
+        await verifyUserLegOffer(order, hint, { maxAttempts: 1, pollMs: 0 });
+        if (reservedCids.has(hint)) {
+          throw new Error("user leg offer already reserved by another order");
+        }
+        return { userLegOfferCid: hint, userLegSubmitUpdateId: opts?.submitUpdateId };
+      } catch {
+        if (attempt < 4) await new Promise((r) => setTimeout(r, pollMs));
+      }
+    }
+  }
+
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const offers = await safeListPendingOffers(order.solverParty);
-    const onSolver = findUserLegOfferForOrder(
+    const offers = await safeListPendingOffers(receiver);
+    const onReceiver = findUserLegOfferForOrder(
       offers,
       order,
       expectedInstrument,
       reservedCids
     );
-    if (onSolver) return onSolver;
+    if (onReceiver) {
+      return {
+        userLegOfferCid: onReceiver,
+        userLegSubmitUpdateId: opts?.submitUpdateId
+      };
+    }
 
     if (attempt === 0 && offers.length > 0) {
       console.warn(
-        `${TAG} resolveUserLegOfferCid: ${offers.length} offer(s) on solver ACS but none matched order=${order.id.slice(0, 12)}… user=${order.userParty.slice(0, 24)}… amount=${order.inAmount}`
+        `${TAG} resolveUserLegEvidence: ${offers.length} offer(s) on settlement ACS but none matched order=${order.id.slice(0, 12)}…`
       );
-    }
-
-    if (attempt % 3 === 2 && (await detectLoopUserLegCustody(order, reservedCids))) {
-      console.log(
-        `${TAG} user leg auto-settled via preapproval order=${order.id.slice(0, 12)}…`
-      );
-      return LOOP_USER_LEG_PREAPPROVAL_SETTLED;
     }
 
     if (attempt < maxAttempts - 1) {
@@ -372,7 +485,7 @@ export async function resolveUserLegOfferCid(
   }
 
   throw new Error(
-    "user leg offer not visible on solver yet — wait a moment and try again"
+    "user leg offer not visible on settlement receiver yet — wait a moment and try again"
   );
 }
 
@@ -387,7 +500,7 @@ export async function verifyUserLegOffer(
   const pollMs = opts?.pollMs ?? 1000;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const offers = await safeListPendingOffers(order.solverParty);
+    const offers = await safeListPendingOffers(userLegReceiverParty(order));
     const offer = offers.find((o) => o.contractId === offerCid);
     if (offer) {
       const matched = findUserLegOfferForOrder([offer], order, expectedInstrument);
@@ -397,19 +510,39 @@ export async function verifyUserLegOffer(
       await new Promise((r) => setTimeout(r, pollMs));
     }
   }
-  throw new Error("user leg offer not found on solver ACS");
+  throw new Error("user leg offer not found on settlement receiver ACS");
 }
+
+/** True when user received counter asset from this swap's counter leg. */
+export async function userReceivedCounterLeg(order: CantonSwapOrder): Promise<boolean> {
+  if (!order.counterLegOfferCid || !order.settlementUpdateId) return false;
+  if (!isLoopFillPendingCounterAccept(order)) {
+    return true;
+  }
+  const asset = getSwapAsset(order.toAsset);
+  const need = toBaseUnitsFloor(order.outAmount, asset.decimals);
+  const holdings = await holdingsForSwapAsset(order.userParty, order.toAsset);
+  return holdings.some(
+    (h) =>
+      toBaseUnitsFloor(String(h.payload?.amount ?? "0"), asset.decimals) === need
+  );
+}
+
+export { previewLoopSwapReadiness };
 
 export async function prepareLoopUserLeg(order: CantonSwapOrder): Promise<{
   command: unknown;
   disclosedContracts: ReturnType<typeof mergeDisclosed>;
   synchronizerId: string;
+  transferKind: string;
+  counterRequiresAccept: boolean;
 }> {
+  const receiver = userLegReceiverParty(order);
   const instrumentId = await resolveSwapInstrumentId(order.fromAsset);
   const registrarAdmin = await registrarAdminForAsset(order.fromAsset);
   const built = await buildTransferExercise({
     senderParty: order.userParty,
-    receiverParty: order.solverParty,
+    receiverParty: receiver,
     amount: order.inAmount,
     inputHoldings: await holdingsForSwapAsset(order.userParty, order.fromAsset),
     expirationSeconds: LOOP_USER_LEG_OFFER_TTL_SECONDS,
@@ -419,11 +552,40 @@ export async function prepareLoopUserLeg(order: CantonSwapOrder): Promise<{
     assetSymbol: getSwapAsset(order.fromAsset).symbol,
     memo: "OranjSwap"
   });
+
+  if (isDirectTransferKind(built.transferKind)) {
+    const preview = await previewLoopSwapReadiness({
+      userParty: order.userParty,
+      solverParty: order.solverParty,
+      settlementParty: order.settlementParty,
+      fromAsset: order.fromAsset,
+      toAsset: order.toAsset,
+      inAmount: order.inAmount,
+      outAmount: order.outAmount
+    });
+    throw new Error(
+      preview.issues[0] ??
+        "Swap requires pending transfer offer — settlement receiver must not have TransferPreapproval"
+    );
+  }
+
+  const counterPreview = await previewLoopSwapReadiness({
+    userParty: order.userParty,
+    solverParty: order.solverParty,
+    settlementParty: order.settlementParty,
+    fromAsset: order.fromAsset,
+    toAsset: order.toAsset,
+    inAmount: order.inAmount,
+    outAmount: order.outAmount
+  });
+
   return {
     command: built.command,
     disclosedContracts: built.disclosedContracts,
     synchronizerId:
       built.synchronizerId ||
-      pickSynchronizerId([built.disclosedContracts])
+      pickSynchronizerId([built.disclosedContracts]),
+    transferKind: built.transferKind,
+    counterRequiresAccept: counterPreview.counterRequiresAccept
   };
 }

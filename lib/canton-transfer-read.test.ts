@@ -5,8 +5,6 @@ import { readTransferInstructionPayload } from "./transfer-instruction-read";
 
 test("readTransferInstructionPayload: nested interface view transfer", () => {
   const payload = readTransferInstructionPayload({
-    contractId: "cid-1",
-    templateId: "tpl",
     interfaceViews: [
       {
         interfaceId:
@@ -30,8 +28,6 @@ test("readTransferInstructionPayload: nested interface view transfer", () => {
 
 test("readTransferInstructionPayload: flat interface view", () => {
   const payload = readTransferInstructionPayload({
-    contractId: "cid-2",
-    templateId: "tpl",
     interfaceViews: [
       {
         interfaceId:
@@ -51,8 +47,6 @@ test("readTransferInstructionPayload: flat interface view", () => {
 
 test("readTransferInstructionPayload: createArgument.transfer fallback", () => {
   const payload = readTransferInstructionPayload({
-    contractId: "cid-3",
-    templateId: "tpl",
     createArgument: {
       transfer: {
         sender: "user::3",

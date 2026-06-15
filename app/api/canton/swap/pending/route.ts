@@ -9,7 +9,7 @@ import { requireDaemon } from "@/lib/htlc-auth";
 
 export const dynamic = "force-dynamic";
 
-const ALLOWED: CantonSwapStatus[] = ["user_locked", "open"];
+const ALLOWED: CantonSwapStatus[] = ["user_locked", "open", "filling"];
 
 export async function GET(req: Request) {
   const auth = requireDaemon(req);

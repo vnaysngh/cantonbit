@@ -2,6 +2,7 @@ import { getSwapAsset, matchesInstrument } from "./canton-assets";
 import { toBaseUnits, toBaseUnitsFloor } from "./amount-units";
 import type { InstrumentId } from "./constants";
 import type { CantonSwapMvpAssetId } from "./canton-swap-types";
+import { userLegReceiverParty } from "./canton-swap-types";
 
 /** Minimal offer fields used to validate a Loop user sell leg against an order. */
 export interface UserLegOfferSnapshot {
@@ -14,7 +15,7 @@ export interface UserLegOfferSnapshot {
   instrumentId?: { admin?: string; id?: string };
 }
 
-/** Same lenient matching as HTLC confirmLoopSellerLock (sender + amount >= order). */
+/** Exact amount match at confirm — no silent surplus capture. */
 export function findUserLegOfferForOrder(
   offers: UserLegOfferSnapshot[],
   order: {
@@ -22,6 +23,7 @@ export function findUserLegOfferForOrder(
     inAmount: string;
     userParty: string;
     solverParty: string;
+    settlementParty?: string;
   },
   expectedInstrument: InstrumentId,
   reservedCids?: Set<string>
@@ -37,9 +39,9 @@ export function findUserLegOfferForOrder(
   const matches = offers.filter((o) => {
     if (reservedCids?.has(o.contractId)) return false;
     if (o.sender !== order.userParty) return false;
-    if (o.receiver !== order.solverParty) return false;
+    if (o.receiver !== userLegReceiverParty(order as import("./canton-swap-types").CantonSwapOrder)) return false;
     try {
-      if (toBaseUnitsFloor(o.amountBtc, decimals) < orderUnits) return false;
+      if (toBaseUnitsFloor(o.amountBtc, decimals) !== orderUnits) return false;
     } catch {
       return false;
     }
@@ -66,6 +68,7 @@ export function validateUserLegOfferSnapshot(
     inAmount: string;
     userParty: string;
     solverParty: string;
+    settlementParty?: string;
   },
   expectedInstrument: InstrumentId
 ): void {

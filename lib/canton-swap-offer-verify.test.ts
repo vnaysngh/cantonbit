@@ -33,13 +33,22 @@ test("accepts matching CBTC instrument", () => {
   );
 });
 
-test("findUserLegOfferForOrder: matches HTLC-style amount >= order", () => {
+test("findUserLegOfferForOrder: exact amount match", () => {
   const cid = findUserLegOfferForOrder(
     [{ ...baseOffer, amountBtc: "0.00100000" }],
     order,
     NETWORK.instrumentId
   );
   assert.equal(cid, "offer-1");
+});
+
+test("findUserLegOfferForOrder: rejects over-funded amount", () => {
+  const cid = findUserLegOfferForOrder(
+    [{ ...baseOffer, amountBtc: "0.00200000" }],
+    order,
+    NETWORK.instrumentId
+  );
+  assert.equal(cid, null);
 });
 
 test("findUserLegOfferForOrder: rejects under-funded amount", () => {
@@ -64,6 +73,24 @@ test("rejects CC offer on CBTC sell order", () => {
       ),
     /does not match/
   );
+});
+
+test("findUserLegOfferForOrder: matches settlement receiver party", () => {
+  const cid = findUserLegOfferForOrder(
+    [{ ...baseOffer, receiver: "settle::1" }],
+    { ...order, settlementParty: "settle::1" },
+    NETWORK.instrumentId
+  );
+  assert.equal(cid, "offer-1");
+});
+
+test("findUserLegOfferForOrder: rejects offer on solver when settlement party configured", () => {
+  const cid = findUserLegOfferForOrder(
+    [baseOffer],
+    { ...order, settlementParty: "settle::1" },
+    NETWORK.instrumentId
+  );
+  assert.equal(cid, null);
 });
 
 test("allows missing instrument when other fields match", () => {

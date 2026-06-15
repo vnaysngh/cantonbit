@@ -1,18 +1,4 @@
--- Loop atomic fill in-flight guard (CAS transition open/user_locked → filling).
-alter table canton_swap_orders
-  drop constraint if exists canton_swap_orders_status_check;
+-- No-op: `filling` status is included in 014 for fresh installs.
+-- Kept so environments that already applied 014 before the squash still run 015.
 
-alter table canton_swap_orders
-  add constraint canton_swap_orders_status_check
-  check (
-    status in (
-      'open',
-      'settling',
-      'filling',
-      'user_locked',
-      'filled',
-      'expired',
-      'failed',
-      'cancelled'
-    )
-  );
+select 1;

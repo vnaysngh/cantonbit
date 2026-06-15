@@ -85,12 +85,18 @@ export const cantonSwapApi = {
     });
   },
 
-  confirmUserLeg(orderId: string, offerContractId?: string) {
+  confirmUserLeg(
+    orderId: string,
+    params?: { offerContractId?: string; submitUpdateId?: string }
+  ) {
     return json<{ order: CantonSwapOrder }>(
       `/api/canton/swap/${encodeURIComponent(orderId)}/confirm-user-leg`,
       {
         method: "POST",
-        body: JSON.stringify({ offerContractId })
+        body: JSON.stringify({
+          offerContractId: params?.offerContractId,
+          submitUpdateId: params?.submitUpdateId
+        })
       }
     );
   },

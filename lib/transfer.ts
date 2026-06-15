@@ -494,11 +494,11 @@ export async function submitLedgerCommands(params: {
   );
   const text = await res.text();
   if (!res.ok) {
-    if (
-      text.includes("DUPLICATE_COMMAND") ||
-      text.includes("SUBMISSION_ALREADY_IN_FLIGHT")
-    ) {
-      throw new Error(`duplicate command: ${params.commandId}`);
+    if (text.includes("SUBMISSION_ALREADY_IN_FLIGHT")) {
+      throw new Error(`submission in flight: ${params.commandId}`);
+    }
+    if (text.includes("DUPLICATE_COMMAND")) {
+      throw new Error(`duplicate command committed: ${params.commandId}`);
     }
     throw new Error(`ledger submit failed (${res.status}): ${text}`);
   }
@@ -903,7 +903,12 @@ export async function prepareTransferCommand(params: {
   registrarAdmin?: string;
   registryKind?: TransferRegistryKind;
   expirationSeconds?: number;
-}): Promise<{ command: unknown; disclosedContracts: DisclosedContract[]; synchronizerId: string }> {
+}): Promise<{
+  command: unknown;
+  disclosedContracts: DisclosedContract[];
+  synchronizerId: string;
+  transferKind: string;
+}> {
   const instrumentId = params.instrumentId ?? NETWORK.instrumentId;
   const registryKind =
     params.registryKind ?? registryKindForInstrument(instrumentId);
@@ -961,7 +966,12 @@ export async function prepareTransferCommand(params: {
       }
     }
   };
-  return { command, disclosedContracts, synchronizerId };
+  return {
+    command,
+    disclosedContracts,
+    synchronizerId,
+    transferKind: factory.transferKind ?? ""
+  };
 }
 
 /**

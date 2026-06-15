@@ -21,8 +21,13 @@ export async function POST(
     const body = await req.json().catch(() => ({}));
     const offerCid =
       typeof body.offerContractId === "string" ? body.offerContractId.trim() : undefined;
+    const submitUpdateId =
+      typeof body.submitUpdateId === "string" ? body.submitUpdateId.trim() : undefined;
 
-    const updated = await cantonSwapService().confirmUserLeg(id, offerCid);
+    const updated = await cantonSwapService().confirmUserLeg(id, {
+      offerCid,
+      submitUpdateId
+    });
     return NextResponse.json({ order: updated });
   } catch (e) {
     return NextResponse.json(

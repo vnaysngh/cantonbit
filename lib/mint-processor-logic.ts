@@ -51,6 +51,15 @@ export function extractEventsByIdFromSubmitResult(
   )?.transactionTree;
   if (updateTree?.eventsById) return updateTree.eventsById;
 
+  // GET /v2/updates/update/{id} → { update: { TransactionTree: { value } } }
+  const apiTreeValue = (
+    r.update as { TransactionTree?: { value?: unknown } }
+  )?.TransactionTree?.value;
+  if (apiTreeValue) {
+    const fromApiTree = eventsByIdFromTreeLike(apiTreeValue);
+    if (fromApiTree) return fromApiTree;
+  }
+
   const body = r.body as
     | {
         transactionTree?: { eventsById?: Record<string, unknown> };
@@ -65,6 +74,24 @@ export function extractEventsByIdFromSubmitResult(
     if (body.transaction?.eventsById) return body.transaction.eventsById;
   }
   return null;
+}
+
+/** Loop submitAndWaitForTransaction update id. */
+export function extractSubmitUpdateId(result: unknown): string | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const r = result as Record<string, unknown>;
+  for (const key of ["update_id", "updateId", "updateID"]) {
+    const v = r[key];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  const body = r.body as Record<string, unknown> | undefined;
+  if (body) {
+    for (const key of ["update_id", "updateId"]) {
+      const v = body[key];
+      if (typeof v === "string" && v.trim()) return v.trim();
+    }
+  }
+  return undefined;
 }
 
 function scanCreatedOffers(

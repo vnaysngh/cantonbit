@@ -1085,7 +1085,7 @@ function DetailDrawer({
           {cantonSwap && !TERMINAL_STATUSES.has(o.status) && (
             <div className="mb-4 rounded-xl bg-foreground/[0.04] px-4 py-3 text-xs text-foreground/60">
               {o.status === "user_locked" &&
-                "Your sell leg is locked — the solver is delivering the counter asset."}
+                "Your sell offer is locked — the solver is settling both legs."}
               {o.status === "open" && "Swap order created."}
               {o.status === "settling" && "Settling on Canton…"}
               {o.failureReason ? (

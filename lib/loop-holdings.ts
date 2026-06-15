@@ -9,9 +9,10 @@
  * burn) uses the per-contract view. Both filter to the network's CBTC instrument.
  */
 
+import { fromBaseUnits, toBaseUnitsFloor } from "@/lib/amount-units";
+import { CC_ASSET, matchesInstrument } from "@/lib/canton-assets";
 import { NETWORK } from "@/lib/constants";
 import type { InstrumentId } from "@/lib/constants";
-import { matchesInstrument } from "@/lib/canton-assets";
 
 /** Aggregate holding shape from provider.getHolding(). */
 export interface LoopHolding {
@@ -65,16 +66,17 @@ export async function readLoopCbtcBalance(
   return readLoopInstrumentBalance(provider, NETWORK.instrumentId);
 }
 
-/** CC (Amulet) total from the Loop wallet aggregate — same instrument id the ledger uses. */
+/** CC (Amulet) total from the Loop wallet aggregate — 10 dp CC precision. */
 export async function readLoopCcBalance(provider: ProviderLike): Promise<string> {
   const all = (await provider.getHolding()) as unknown as LoopHolding[];
   const amulets = all.filter((h) => h.instrument_id?.id === "Amulet");
-  if (amulets.length === 0) return "0.000000";
-  const total = sumDecimals([
-    ...amulets.map((h) => h.total_unlocked_coin ?? "0"),
-    ...amulets.map((h) => h.total_locked_coin ?? "0")
-  ]);
-  return parseFloat(total).toFixed(6);
+  if (amulets.length === 0) return fromBaseUnits(0n, CC_ASSET.decimals);
+  let total = 0n;
+  for (const h of amulets) {
+    total += toBaseUnitsFloor(h.total_unlocked_coin ?? "0", CC_ASSET.decimals);
+    total += toBaseUnitsFloor(h.total_locked_coin ?? "0", CC_ASSET.decimals);
+  }
+  return fromBaseUnits(total, CC_ASSET.decimals);
 }
 
 /** LOOP SELLER: the user's individual UNLOCKED CBTC holding contract-ids, read

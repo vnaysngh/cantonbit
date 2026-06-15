@@ -1,5 +1,5 @@
 /**
- * POST /api/canton/swap/[id]/prepare-user-leg — Loop sell leg command.
+ * POST /api/canton/swap/[id]/prepare-user-leg — Loop sell leg command (offer-only).
  */
 import { NextResponse } from "next/server";
 
@@ -8,9 +8,11 @@ import {
   registryKindForAsset,
   resolveSwapInstrumentId
 } from "@/lib/canton-swap-holdings";
-import { LOOP_USER_LEG_OFFER_TTL_SECONDS } from "@/lib/canton-swap-order-logic";
+import { assertOrderNotExpired, LOOP_USER_LEG_OFFER_TTL_SECONDS } from "@/lib/canton-swap-order-logic";
+import { previewLoopSwapReadiness, isDirectTransferKind } from "@/lib/canton-swap-preapproval";
 import { cantonSwapService } from "@/lib/canton-swap-service";
 import { requireOrderOwner } from "@/lib/canton-swap-auth";
+import { userLegReceiverParty } from "@/lib/canton-swap-types";
 import { prepareTransferCommand } from "@/lib/transfer";
 
 export const dynamic = "force-dynamic";
@@ -27,6 +29,20 @@ export async function POST(
     if (order.walletMode !== "loop") {
       return NextResponse.json({ error: "loop only" }, { status: 400 });
     }
+    if (order.status !== "open") {
+      return NextResponse.json(
+        { error: `invalid status ${order.status}` },
+        { status: 400 }
+      );
+    }
+    try {
+      assertOrderNotExpired(order);
+    } catch (e) {
+      return NextResponse.json(
+        { error: e instanceof Error ? e.message : String(e) },
+        { status: 400 }
+      );
+    }
 
     const body = await req.json().catch(() => ({}));
     const inputHoldingCids = Array.isArray(body.inputHoldingCids)
@@ -39,11 +55,12 @@ export async function POST(
       );
     }
 
+    const receiverParty = userLegReceiverParty(order);
     const instrumentId = await resolveSwapInstrumentId(order.fromAsset);
     const registrarAdmin = await registrarAdminForAsset(order.fromAsset);
     const prepared = await prepareTransferCommand({
       senderParty: order.userParty,
-      receiverParty: order.solverParty,
+      receiverParty,
       amountBtc: order.inAmount,
       inputHoldingCids,
       instrumentId,
@@ -52,7 +69,40 @@ export async function POST(
       expirationSeconds: LOOP_USER_LEG_OFFER_TTL_SECONDS
     });
 
-    return NextResponse.json(prepared);
+    if (isDirectTransferKind(prepared.transferKind)) {
+      const preview = await previewLoopSwapReadiness({
+        userParty: order.userParty,
+        solverParty: order.solverParty,
+        settlementParty: order.settlementParty,
+        fromAsset: order.fromAsset,
+        toAsset: order.toAsset,
+        inAmount: order.inAmount,
+        outAmount: order.outAmount
+      });
+      return NextResponse.json(
+        {
+          error:
+            preview.issues[0] ??
+            "Swap requires pending transfer offer — settlement receiver must not have TransferPreapproval"
+        },
+        { status: 400 }
+      );
+    }
+
+    const counterPreview = await previewLoopSwapReadiness({
+      userParty: order.userParty,
+      solverParty: order.solverParty,
+      settlementParty: order.settlementParty,
+      fromAsset: order.fromAsset,
+      toAsset: order.toAsset,
+      inAmount: order.inAmount,
+      outAmount: order.outAmount
+    });
+
+    return NextResponse.json({
+      ...prepared,
+      counterRequiresAccept: counterPreview.counterRequiresAccept
+    });
   } catch (e) {
     return NextResponse.json(
       { error: e instanceof Error ? e.message : String(e) },

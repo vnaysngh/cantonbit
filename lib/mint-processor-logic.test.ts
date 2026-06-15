@@ -14,7 +14,8 @@ import {
   decideMintAction,
   extractCreatedOfferCid,
   extractEventsByIdFromSubmitResult,
-  extractLastCreatedOfferCid
+  extractLastCreatedOfferCid,
+  extractSubmitUpdateId
 } from "./mint-processor-logic";
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -117,6 +118,31 @@ test("extractEventsByIdFromSubmitResult: update_data.eventsById (Loop submitAndW
   assert.equal(extractCreatedOfferCid(extractEventsByIdFromSubmitResult(result)), "loop-wait-offer");
 });
 
+test("extractEventsByIdFromSubmitResult: GET /v2/updates/update TransactionTree.value", () => {
+  const tree = {
+    "0": {
+      CreatedTreeEvent: {
+        value: {
+          contractId: "ledger-offer",
+          templateId: "p:TransferInstruction"
+        }
+      }
+    }
+  };
+  const result = {
+    update: {
+      TransactionTree: {
+        value: {
+          updateId: "upd-ledger",
+          eventsById: tree
+        }
+      }
+    }
+  };
+  assert.deepEqual(extractEventsByIdFromSubmitResult(result), tree);
+  assert.equal(extractCreatedOfferCid(extractEventsByIdFromSubmitResult(result)), "ledger-offer");
+});
+
 test("extractLastCreatedOfferCid: returns last TransferInstruction", () => {
   const tree = {
     "0": {
@@ -138,6 +164,14 @@ test("extractLastCreatedOfferCid: returns last TransferInstruction", () => {
   };
   assert.equal(extractCreatedOfferCid(tree), "user-offer");
   assert.equal(extractLastCreatedOfferCid(tree), "counter-offer");
+});
+
+test("extractSubmitUpdateId: reads Loop submit update id", () => {
+  assert.equal(
+    extractSubmitUpdateId({ update_id: "upd-abc", update_data: {} }),
+    "upd-abc"
+  );
+  assert.equal(extractSubmitUpdateId({ body: { updateId: "upd-body" } }), "upd-body");
 });
 
 // ─────────────────────────────────────────────────────────────────────────
