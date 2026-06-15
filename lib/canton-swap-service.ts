@@ -18,6 +18,7 @@ import {
   prepareLoopUserLeg,
   rejectUserLegOffer,
   reissueLoopCounterLeg,
+  repairManagedFillFromLedger,
   resolveUserLegEvidence,
   settleManagedSwap,
   listPendingOffersStrict,
@@ -33,7 +34,8 @@ import type {
   CantonSwapStatus,
   CantonSwapWalletMode
 } from "./canton-swap-types";
-import { expectedSolverCanton, expectedSettlementParty } from "./htlc-auth";
+import { expectedCantonSwapParty } from "./htlc-auth";
+import { swapParty } from "./canton-swap-types";
 import { NETWORK } from "./constants";
 import { randomUUID } from "crypto";
 
@@ -49,18 +51,11 @@ export class CantonSwapService {
     walletMode: CantonSwapWalletMode;
     orderId?: string;
   }): Promise<CantonSwapOrder> {
-    const solverParty = expectedSolverCanton();
-    if (!solverParty) {
-      throw new Error("solver party not configured");
-    }
-    let settlementParty: string | undefined;
-    if (params.walletMode === "loop") {
-      settlementParty = expectedSettlementParty();
-      if (!settlementParty) {
-        throw new Error(
-          "CANTON_SWAP_SETTLEMENT_PARTY not configured — required for Loop swaps"
-        );
-      }
+    const vaultParty = expectedCantonSwapParty();
+    if (!vaultParty) {
+      throw new Error(
+        "CANTON_SWAP_SETTLEMENT_PARTY not configured — required for C2C swaps"
+      );
     }
     await assertMvpOrderAmounts(
       params.fromAsset,
@@ -94,8 +89,8 @@ export class CantonSwapService {
       minOut: params.outAmount,
       quoteExpiresAt: q.expiresAt,
       userParty: params.userParty,
-      solverParty,
-      settlementParty,
+      solverParty: vaultParty,
+      settlementParty: vaultParty,
       walletMode: params.walletMode
     };
     const existing = await this.store.get(incoming.id);
@@ -105,7 +100,7 @@ export class CantonSwapService {
       Math.floor(Date.now() / 1000)
     );
     if (isNew) {
-      await this.assertSolverFloat(
+      await this.assertSwapFloat(
         incoming.solverParty,
         incoming.toAsset,
         incoming.outAmount
@@ -115,12 +110,12 @@ export class CantonSwapService {
     return order;
   }
 
-  private async assertSolverFloat(
-    solverParty: string,
+  private async assertSwapFloat(
+    vault: string,
     toAsset: CantonSwapMvpAssetId,
     outAmount: string
   ): Promise<void> {
-    const counterHoldings = await holdingsForSwapAsset(solverParty, toAsset);
+    const counterHoldings = await holdingsForSwapAsset(vault, toAsset);
     const counterAsset = getSwapAsset(toAsset);
     const need = toBaseUnits(outAmount, counterAsset.decimals);
     let float = 0n;
@@ -129,13 +124,13 @@ export class CantonSwapService {
       float += toBaseUnitsFloor(String(amt), counterAsset.decimals);
     }
 
-    const reservedStr = await this.store.sumReservedOut(solverParty, toAsset);
+    const reservedStr = await this.store.sumReservedOut(vault, toAsset);
     const reserved = toBaseUnitsFloor(reservedStr, counterAsset.decimals);
     const available = float > reserved ? float - reserved : 0n;
 
     if (available < need) {
       throw new Error(
-        `solver insufficient ${toAsset} float (need ${outAmount}, ${fromBaseUnits(available, counterAsset.decimals)} available after reservations)`
+        `swap vault insufficient ${toAsset} float (need ${outAmount}, ${fromBaseUnits(available, counterAsset.decimals)} available after reservations)`
       );
     }
   }
@@ -183,7 +178,7 @@ export class CantonSwapService {
     }
 
     await this.enforceSettlementQuote(o);
-    await this.assertSolverFloat(o.solverParty, o.toAsset, o.outAmount);
+    await this.assertSwapFloat(swapParty(o), o.toAsset, o.outAmount);
     o.status = "settling";
     const moved = await this.transition(o, "open");
     if (!moved) {
@@ -213,16 +208,37 @@ export class CantonSwapService {
       return o;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      const repaired = await this.repairManagedFromLedger(o);
+      if (repaired) return repaired;
       if (
         msg.includes("duplicate command committed but settle transaction not found")
       ) {
         return this.must(o.id);
+      }
+      if (msg.includes("submission in flight")) {
+        o.status = "settling";
+        o.failureReason = "Settle still processing on ledger — retry shortly";
+        await this.store.put(o);
+        throw e;
       }
       o.status = "failed";
       o.failureReason = msg;
       await this.transition(o, "settling");
       throw e;
     }
+  }
+
+  /** Ledger committed fill but DB shows failed/settling (e.g. duplicate settle race). */
+  async repairManagedFromLedger(o: CantonSwapOrder): Promise<CantonSwapOrder | null> {
+    if (o.walletMode !== "managed") return null;
+    const result = await repairManagedFillFromLedger(o);
+    if (!result) return null;
+    const priorStatus = o.status;
+    this.applyLoopFillResult(o, result);
+    if (!(await this.transition(o, priorStatus))) {
+      await this.store.put(o);
+    }
+    return o;
   }
 
   async prepareUserLeg(id: string): Promise<{
@@ -256,7 +272,7 @@ export class CantonSwapService {
       offerCidHint: params?.offerCid,
       submitUpdateId: params?.submitUpdateId
     });
-    await this.assertSolverFloat(o.solverParty, o.toAsset, o.outAmount);
+    await this.assertSwapFloat(swapParty(o), o.toAsset, o.outAmount);
     o.userLegOfferCid = resolved.userLegOfferCid;
     o.userLegSubmitUpdateId = resolved.userLegSubmitUpdateId ?? params?.submitUpdateId;
     o.userLegInboundHoldingCid = undefined;
@@ -299,6 +315,7 @@ export class CantonSwapService {
       return o;
     }
     await this.enforceSettlementQuote(o);
+    await this.assertSwapFloat(swapParty(o), o.toAsset, o.outAmount);
 
     if (o.status === "user_locked") {
       o.status = "filling";
@@ -381,17 +398,19 @@ export class CantonSwapService {
     return n;
   }
 
-  /** Retry orders stuck in settling after a crash between ledger submit and DB update. */
+  /** Repair managed orders when ledger committed but DB is settling/failed. */
   async reconcileSettling(): Promise<number> {
-    const orders = await this.store.byStatus("settling");
     let n = 0;
-    for (const o of orders) {
-      if (o.walletMode !== "managed") continue;
-      try {
-        await this.completeSettling(o);
-        n++;
-      } catch {
-        // leave failed state on order
+    for (const status of ["settling", "failed"] as const) {
+      const orders = await this.store.byStatus(status);
+      for (const o of orders) {
+        if (o.walletMode !== "managed") continue;
+        try {
+          const repaired = await this.repairManagedFromLedger(o);
+          if (repaired) n++;
+        } catch {
+          // leave for next tick
+        }
       }
     }
     return n;
@@ -444,10 +463,24 @@ export class CantonSwapService {
 
   async expireStale(): Promise<number> {
     const now = Math.floor(Date.now() / 1000);
+    const vaultParty = expectedCantonSwapParty();
     let n = 0;
-    for (const status of ["open", "user_locked", "filling"] as const) {
+    for (const status of ["open", "user_locked", "filling", "settling"] as const) {
       const orders = await this.store.byStatus(status);
       for (const o of orders) {
+        if (
+          vaultParty &&
+          swapParty(o) !== vaultParty &&
+          o.status !== "filled"
+        ) {
+          const priorStatus = o.status;
+          o.status = "expired";
+          o.failureReason = "order superseded — settlement vault migration";
+          if (await this.transition(o, priorStatus)) {
+            n++;
+          }
+          continue;
+        }
         if (isLoopFillPendingCounterAccept(o)) continue;
         if (!isOrderExpired(o, now)) continue;
 
@@ -495,7 +528,17 @@ export class CantonSwapService {
   }
 
   async history(party: string, limit = 50): Promise<CantonSwapOrder[]> {
-    return this.store.byParty(party, limit);
+    const orders = await this.store.byParty(party, limit);
+    const out: CantonSwapOrder[] = [];
+    for (const o of orders) {
+      if (o.walletMode === "managed" && o.status === "failed") {
+        const repaired = await this.repairManagedFromLedger(o);
+        out.push(repaired ?? o);
+      } else {
+        out.push(o);
+      }
+    }
+    return out;
   }
 
   async markCounterAccepted(id: string): Promise<CantonSwapOrder> {

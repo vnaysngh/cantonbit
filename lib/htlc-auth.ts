@@ -122,6 +122,11 @@ export function expectedSettlementParty(): string {
   );
 }
 
+/** Single funded vault for all C2C swap receive/send (Loop + managed). HTLC stays on solver party. */
+export function expectedCantonSwapParty(): string {
+  return expectedSettlementParty();
+}
+
 export function expectedSolverEvm(): string {
   return process.env.SOLVER_EVM ?? process.env.NEXT_PUBLIC_SOLVER_EVM ?? "";
 }

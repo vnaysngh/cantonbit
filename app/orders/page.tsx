@@ -1094,6 +1094,14 @@ function DetailDrawer({
             </div>
           )}
 
+          {cantonSwap && o.status === "failed" && o.failureReason ? (
+            <div className="mb-4 rounded-xl bg-red-500/8 px-4 py-3 text-xs text-red-700">
+              {o.failureReason.includes("submission in flight")
+                ? "The swap may still have settled on Canton — refresh this page to sync status."
+                : o.failureReason}
+            </div>
+          ) : null}
+
           {/* Amounts */}
           <div className="mb-4 grid grid-cols-2 gap-3">
             <div className="rounded-xl bg-foreground/[0.04] px-3 py-2.5">

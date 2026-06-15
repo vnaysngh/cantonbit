@@ -55,6 +55,46 @@ test("buildLoopFillResultFromEvents: pending accept when counter offer created",
   assert.equal(result.counterLegPendingAccept, true);
 });
 
+test("buildLoopFillResultFromEvents: counter sender uses settlement vault", () => {
+  const order = {
+    id: "swap-1",
+    solverParty: "warpx::1",
+    settlementParty: "vault::1",
+    userParty: "user::1",
+    toAsset: "CC" as const,
+    outAmount: "10"
+  };
+  const result = buildLoopFillResultFromEvents(
+    order as import("./canton-swap-types").CantonSwapOrder,
+    "update-1",
+    {
+      "0": {
+        CreatedTreeEvent: {
+          value: {
+            contractId: "counter-1",
+            templateId: "pkg:TransferInstruction",
+            interfaceViews: [
+              {
+                interfaceId:
+                  "#splice-api-token-transfer-instruction-v1:Splice.Api.Token.TransferInstructionV1:TransferInstruction",
+                viewValue: {
+                  transfer: {
+                    sender: "vault::1",
+                    receiver: "user::1",
+                    amount: "10"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "offer"
+  );
+  assert.equal(result.counterLegOfferCid, "counter-1");
+});
+
 test("buildLoopFillResultFromEvents: direct transfer not pending accept", () => {
   const order = {
     id: "swap-1",

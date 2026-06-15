@@ -28,8 +28,9 @@ export interface CantonSwapOrder {
   minOut: string;
   quoteExpiresAt: number;
   userParty: string;
+  /** C2C vault party — receives user sell and pays counter (same as settlementParty). */
   solverParty: string;
-  /** Loop user sell-leg receiver (no preapproval). Counter leg still from solverParty. */
+  /** Vault party for user sell receiver (no preapproval). Same id as solverParty for C2C. */
   settlementParty?: string;
   walletMode: CantonSwapWalletMode;
   userLegOfferCid?: string;
@@ -65,14 +66,17 @@ export function isCantonSwapActive(o: CantonSwapOrder): boolean {
   return !CANTON_SWAP_TERMINAL.includes(o.status);
 }
 
-/** Party that receives the Loop user sell leg (pending offer ACS). */
-export function userLegReceiverParty(o: CantonSwapOrder): string {
+/** Vault party for all C2C legs (receive user sell + pay counter). */
+export function swapParty(o: CantonSwapOrder): string {
   return o.settlementParty ?? o.solverParty;
 }
 
-/** actAs parties for atomic Loop fill (accept on receiver + deliver from solver). */
+/** Party that receives the user sell leg (pending offer ACS). */
+export function userLegReceiverParty(o: CantonSwapOrder): string {
+  return swapParty(o);
+}
+
+/** actAs parties for atomic fill (Accept + counter deliver from vault). */
 export function loopFillActAsParties(o: CantonSwapOrder): string[] {
-  const receiver = userLegReceiverParty(o);
-  if (receiver === o.solverParty) return [o.solverParty];
-  return [receiver, o.solverParty];
+  return [swapParty(o)];
 }

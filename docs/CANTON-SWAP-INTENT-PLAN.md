@@ -77,14 +77,34 @@ This is **custody-first**, not atomic swap. It contradicts the intended “accep
 
 ---
 
+## Unified settlement vault (C2C)
+
+All same-Canton swaps (Loop **and** managed) use **one funded vault party** (`CANTON_SWAP_SETTLEMENT_PARTY`):
+
+| Party | Role |
+|-------|------|
+| `CANTON_SWAP_SETTLEMENT_PARTY` | Receive user sell offers **and** pay counter legs (CBTC + CC float) |
+| `NEXT_PUBLIC_SOLVER_CANTON` (`warpx-devnet-1`) | **HTLC / cross-chain only** — unchanged |
+
+The vault must **not** have CBTC or CC TransferPreapproval (offer-only user legs). Fund from warpx via `npm run fund-swap-vault:devnet` (default 100k CC + 0.5 CBTC). Sweep accumulated CBTC to treasury later.
+
+```
+User sell  →  offer to vault
+Vault fill →  Accept user offer + deliver counter (one submit, actAs vault)
+```
+
+Managed settle chains **offer** (backend `actAs` user) + **fill** (backend `actAs` vault) in one API call — same economics as Loop, not a single-tx direct path.
+
+---
+
 ## Inverted preapproval requirements (important)
 
-| Leg | Managed (one tx, both actAs) | Loop (user signs first) |
-|-----|------------------------------|-------------------------|
-| User sell → receiver | **Direct** inside same submit | **Offer** — must NOT auto-settle on user sign |
-| Counter → user | **Direct** inside same submit | **Direct** if user has CC preapproval; else offer + user Accept |
+| Leg | Managed + Loop (unified) |
+|-----|--------------------------|
+| User sell → vault | **Offer** — vault must NOT auto-settle on sign |
+| Counter vault → user | **Direct** if user has CC/CBTC preapproval; else offer + user Accept |
 
-[`previewManagedSwapReadiness`](../lib/canton-swap-preapproval.ts) correctly requires solver preapproval for managed. Loop swap user legs must **not** use a preapproval-enabled receiver.
+[`previewManagedSwapReadiness`](../lib/canton-swap-preapproval.ts) and [`previewLoopSwapReadiness`](../lib/canton-swap-preapproval.ts) share the same vault-backed checks via `previewCantonSwapReadiness`.
 
 ---
 
@@ -145,7 +165,7 @@ DVP is the canonical CIP pattern for “atomic multi-asset settlement” ([Canto
 
 | Mode | User loses sell asset | User receives buy asset | Trust window |
 |------|----------------------|------------------------|--------------|
-| Managed settle | Same tx as receive | Same tx | **None** |
+| Managed settle | Vault fill tx (offer chained in same API call) | Same fill tx or counter Accept | **None** on sell leg once fill commits |
 | Loop offer + CC preapproval | Solver fill tx | Same fill tx | **None** at settlement |
 | Loop offer, no CC preapproval | Solver fill tx | Counter offer in fill tx; user Accepts | No sell-side custody; receive Accept is user-controlled |
 | Loop preapproval (broken) | **On user sign** | Later | **Unbounded solver custody** — **blocked in redesign** |
@@ -163,11 +183,12 @@ UI must not claim “atomic” or “both legs one transaction” for Loop until
 - `fillLoopSwap`: always Accept + deliver; never deliver-only.
 - Honest UI copy (managed vs Loop).
 
-### Phase 2 — Settlement receiver party ✓
+### Phase 2 — Settlement vault party ✓
 
 - Env: `CANTON_SWAP_SETTLEMENT_PARTY` (no TransferPreapproval).
-- User sell leg receiver = settlement party; counter from solver float party.
-- m2m `CanActAs` on settlement party for Accept in fill.
+- **Single vault** for user sell receiver + counter sender (Loop + managed).
+- m2m `CanActAs` on vault for Accept + deliver in fill.
+- HTLC solver party (`NEXT_PUBLIC_SOLVER_CANTON`) unchanged.
 
 ### Phase 3 — Intent hardening ✓
 
@@ -192,7 +213,7 @@ UI must not claim “atomic” or “both legs one transaction” for Loop until
 ## Order statuses
 
 ```
-open → settling → filled                    (managed)
+open → settling → filled                    (managed: offer + vault fill)
 open → user_locked → filling → filled       (loop, after user signs offer)
 open | user_locked → expired | failed | cancelled
 ```
@@ -226,7 +247,7 @@ open | user_locked → expired | failed | cancelled
 - `GET /api/canton/swap/readiness` — Loop pre-sign readiness (offer path + counter UX)
 - `GET /api/canton/swap/assets` — CBTC + CC
 - `POST /api/canton/swap` — create intent
-- `POST /api/canton/swap/[id]/settle` — managed atomic settle
+- `POST /api/canton/swap/[id]/settle` — managed vault-backed settle (offer + fill)
 - `POST /api/canton/swap/[id]/prepare-user-leg` — Loop sell command (must be offer kind)
 - `POST /api/canton/swap/[id]/confirm-user-leg` — bind offer CID → `user_locked`
 - `POST /api/canton/swap/[id]/fill` — solver atomic fill (daemon)
@@ -245,8 +266,10 @@ If the user lacks CC preapproval, solver fill creates a counter **offer**; UI sh
 
 - Canton swap daemon: `npm run solver:canton-swap`
 - Cross-chain HTLC daemon: `npm run solver:htlc`
-- Solver party: `NEXT_PUBLIC_SOLVER_CANTON`
-- Settlement party (required for Loop): `CANTON_SWAP_SETTLEMENT_PARTY`
+- HTLC solver party: `NEXT_PUBLIC_SOLVER_CANTON` (warpx — **not** used for C2C float)
+- C2C settlement vault: `CANTON_SWAP_SETTLEMENT_PARTY` (required for all C2C swaps)
+- Fund vault: `npm run fund-swap-vault:devnet` (default 100k CC + 0.5 CBTC from warpx)
+- Monitor balances: `npm run party-balances:devnet`
 - Daemon auth: `HTLC_DAEMON_SECRET` or `CRON_SECRET`
 
 ---
@@ -259,8 +282,8 @@ Old `canton-to-canton` rows in `htlc_orders` are **not migrated**. New same-chai
 
 ## Constraints
 
-- Managed atomic path requires **direct** transfer kind on both legs **within one submit**.
-- Loop user leg requires **offer** transfer kind on sign (settlement receiver without preapproval).
-- Solver must hold sufficient counter-asset float at create and fill time.
+- All C2C orders store vault id in both `solver_party` and `settlement_party`.
+- User sell leg requires **offer** transfer kind (vault without preapproval).
+- Vault must hold sufficient counter-asset float at create and fill time.
 - UTXO limit (10 holdings) — warn at 8.
 - DVP multi-leg settlement requires same synchronizer across registries ([CIP-0056 global synchronizer note](https://deepwiki.com/canton-foundation/cips/5.1.1-fop-and-dvp-transfer-workflows)).

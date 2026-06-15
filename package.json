@@ -19,6 +19,7 @@
     "check-swap-preapprovals:devnet": "bash scripts/with-env.sh devnet npx tsx scripts/check-swap-preapprovals.mts",
     "provision-settlement:devnet": "bash scripts/with-env.sh devnet npx tsx scripts/provision-settlement-party.mts",
     "party-balances:devnet": "bash scripts/with-env.sh devnet npx tsx scripts/party-swap-balances.mts",
+    "fund-swap-vault:devnet": "bash scripts/with-env.sh devnet npx tsx scripts/fund-swap-vault.mts",
     "dev:all": "bash scripts/dev-all.sh",
     "stop": "bash scripts/stop-all.sh",
     "solver:api": "npm --prefix swap-solver run api",

@@ -1,5 +1,5 @@
 /**
- * POST /api/canton/swap/[id]/settle — managed atomic settlement.
+ * POST /api/canton/swap/[id]/settle — managed vault-backed settle (offer + fill).
  */
 import { NextResponse } from "next/server";
 

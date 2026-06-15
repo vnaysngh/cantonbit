@@ -6,6 +6,7 @@ import { toBaseUnits, toBaseUnitsFloor } from "./amount-units";
 import { getSwapAsset } from "./canton-assets";
 import type { InstrumentId } from "./constants";
 import type { CantonSwapMvpAssetId, CantonSwapOrder } from "./canton-swap-types";
+import { swapParty } from "./canton-swap-types";
 import { readTransferInstructionPayload } from "./transfer-instruction-read";
 
 export interface UserLegEvidence {
@@ -207,7 +208,7 @@ export function buildLoopFillResultFromEvents(
   const asset = getSwapAsset(order.toAsset);
   const counterLegOfferCid =
     extractCounterOfferCidFromEvents(eventsById, {
-      senderParty: order.solverParty,
+      senderParty: swapParty(order),
       receiverParty: order.userParty,
       amount: order.outAmount,
       amountDecimals: asset.decimals

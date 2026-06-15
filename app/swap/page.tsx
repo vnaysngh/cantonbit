@@ -2331,13 +2331,13 @@ export default function SwapPage() {
                   Finishing your swap
                 </h3>
                 <p className="mt-0.5 text-sm text-muted-foreground">
-                  Pending sell offer — waiting for solver settlement
+                  Pending sell offer — waiting for vault settlement
                 </p>
               </div>
             </div>
             <p className="text-sm leading-6 text-muted-foreground">
               {stage.note ??
-                "Your sell leg is a pending transfer offer on Canton. The solver will accept it and deliver the counter asset in one settlement transaction — usually under a minute."}
+                "Your sell leg is a pending transfer offer on Canton. The settlement vault will accept it and deliver the counter asset in one fill transaction — usually under a minute."}
             </p>
             <div className="mt-5 overflow-hidden rounded-2xl bg-muted/40">
               <div className="flex items-center justify-between gap-3 border-b border-foreground/5 px-4 py-3">
@@ -2367,13 +2367,13 @@ export default function SwapPage() {
             title="Swap complete"
             subtitle={
               stage.walletMode === "managed"
-                ? "Atomic swap settled"
+                ? "Vault-backed swap settled"
                 : "Swap settled"
             }
             badge="Completed"
             description={
               stage.walletMode === "managed"
-                ? "Both legs executed in one Canton transaction on your managed account."
+                ? "Your sell leg was offered to the settlement vault and filled with the counter asset in one backend settlement."
                 : "Your swap is complete on Canton."
             }
             rows={[

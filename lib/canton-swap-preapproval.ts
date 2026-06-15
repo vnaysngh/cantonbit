@@ -5,7 +5,7 @@ import { MIN_CC_TO_ENABLE, NETWORK } from "./constants";
 import type { CantonSwapOrder } from "./canton-swap-types";
 import { hasCcEnabled } from "./enable-cc";
 import { hasCbtcPreapproval } from "./enable-cbtc-preapproval";
-import { expectedSolverCanton, expectedSettlementParty } from "./htlc-auth";
+import { expectedCantonSwapParty } from "./htlc-auth";
 import { buildTransferExercise } from "./transfer";
 import {
   holdingsForSwapAsset,
@@ -85,88 +85,7 @@ export interface ManagedSwapReadiness {
   userLegDirect: boolean;
   solverLegDirect: boolean;
   issues: string[];
-}
-
-function preapprovalIssue(params: {
-  leg: "user" | "solver";
-  asset: CantonSwapOrder["fromAsset"] | CantonSwapOrder["toAsset"];
-  receiverParty: string;
-}): string {
-  const who = params.leg === "user" ? "Your account" : "Solver";
-  const partyHint = params.receiverParty.slice(0, 28) + "…";
-  if (params.asset === "CC") {
-    return `${who} must auto-accept incoming CC — run Enable CC (Splice TransferPreapproval) on ${partyHint}`;
-  }
-  return `${who} must auto-accept incoming CBTC — tap Enable CBTC in the app (utility preapproval on ${partyHint})`;
-}
-
-export async function previewManagedSwapReadiness(params: {
-  userParty: string;
-  solverParty?: string;
-  fromAsset: CantonSwapOrder["fromAsset"];
-  toAsset: CantonSwapOrder["toAsset"];
-  inAmount: string;
-  outAmount: string;
-}): Promise<ManagedSwapReadiness> {
-  const solverParty = params.solverParty ?? expectedSolverCanton();
-  const issues: string[] = [];
-  let userLegKind = "";
-  let solverLegKind = "";
-  let userLegDirect = false;
-  let solverLegDirect = false;
-
-  try {
-    const userLeg = await previewLeg({
-      senderParty: params.userParty,
-      receiverParty: solverParty,
-      assetId: params.fromAsset,
-      amount: params.inAmount
-    });
-    userLegKind = userLeg.transferKind;
-    userLegDirect = isDirectTransferKind(userLeg.transferKind);
-    if (!userLegDirect) {
-      issues.push(
-        preapprovalIssue({
-          leg: "solver",
-          asset: params.fromAsset,
-          receiverParty: solverParty
-        })
-      );
-    }
-  } catch (e) {
-    issues.push(e instanceof Error ? e.message : String(e));
-  }
-
-  try {
-    const solverLeg = await previewLeg({
-      senderParty: solverParty,
-      receiverParty: params.userParty,
-      assetId: params.toAsset,
-      amount: params.outAmount
-    });
-    solverLegKind = solverLeg.transferKind;
-    solverLegDirect = isDirectTransferKind(solverLeg.transferKind);
-    if (!solverLegDirect) {
-      issues.push(
-        preapprovalIssue({
-          leg: "user",
-          asset: params.toAsset,
-          receiverParty: params.userParty
-        })
-      );
-    }
-  } catch (e) {
-    issues.push(e instanceof Error ? e.message : String(e));
-  }
-
-  return {
-    ready: userLegDirect && solverLegDirect && issues.length === 0,
-    userLegKind,
-    solverLegKind,
-    userLegDirect,
-    solverLegDirect,
-    issues
-  };
+  settlementParty: string;
 }
 
 export interface LoopSwapReadiness {
@@ -180,7 +99,126 @@ export interface LoopSwapReadiness {
   issues: string[];
 }
 
-/** Loop C2C: user leg must be offer (settlement receiver); counter may be direct or offer. */
+function userCounterPreapprovalIssue(params: {
+  asset: CantonSwapOrder["fromAsset"] | CantonSwapOrder["toAsset"];
+  receiverParty: string;
+}): string {
+  const partyHint = params.receiverParty.slice(0, 28) + "…";
+  if (params.asset === "CC") {
+    return `Enable CC auto-accept (Splice TransferPreapproval) on ${partyHint} for instant counter delivery`;
+  }
+  return `Enable CBTC auto-accept in the app on ${partyHint} for instant counter delivery`;
+}
+
+async function previewCantonSwapReadiness(params: {
+  userParty: string;
+  settlementParty?: string;
+  fromAsset: CantonSwapOrder["fromAsset"];
+  toAsset: CantonSwapOrder["toAsset"];
+  inAmount: string;
+  outAmount: string;
+}): Promise<LoopSwapReadiness & { userLegDirect: boolean; solverLegDirect: boolean }> {
+  const vault =
+    params.settlementParty ?? expectedCantonSwapParty();
+  const issues: string[] = [];
+  let userLegKind = "";
+  let userLegOffer = false;
+  let userLegDirect = false;
+  let counterLegKind = "";
+  let counterLegDirect = false;
+  let counterNote: string | undefined;
+
+  if (!vault) {
+    issues.push(
+      "Set CANTON_SWAP_SETTLEMENT_PARTY — required for all C2C swaps"
+    );
+  }
+
+  if (vault) {
+    try {
+      const userLeg = await previewLeg({
+        senderParty: params.userParty,
+        receiverParty: vault,
+        assetId: params.fromAsset,
+        amount: params.inAmount
+      });
+      userLegKind = userLeg.transferKind;
+      userLegOffer = !isDirectTransferKind(userLeg.transferKind);
+      userLegDirect = !userLegOffer;
+      if (!userLegOffer) {
+        issues.push(
+          `User sell leg would auto-settle (transferKind=${userLegKind}) — settlement vault ${vault.slice(0, 28)}… must not have TransferPreapproval`
+        );
+      }
+    } catch (e) {
+      issues.push(e instanceof Error ? e.message : String(e));
+    }
+
+    try {
+      const counterLeg = await previewLeg({
+        senderParty: vault,
+        receiverParty: params.userParty,
+        assetId: params.toAsset,
+        amount: params.outAmount
+      });
+      counterLegKind = counterLeg.transferKind;
+      counterLegDirect = isDirectTransferKind(counterLeg.transferKind);
+      if (!counterLegDirect) {
+        counterNote = userCounterPreapprovalIssue({
+          asset: params.toAsset,
+          receiverParty: params.userParty
+        });
+      }
+    } catch (e) {
+      issues.push(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  const allIssues = counterNote ? [...issues, counterNote] : issues;
+
+  return {
+    ready: userLegOffer && issues.length === 0,
+    userLegKind,
+    userLegOffer,
+    userLegDirect,
+    solverLegDirect: counterLegDirect,
+    counterLegKind,
+    counterLegDirect,
+    counterRequiresAccept: !counterLegDirect,
+    settlementParty: vault,
+    issues: allIssues
+  };
+}
+
+/** Managed C2C: user offer to vault + vault counter (same model as Loop). */
+export async function previewManagedSwapReadiness(params: {
+  userParty: string;
+  solverParty?: string;
+  fromAsset: CantonSwapOrder["fromAsset"];
+  toAsset: CantonSwapOrder["toAsset"];
+  inAmount: string;
+  outAmount: string;
+}): Promise<ManagedSwapReadiness> {
+  const preview = await previewCantonSwapReadiness({
+    userParty: params.userParty,
+    settlementParty: params.solverParty ?? expectedCantonSwapParty(),
+    fromAsset: params.fromAsset,
+    toAsset: params.toAsset,
+    inAmount: params.inAmount,
+    outAmount: params.outAmount
+  });
+  return {
+    ready: preview.ready,
+    userLegKind: preview.userLegKind,
+    solverLegKind: preview.counterLegKind,
+    userLegDirect: preview.userLegDirect,
+    solverLegDirect: preview.solverLegDirect,
+    issues: preview.issues,
+    settlementParty: preview.settlementParty
+  };
+}
+
+/** Loop C2C: user leg must be offer (settlement vault); counter from vault float. */
 export async function previewLoopSwapReadiness(params: {
   userParty: string;
   solverParty?: string;
@@ -190,67 +228,23 @@ export async function previewLoopSwapReadiness(params: {
   inAmount: string;
   outAmount: string;
 }): Promise<LoopSwapReadiness> {
-  const solverParty = params.solverParty ?? expectedSolverCanton();
-  const settlementParty =
-    params.settlementParty ?? (expectedSettlementParty() || solverParty);
-  const issues: string[] = [];
-  let userLegKind = "";
-  let userLegOffer = false;
-  let counterLegKind = "";
-  let counterLegDirect = false;
-  let counterNote: string | undefined;
-
-  if (!expectedSettlementParty() && settlementParty === solverParty) {
-    issues.push(
-      "Set CANTON_SWAP_SETTLEMENT_PARTY to a party without TransferPreapproval for Loop swaps"
-    );
-  }
-
-  try {
-    const userLeg = await previewLeg({
-      senderParty: params.userParty,
-      receiverParty: settlementParty,
-      assetId: params.fromAsset,
-      amount: params.inAmount
-    });
-    userLegKind = userLeg.transferKind;
-    userLegOffer = !isDirectTransferKind(userLeg.transferKind);
-    if (!userLegOffer) {
-      issues.push(
-        `User sell leg would auto-settle (transferKind=${userLegKind}) — settlement receiver ${settlementParty.slice(0, 28)}… must not have TransferPreapproval`
-      );
-    }
-  } catch (e) {
-    issues.push(e instanceof Error ? e.message : String(e));
-  }
-
-  try {
-    const counterLeg = await previewLeg({
-      senderParty: solverParty,
-      receiverParty: params.userParty,
-      assetId: params.toAsset,
-      amount: params.outAmount
-    });
-    counterLegKind = counterLeg.transferKind;
-    counterLegDirect = isDirectTransferKind(counterLeg.transferKind);
-    if (!counterLegDirect) {
-      counterNote =
-        "After solver fill you must Accept incoming CC in Loop (enable CC auto-accept for instant delivery)";
-    }
-  } catch (e) {
-    issues.push(e instanceof Error ? e.message : String(e));
-  }
-
-  const allIssues = counterNote ? [...issues, counterNote] : issues;
-
+  const preview = await previewCantonSwapReadiness({
+    userParty: params.userParty,
+    settlementParty:
+      params.settlementParty ?? params.solverParty ?? expectedCantonSwapParty(),
+    fromAsset: params.fromAsset,
+    toAsset: params.toAsset,
+    inAmount: params.inAmount,
+    outAmount: params.outAmount
+  });
   return {
-    ready: userLegOffer && issues.length === 0,
-    userLegKind,
-    userLegOffer,
-    counterLegKind,
-    counterLegDirect,
-    counterRequiresAccept: !counterLegDirect,
-    settlementParty,
-    issues: allIssues
+    ready: preview.ready,
+    userLegKind: preview.userLegKind,
+    userLegOffer: preview.userLegOffer,
+    counterLegKind: preview.counterLegKind,
+    counterLegDirect: preview.counterLegDirect,
+    counterRequiresAccept: preview.counterRequiresAccept,
+    settlementParty: preview.settlementParty,
+    issues: preview.issues
   };
 }

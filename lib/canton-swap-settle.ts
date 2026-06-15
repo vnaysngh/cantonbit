@@ -6,7 +6,7 @@ import "server-only";
 import { fetchTransactionTreeByCommandId } from "./canton-command-recovery";
 import { toBaseUnitsFloor } from "./amount-units";
 import type { CantonSwapOrder } from "./canton-swap-types";
-import { loopFillActAsParties, userLegReceiverParty } from "./canton-swap-types";
+import { loopFillActAsParties, swapParty, userLegReceiverParty } from "./canton-swap-types";
 import {
   holdingsForSwapAsset,
   registrarAdminForAsset,
@@ -27,6 +27,7 @@ import {
 } from "./canton-swap-preapproval";
 import { getSwapAsset } from "./canton-assets";
 import { findUserLegOfferForOrder } from "./canton-swap-offer-verify";
+import { extractCreatedOfferCid } from "./mint-processor-logic";
 import {
   isLoopFillPendingCounterAccept,
   isLoopUserLegPreapprovalSettled,
@@ -80,7 +81,7 @@ function parseCounterOfferCid(
   const asset = getSwapAsset(order.toAsset);
   return (
     extractCounterOfferCidFromEvents(eventsById, {
-      senderParty: order.solverParty,
+      senderParty: swapParty(order),
       receiverParty: order.userParty,
       amount: order.outAmount,
       amountDecimals: asset.decimals
@@ -99,7 +100,7 @@ async function recoverCommittedFill(
 }> {
   const recovered = await fetchTransactionTreeByCommandId(
     commandId,
-    order.solverParty
+    swapParty(order)
   );
   if (!recovered?.updateId) {
     throw new Error(
@@ -149,36 +150,20 @@ async function buildLeg(params: {
   });
 }
 
-/** Managed user: both legs in one ledger submission (requires direct/auto-accept transfers). */
-export async function settleManagedSwap(
-  order: CantonSwapOrder
-): Promise<{
-  updateId: string;
-  counterLegOfferCid?: string;
-  counterLegPendingAccept: boolean;
-}> {
+/** Managed user: backend offer to vault, then vault fill (Accept + counter). */
+async function submitManagedUserLegOffer(order: CantonSwapOrder): Promise<string> {
+  const vault = swapParty(order);
   const userLeg = await buildLeg({
     senderParty: order.userParty,
-    receiverParty: order.solverParty,
+    receiverParty: vault,
     assetId: order.fromAsset,
     amount: order.inAmount,
     expirationSeconds: 600
   });
-  const solverLeg = await buildLeg({
-    senderParty: order.solverParty,
-    receiverParty: order.userParty,
-    assetId: order.toAsset,
-    amount: order.outAmount,
-    expirationSeconds: 600
-  });
 
-  if (
-    !isDirectTransferKind(userLeg.transferKind) ||
-    !isDirectTransferKind(solverLeg.transferKind)
-  ) {
+  if (isDirectTransferKind(userLeg.transferKind)) {
     const preview = await previewManagedSwapReadiness({
       userParty: order.userParty,
-      solverParty: order.solverParty,
       fromAsset: order.fromAsset,
       toAsset: order.toAsset,
       inAmount: order.inAmount,
@@ -187,91 +172,86 @@ export async function settleManagedSwap(
     throw new Error(
       preview.issues.length
         ? preview.issues.join(". ")
-        : "Atomic swap requires auto-accept (preapproval) on both parties — enable preapproval for CBTC and CC, then retry"
+        : "Managed swap requires pending user sell offer to vault — settlement receiver must not have TransferPreapproval"
     );
   }
 
-  const synchronizerId = assertSameSynchronizer([userLeg, solverLeg], "swap legs");
-  const disclosed = mergeDisclosed([
-    userLeg.disclosedContracts,
-    solverLeg.disclosedContracts
-  ]);
-  const actAs = [order.userParty, order.solverParty];
-  const commandId = `canton-swap-${order.id}`;
-
-  let eventsById: Record<string, unknown>;
-  let updateId: string;
+  const commandId = `canton-swap-offer-${order.id}`;
   try {
-    ({ updateId, eventsById } = await submitLedgerCommands({
-      actAs,
-      commands: [userLeg.command, solverLeg.command],
-      disclosedContracts: disclosed,
+    const { eventsById } = await submitLedgerCommands({
+      actAs: [order.userParty],
+      commands: [userLeg.command],
+      disclosedContracts: userLeg.disclosedContracts,
       commandId,
       workflowId: commandId,
       applicationId: "canton-swap",
-      synchronizerId
-    }));
+      synchronizerId: userLeg.synchronizerId || undefined
+    });
+    const cid = extractCreatedOfferCid(eventsById);
+    if (cid) return cid;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    if (msg.includes("duplicate command committed")) {
-      const recovered = await fetchTransactionTreeByCommandId(
-        commandId,
-        order.solverParty
-      );
-      if (!recovered?.updateId) {
+    if (
+      msg.includes("duplicate command committed") ||
+      msg.includes("submission in flight")
+    ) {
+      const expectedInstrument = await resolveSwapInstrumentId(order.fromAsset);
+      for (let attempt = 0; attempt < 10; attempt++) {
+        if (attempt > 0) {
+          await new Promise((r) => setTimeout(r, 1500));
+        }
+        const offers = await safeListPendingOffers(vault);
+        const matched = findUserLegOfferForOrder(offers, order, expectedInstrument);
+        if (matched) return matched;
+        if (msg.includes("duplicate command committed")) {
+          const recovered = await fetchTransactionTreeByCommandId(
+            commandId,
+            order.userParty
+          );
+          const cid = recovered?.eventsById
+            ? extractCreatedOfferCid(recovered.eventsById)
+            : null;
+          if (cid) return cid;
+        }
+      }
+      if (msg.includes("submission in flight")) {
         throw new Error(
-          `duplicate command committed but settle transaction not found (${commandId})`
+          `user leg offer still in flight (${commandId}) — retry shortly`
         );
       }
-      return {
-        updateId: recovered.updateId,
-        counterLegOfferCid:
-          parseCounterOfferCid(recovered.eventsById, order) || undefined,
-        counterLegPendingAccept: false
-      };
     }
     if (msg.includes("submission in flight")) throw e;
     throw e;
   }
 
-  console.log(
-    `${TAG} managed settle ok order=${order.id.slice(0, 12)}… update=${updateId.slice(0, 16)}…`
-  );
-  return {
-    updateId,
-    counterLegOfferCid: parseCounterOfferCid(eventsById, order) || undefined,
-    counterLegPendingAccept: false
-  };
+  const resolved = await resolveUserLegEvidence(order, { maxAttempts: 8, pollMs: 1000 });
+  return resolved.userLegOfferCid;
 }
 
-/** Loop user: solver accepts user sell leg + delivers counter in one submit. */
-export async function fillLoopSwap(order: CantonSwapOrder): Promise<{
+async function fillFromUserOffer(
+  order: CantonSwapOrder,
+  userLegOfferCid: string,
+  commandId: string
+): Promise<{
   updateId: string;
   counterLegOfferCid?: string;
   counterLegPendingAccept: boolean;
 }> {
-  if (!order.userLegOfferCid) {
-    throw new Error("user leg offer missing");
-  }
-  if (isLoopUserLegPreapprovalSettled(order.userLegOfferCid)) {
-    throw new Error("legacy preapproval sentinel — reconfirm user leg");
-  }
-
-  const pendingOffer = await isPendingUserLegOffer(order, order.userLegOfferCid);
+  const pendingOffer = await isPendingUserLegOffer(order, userLegOfferCid);
   if (!pendingOffer) {
     throw new Error(
-      "user leg pending offer not found on settlement receiver — cannot fill atomically"
+      "user leg pending offer not found on settlement vault — cannot fill atomically"
     );
   }
 
   const acceptLeg = await buildAcceptExercise({
-    offerContractId: order.userLegOfferCid,
+    offerContractId: userLegOfferCid,
     registrarAdmin: await registrarAdminForAsset(order.fromAsset),
     registryKind: registryKindForAsset(order.fromAsset)
   });
 
   const deliverLeg = await buildLeg({
-    senderParty: order.solverParty,
+    senderParty: swapParty(order),
     receiverParty: order.userParty,
     assetId: order.toAsset,
     amount: order.outAmount,
@@ -279,7 +259,7 @@ export async function fillLoopSwap(order: CantonSwapOrder): Promise<{
   });
 
   assertFillIncludesUserLegConsumption({
-    userLegOfferCid: order.userLegOfferCid,
+    userLegOfferCid,
     acceptLegIncluded: true,
     isPendingOffer: true
   });
@@ -290,7 +270,6 @@ export async function fillLoopSwap(order: CantonSwapOrder): Promise<{
     acceptLeg.disclosedContracts,
     deliverLeg.disclosedContracts
   ]);
-  const commandId = `canton-swap-fill-${order.id}`;
 
   let updateId: string;
   let eventsById: Record<string, unknown>;
@@ -321,6 +300,69 @@ export async function fillLoopSwap(order: CantonSwapOrder): Promise<{
   );
 }
 
+export async function settleManagedSwap(
+  order: CantonSwapOrder
+): Promise<{
+  updateId: string;
+  counterLegOfferCid?: string;
+  counterLegPendingAccept: boolean;
+}> {
+  const userLegOfferCid = await submitManagedUserLegOffer(order);
+  const commandId = `canton-swap-${order.id}`;
+  const result = await fillFromUserOffer(order, userLegOfferCid, commandId);
+  console.log(
+    `${TAG} managed settle ok order=${order.id.slice(0, 12)}… update=${result.updateId.slice(0, 16)}…`
+  );
+  return result;
+}
+
+/** Recover managed fill from committed ledger when DB lost the outcome (race / in-flight). */
+export async function repairManagedFillFromLedger(
+  order: CantonSwapOrder
+): Promise<{
+  updateId: string;
+  counterLegOfferCid?: string;
+  counterLegPendingAccept: boolean;
+} | null> {
+  const commandId = `canton-swap-${order.id}`;
+  const recovered = await fetchTransactionTreeByCommandId(
+    commandId,
+    swapParty(order),
+    50_000
+  );
+  if (!recovered?.updateId) return null;
+  const counterLegOfferCid =
+    extractCounterOfferCidFromEvents(recovered.eventsById, {
+      senderParty: swapParty(order),
+      receiverParty: order.userParty,
+      amount: order.outAmount,
+      amountDecimals: getSwapAsset(order.toAsset).decimals
+    }) ?? undefined;
+  const counterLegPendingAccept = Boolean(counterLegOfferCid);
+  return {
+    updateId: recovered.updateId,
+    counterLegOfferCid,
+    counterLegPendingAccept
+  };
+}
+
+/** Loop user: vault accepts user sell leg + delivers counter in one submit. */
+export async function fillLoopSwap(order: CantonSwapOrder): Promise<{
+  updateId: string;
+  counterLegOfferCid?: string;
+  counterLegPendingAccept: boolean;
+}> {
+  if (!order.userLegOfferCid) {
+    throw new Error("user leg offer missing");
+  }
+  if (isLoopUserLegPreapprovalSettled(order.userLegOfferCid)) {
+    throw new Error("legacy preapproval sentinel — reconfirm user leg");
+  }
+
+  const commandId = `canton-swap-fill-${order.id}`;
+  return fillFromUserOffer(order, order.userLegOfferCid, commandId);
+}
+
 /** Re-deliver counter asset when the prior counter offer expired (user sell leg already taken). */
 export async function reissueLoopCounterLeg(order: CantonSwapOrder): Promise<{
   counterLegOfferCid?: string;
@@ -331,7 +373,7 @@ export async function reissueLoopCounterLeg(order: CantonSwapOrder): Promise<{
   }
 
   const deliverLeg = await buildLeg({
-    senderParty: order.solverParty,
+    senderParty: swapParty(order),
     receiverParty: order.userParty,
     assetId: order.toAsset,
     amount: order.outAmount,
@@ -344,7 +386,7 @@ export async function reissueLoopCounterLeg(order: CantonSwapOrder): Promise<{
 
   const commandId = `canton-swap-counter-${order.id}-${Date.now()}`;
   const { updateId, eventsById } = await submitLedgerCommands({
-    actAs: [order.solverParty],
+    actAs: [swapParty(order)],
     commands: [deliverLeg.command],
     disclosedContracts: deliverLeg.disclosedContracts,
     commandId,
@@ -556,7 +598,6 @@ export async function prepareLoopUserLeg(order: CantonSwapOrder): Promise<{
   if (isDirectTransferKind(built.transferKind)) {
     const preview = await previewLoopSwapReadiness({
       userParty: order.userParty,
-      solverParty: order.solverParty,
       settlementParty: order.settlementParty,
       fromAsset: order.fromAsset,
       toAsset: order.toAsset,
@@ -571,7 +612,6 @@ export async function prepareLoopUserLeg(order: CantonSwapOrder): Promise<{
 
   const counterPreview = await previewLoopSwapReadiness({
     userParty: order.userParty,
-    solverParty: order.solverParty,
     settlementParty: order.settlementParty,
     fromAsset: order.fromAsset,
     toAsset: order.toAsset,
