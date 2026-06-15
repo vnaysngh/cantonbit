@@ -12,6 +12,37 @@ export const LOOP_USER_LEG_OFFER_TTL_SECONDS = 24 * 60 * 60;
 /** Solver auto-accepted user sell via TransferPreapproval — no pending offer CID. */
 export const LOOP_USER_LEG_PREAPPROVAL_SETTLED = "transfer-preapproval-settled";
 
+/** Min wait after counter leaves pending ACS before vault may reissue (ledger propagation). */
+export const COUNTER_REISSUE_COOLDOWN_SECONDS = 90;
+
+export function counterReissueCooldownElapsed(
+  clearedAtUnix: number | undefined,
+  nowUnix = Math.floor(Date.now() / 1000)
+): boolean {
+  if (!clearedAtUnix) return false;
+  return nowUnix >= clearedAtUnix + COUNTER_REISSUE_COOLDOWN_SECONDS;
+}
+
+export function loopFillCommandId(orderId: string): string {
+  return `canton-swap-fill-${orderId}`;
+}
+
+export function loopCounterReissueCommandId(orderId: string, attempt: number): string {
+  return `canton-swap-counter-${orderId}-${attempt}`;
+}
+
+/** Transient fill errors — retry via daemon reconcile, not terminal failed. */
+export function isRetriableLoopFillError(msg: string): boolean {
+  return (
+    msg.includes("offer not visible") ||
+    msg.includes("pending offer not found") ||
+    msg.includes("cannot fill atomically") ||
+    msg.includes("Retry shortly") ||
+    msg.includes("still in flight") ||
+    msg.includes("duplicate command committed but fill transaction not found")
+  );
+}
+
 export function isLoopUserLegPreapprovalSettled(cid: string | undefined | null): boolean {
   return cid === LOOP_USER_LEG_PREAPPROVAL_SETTLED;
 }
@@ -40,6 +71,14 @@ export function isOrderExpired(o: CantonSwapOrder, now = Math.floor(Date.now() /
     // Solver already filled — user must accept counter; do not auto-expire.
     return false;
   }
+  if (
+    o.walletMode === "managed" &&
+    o.status === "settling" &&
+    o.settlementUpdateId &&
+    o.counterLegOfferCid
+  ) {
+    return false;
+  }
   return now > orderDeadline(o);
 }
 
@@ -51,6 +90,20 @@ export function isLoopFillPendingCounterAccept(o: CantonSwapOrder): boolean {
     !!o.settlementUpdateId &&
     !!o.counterLegOfferCid
   );
+}
+
+/** Managed settle committed; user must accept counter offer. */
+export function isManagedPendingCounterAccept(o: CantonSwapOrder): boolean {
+  return (
+    o.walletMode === "managed" &&
+    o.status === "settling" &&
+    !!o.settlementUpdateId &&
+    !!o.counterLegOfferCid
+  );
+}
+
+export function isPendingCounterAccept(o: CantonSwapOrder): boolean {
+  return isLoopFillPendingCounterAccept(o) || isManagedPendingCounterAccept(o);
 }
 
 export function shouldSkipLoopFill(o: CantonSwapOrder): boolean {

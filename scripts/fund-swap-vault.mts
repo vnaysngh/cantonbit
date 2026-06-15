@@ -117,7 +117,7 @@ async function getDsoPartyId(jwt: string): Promise<string> {
   return dso;
 }
 
-async function listCcHoldings(jwt: string, party: string) {
+async function listCcHoldings(jwt: string, party: string, dsoAdmin: string) {
   const endRes = await fetch(`${NETWORK.ledgerHost}/v2/state/ledger-end`, {
     headers: { Authorization: `Bearer ${jwt}` }
   });
@@ -171,7 +171,11 @@ async function listCcHoldings(jwt: string, party: string) {
   const out: Array<{
     contractId: string;
     createdEventBlob: string;
-    payload: { amount: string };
+    payload: {
+      owner: string;
+      amount: string;
+      instrumentId: { admin: string; id: string };
+    };
   }> = [];
   for (const e of entries) {
     const ev = e.contractEntry?.JsActiveContract?.createdEvent;
@@ -182,7 +186,11 @@ async function listCcHoldings(jwt: string, party: string) {
     out.push({
       contractId: ev.contractId,
       createdEventBlob: ev.createdEventBlob ?? "",
-      payload: { amount: String(v.amount ?? "0") }
+      payload: {
+        owner: party,
+        amount: String(v.amount ?? "0"),
+        instrumentId: { admin: dsoAdmin, id: "Amulet" }
+      }
     });
   }
   return out;
@@ -432,7 +440,11 @@ async function fundCbtc(jwt: string, client: CantonClient): Promise<void> {
   const mapped = unlocked.map((h) => ({
     contractId: h.contractId,
     createdEventBlob: h.createdEventBlob,
-    payload: { amount: h.amount }
+    payload: {
+      owner: sourceParty,
+      amount: h.amount,
+      instrumentId: NETWORK.instrumentId
+    }
   }));
   const picked = selectHoldingsForAmount(mapped, cbtcAmount, 8, "CBTC");
 
@@ -572,7 +584,7 @@ async function fundCc(jwt: string): Promise<void> {
     return;
   }
 
-  const holdings = await listCcHoldings(jwt, sourceParty);
+  const holdings = await listCcHoldings(jwt, sourceParty, dso);
   const picked = selectHoldingsForAmount(holdings, ccAmount, 10, "CC");
   const now = new Date().toISOString();
   const executeBefore = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();

@@ -4,6 +4,10 @@ import { test } from "node:test";
 import {
   isLoopFillPendingCounterAccept,
   isOrderExpired,
+  isRetriableLoopFillError,
+  counterReissueCooldownElapsed,
+  loopCounterReissueCommandId,
+  loopFillCommandId,
   loopOrderDeadline,
   LOOP_SWAP_ORDER_TTL_SECONDS,
   resolveCreateCantonSwapOrder,
@@ -59,6 +63,33 @@ test("open loop order expires after loop TTL", () => {
   const o = baseOrder({ status: "open", createdAt: 100 });
   assert.equal(isOrderExpired(o, 100 + LOOP_SWAP_ORDER_TTL_SECONDS), false);
   assert.equal(isOrderExpired(o, 100 + LOOP_SWAP_ORDER_TTL_SECONDS + 1), true);
+});
+
+test("managed settling with counter pending never auto-expires", () => {
+  const o = baseOrder({
+    walletMode: "managed",
+    status: "settling",
+    settlementUpdateId: "upd-1",
+    counterLegOfferCid: "offer-1",
+    quoteExpiresAt: 1
+  });
+  assert.equal(isOrderExpired(o, 999_999), false);
+});
+
+test("counter reissue cooldown blocks immediate reissue", () => {
+  assert.equal(counterReissueCooldownElapsed(undefined), false);
+  assert.equal(counterReissueCooldownElapsed(1000, 1050), false);
+  assert.equal(counterReissueCooldownElapsed(1000, 1090), true);
+});
+
+test("loop fill and counter reissue command ids are deterministic", () => {
+  assert.equal(loopFillCommandId("abc"), "canton-swap-fill-abc");
+  assert.equal(loopCounterReissueCommandId("abc", 2), "canton-swap-counter-abc-2");
+});
+
+test("isRetriableLoopFillError detects transient fill failures", () => {
+  assert.equal(isRetriableLoopFillError("user leg offer not visible on settlement receiver yet"), true);
+  assert.equal(isRetriableLoopFillError("insufficient solver float"), false);
 });
 
 test("resolveCreateCantonSwapOrder: same id does not overwrite", () => {

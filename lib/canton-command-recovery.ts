@@ -139,3 +139,18 @@ export async function fetchTransactionTreeByUpdateId(
   }
   return null;
 }
+
+/** Scan party updates for a TransferInstruction Accept that consumed an offer. */
+export async function fetchTransactionTreeForOfferAccept(
+  offerCid: string,
+  partyId: string,
+  matchEvents: (
+    eventsById: Record<string, unknown>,
+    offerCid: string
+  ) => boolean,
+  lookback = DEFAULT_LOOKBACK
+): Promise<{ updateId: string; eventsById: Record<string, unknown> } | null> {
+  return scanPartyUpdateTrees(partyId, lookback, (tree) =>
+    matchEvents(eventsFromTree(tree), offerCid)
+  );
+}

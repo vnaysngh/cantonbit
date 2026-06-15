@@ -6,6 +6,8 @@ import {
   assertOrderNotExpired,
   isLoopFillPendingCounterAccept,
   isOrderExpired,
+  isRetriableLoopFillError,
+  counterReissueCooldownElapsed,
   LOOP_USER_LEG_OFFER_TTL_SECONDS,
   resolveCreateCantonSwapOrder
 } from "./canton-swap-order-logic";
@@ -18,11 +20,13 @@ import {
   prepareLoopUserLeg,
   rejectUserLegOffer,
   reissueLoopCounterLeg,
+  repairLoopFillFromLedger,
   repairManagedFillFromLedger,
   resolveUserLegEvidence,
   settleManagedSwap,
   listPendingOffersStrict,
-  userReceivedCounterLeg
+  userReceivedCounterLeg,
+  verifyCounterLegReceipt
 } from "./canton-swap-settle";
 import {
   SupabaseCantonSwapStore,
@@ -38,6 +42,14 @@ import { expectedCantonSwapParty } from "./htlc-auth";
 import { swapParty } from "./canton-swap-types";
 import { NETWORK } from "./constants";
 import { randomUUID } from "crypto";
+
+function isUniqueConstraintViolation(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const code = (err as { code?: string }).code;
+  if (code === "23505") return true;
+  const message = (err as { message?: string }).message ?? "";
+  return message.includes("duplicate key") || message.includes("unique constraint");
+}
 
 export class CantonSwapService {
   constructor(private store: CantonSwapStore) {}
@@ -194,13 +206,8 @@ export class CantonSwapService {
   private async completeSettling(o: CantonSwapOrder): Promise<CantonSwapOrder> {
     try {
       await this.enforceSettlementQuote(o);
-      const { updateId } = await settleManagedSwap(o);
-      if (!updateId) {
-        throw new Error("settle result missing settlement update id");
-      }
-      o.settlementUpdateId = updateId;
-      o.status = "filled";
-      o.failureReason = undefined;
+      const result = await settleManagedSwap(o);
+      this.applyManagedFillResult(o, result);
       if (!(await this.transition(o, "settling"))) {
         const fresh = await this.must(o.id);
         if (fresh.status === "filled") return fresh;
@@ -234,7 +241,7 @@ export class CantonSwapService {
     const result = await repairManagedFillFromLedger(o);
     if (!result) return null;
     const priorStatus = o.status;
-    this.applyLoopFillResult(o, result);
+    this.applyManagedFillResult(o, result);
     if (!(await this.transition(o, priorStatus))) {
       await this.store.put(o);
     }
@@ -275,14 +282,20 @@ export class CantonSwapService {
     await this.assertSwapFloat(swapParty(o), o.toAsset, o.outAmount);
     o.userLegOfferCid = resolved.userLegOfferCid;
     o.userLegSubmitUpdateId = resolved.userLegSubmitUpdateId ?? params?.submitUpdateId;
-    o.userLegInboundHoldingCid = undefined;
     o.status = "user_locked";
-    if (!(await this.transition(o, "open"))) {
-      const fresh = await this.must(id);
-      if (fresh.status === "user_locked") {
-        return fresh;
+    try {
+      if (!(await this.transition(o, "open"))) {
+        const fresh = await this.must(id);
+        if (fresh.status === "user_locked") {
+          return fresh;
+        }
+        throw new Error(`cannot confirm user leg from status ${fresh.status}`);
       }
-      throw new Error(`cannot confirm user leg from status ${fresh.status}`);
+    } catch (e) {
+      if (isUniqueConstraintViolation(e)) {
+        throw new Error("user leg offer already reserved by another order");
+      }
+      throw e;
     }
     return o;
   }
@@ -331,6 +344,17 @@ export class CantonSwapService {
       }
     }
 
+    if (o.status === "filling") {
+      const repaired = await repairLoopFillFromLedger(o);
+      if (repaired) {
+        this.applyLoopFillResult(o, repaired);
+        if (!(await this.transition(o, "filling"))) {
+          return this.must(id);
+        }
+        return o;
+      }
+    }
+
     try {
       const result = await fillLoopSwap(o);
       this.applyLoopFillResult(o, result);
@@ -353,6 +377,12 @@ export class CantonSwapService {
       ) {
         return this.must(id);
       }
+      if (isRetriableLoopFillError(msg)) {
+        o.status = "user_locked";
+        o.failureReason = msg;
+        await this.transition(o, "filling");
+        return this.must(id);
+      }
       o.status = "failed";
       o.failureReason = msg;
       await this.transition(o, "filling");
@@ -373,11 +403,35 @@ export class CantonSwapService {
     }
     o.settlementUpdateId = result.updateId;
     o.counterLegOfferCid = result.counterLegOfferCid ?? o.counterLegOfferCid;
+    o.counterPendingClearedAt = undefined;
     o.status = result.counterLegPendingAccept ? "user_locked" : "filled";
     if (result.counterLegPendingAccept) {
       o.failureReason =
         "Counter leg pending Loop accept — user must accept incoming transfer";
     } else {
+      o.failureReason = undefined;
+    }
+  }
+
+  private applyManagedFillResult(
+    o: CantonSwapOrder,
+    result: {
+      updateId: string;
+      counterLegOfferCid?: string;
+      counterLegPendingAccept: boolean;
+    }
+  ): void {
+    if (!result.updateId) {
+      throw new Error("settle result missing settlement update id");
+    }
+    o.settlementUpdateId = result.updateId;
+    o.counterLegOfferCid = result.counterLegOfferCid ?? o.counterLegOfferCid;
+    if (result.counterLegPendingAccept) {
+      o.status = "settling";
+      o.failureReason =
+        "Counter leg pending accept — accept incoming transfer to complete swap";
+    } else {
+      o.status = "filled";
       o.failureReason = undefined;
     }
   }
@@ -389,8 +443,45 @@ export class CantonSwapService {
     for (const o of orders) {
       if (o.walletMode !== "loop") continue;
       try {
+        const repaired = await repairLoopFillFromLedger(o);
+        if (repaired) {
+          this.applyLoopFillResult(o, repaired);
+          if (await this.transition(o, "filling")) {
+            n++;
+          }
+          continue;
+        }
         await this.fillLoop(o.id);
         n++;
+      } catch {
+        // leave for next tick
+      }
+    }
+    return n;
+  }
+
+  /** Repair failed Loop fills from ledger or reset for daemon retry. */
+  async reconcileFailedLoop(): Promise<number> {
+    const orders = await this.store.byStatus("failed");
+    let n = 0;
+    for (const o of orders) {
+      if (o.walletMode !== "loop") continue;
+      if (isOrderExpired(o)) continue;
+      try {
+        const repaired = await repairLoopFillFromLedger(o);
+        if (repaired) {
+          this.applyLoopFillResult(o, repaired);
+          if (await this.transition(o, "failed")) {
+            n++;
+          }
+          continue;
+        }
+        if (!o.userLegOfferCid) continue;
+        o.status = "user_locked";
+        o.failureReason = "Retrying after transient fill failure";
+        if (await this.transition(o, "failed")) {
+          n++;
+        }
       } catch {
         // leave for next tick
       }
@@ -407,7 +498,22 @@ export class CantonSwapService {
         if (o.walletMode !== "managed") continue;
         try {
           const repaired = await this.repairManagedFromLedger(o);
-          if (repaired) n++;
+          if (repaired) {
+            n++;
+            continue;
+          }
+          if (
+            o.status === "settling" &&
+            o.settlementUpdateId &&
+            o.counterLegOfferCid &&
+            (await userReceivedCounterLeg(o))
+          ) {
+            o.status = "filled";
+            o.failureReason = undefined;
+            if (await this.transition(o, "settling")) {
+              n++;
+            }
+          }
         } catch {
           // leave for next tick
         }
@@ -426,34 +532,106 @@ export class CantonSwapService {
 
       const pending = await listPendingOffersStrict(o.userParty);
       if (pending.some((p) => p.contractId === o.counterLegOfferCid)) {
+        if (o.counterPendingClearedAt !== undefined) {
+          o.counterPendingClearedAt = undefined;
+          await this.store.put(o);
+        }
         continue;
       }
 
-      if (await userReceivedCounterLeg(o)) {
+      const receipt = await verifyCounterLegReceipt(o, {
+        maxAttempts: 8,
+        pollMs: 1500
+      });
+      if (receipt === "received") {
         o.status = "filled";
         o.failureReason = undefined;
+        o.counterPendingClearedAt = undefined;
         if (await this.transition(o, "user_locked")) {
           n++;
         }
         continue;
       }
+      if (receipt === "pending") {
+        if (o.counterPendingClearedAt !== undefined) {
+          o.counterPendingClearedAt = undefined;
+          await this.store.put(o);
+        }
+        continue;
+      }
+
+      const now = Math.floor(Date.now() / 1000);
+      if (!o.counterPendingClearedAt) {
+        o.counterPendingClearedAt = now;
+        o.failureReason =
+          "Verifying counter accept on ledger — wait before reissue";
+        await this.store.put(o);
+        continue;
+      }
+      if (!counterReissueCooldownElapsed(o.counterPendingClearedAt, now)) {
+        continue;
+      }
+
+      const priorOfferCid = o.counterLegOfferCid;
+      const priorAttempt = o.counterReissueAttempt ?? 0;
+      const fresh = await this.must(o.id);
+      if (
+        fresh.counterLegOfferCid !== priorOfferCid ||
+        (fresh.counterReissueAttempt ?? 0) !== priorAttempt
+      ) {
+        continue;
+      }
+
+      const recheck = await verifyCounterLegReceipt(fresh, {
+        maxAttempts: 4,
+        pollMs: 1000
+      });
+      if (recheck === "received") {
+        fresh.status = "filled";
+        fresh.failureReason = undefined;
+        fresh.counterPendingClearedAt = undefined;
+        if (await this.transition(fresh, "user_locked")) {
+          n++;
+        }
+        continue;
+      }
+      if (recheck === "pending") {
+        fresh.counterPendingClearedAt = undefined;
+        await this.store.put(fresh);
+        continue;
+      }
+
+      console.warn(
+        `[canton-swap] COUNTER REISSUE order=${fresh.id.slice(0, 12)}… ` +
+          `priorCid=${priorOfferCid.slice(0, 16)}… attempt=${priorAttempt + 1} ` +
+          `settlement=${fresh.settlementUpdateId?.slice(0, 16)}…`
+      );
 
       try {
-        const result = await reissueLoopCounterLeg(o);
-        o.counterLegOfferCid = result.counterLegOfferCid ?? o.counterLegOfferCid;
+        const result = await reissueLoopCounterLeg(fresh);
+        fresh.counterReissueAttempt = result.counterReissueAttempt;
+        fresh.counterLegOfferCid = result.counterLegOfferCid ?? fresh.counterLegOfferCid;
+        fresh.counterPendingClearedAt = undefined;
         if (result.counterLegPendingAccept) {
-          o.failureReason =
+          fresh.failureReason =
             "Counter leg pending Loop accept — user must accept incoming transfer";
         } else {
-          o.status = "filled";
-          o.failureReason = undefined;
+          fresh.status = "filled";
+          fresh.failureReason = undefined;
+          fresh.counterLegOfferCid = result.counterLegOfferCid;
         }
-        if (await this.transition(o, "user_locked")) {
+        if (
+          await this.store.putIfStatusAndCounterOffer(
+            fresh,
+            "user_locked",
+            priorOfferCid
+          )
+        ) {
           n++;
         }
       } catch (e) {
         console.warn(
-          `[canton-swap] counter reissue failed ${o.id.slice(0, 12)}:`,
+          `[canton-swap] counter reissue failed ${fresh.id.slice(0, 12)}:`,
           e instanceof Error ? e.message : e
         );
       }
@@ -465,7 +643,7 @@ export class CantonSwapService {
     const now = Math.floor(Date.now() / 1000);
     const vaultParty = expectedCantonSwapParty();
     let n = 0;
-    for (const status of ["open", "user_locked", "filling", "settling"] as const) {
+    for (const status of ["open", "user_locked", "settling", "filling"] as const) {
       const orders = await this.store.byStatus(status);
       for (const o of orders) {
         if (
@@ -473,6 +651,20 @@ export class CantonSwapService {
           swapParty(o) !== vaultParty &&
           o.status !== "filled"
         ) {
+          try {
+            if (
+              o.walletMode === "loop" &&
+              o.userLegOfferCid &&
+              !o.settlementUpdateId
+            ) {
+              await rejectUserLegOffer(o);
+            }
+          } catch (e) {
+            console.warn(
+              `[canton-swap] reject on vault migration failed ${o.id.slice(0, 12)}:`,
+              e instanceof Error ? e.message : e
+            );
+          }
           const priorStatus = o.status;
           o.status = "expired";
           o.failureReason = "order superseded — settlement vault migration";
@@ -485,6 +677,29 @@ export class CantonSwapService {
         if (!isOrderExpired(o, now)) continue;
 
         const priorStatus = o.status;
+
+        if (
+          priorStatus === "filling" &&
+          o.walletMode === "loop" &&
+          !o.settlementUpdateId
+        ) {
+          try {
+            const repaired = await repairLoopFillFromLedger(o);
+            if (repaired) {
+              this.applyLoopFillResult(o, repaired);
+              if (await this.transition(o, "filling")) {
+                n++;
+              }
+              continue;
+            }
+          } catch (e) {
+            console.warn(
+              `[canton-swap] fill repair on expire failed ${o.id.slice(0, 12)}:`,
+              e instanceof Error ? e.message : e
+            );
+          }
+        }
+
         try {
           if (
             (priorStatus === "user_locked" || priorStatus === "filling") &&
@@ -543,11 +758,16 @@ export class CantonSwapService {
 
   async markCounterAccepted(id: string): Promise<CantonSwapOrder> {
     const o = await this.must(id);
-    if (o.walletMode !== "loop") {
-      throw new Error("counter accept is loop only");
-    }
-    if (o.status !== "user_locked") {
-      throw new Error(`invalid status ${o.status}`);
+    if (o.walletMode === "loop") {
+      if (o.status !== "user_locked") {
+        throw new Error(`invalid status ${o.status}`);
+      }
+    } else if (o.walletMode === "managed") {
+      if (o.status !== "settling") {
+        throw new Error(`invalid status ${o.status}`);
+      }
+    } else {
+      throw new Error("counter accept is loop or managed only");
     }
     if (!o.counterLegOfferCid) {
       throw new Error("no counter leg offer on order");
@@ -571,7 +791,8 @@ export class CantonSwapService {
 
     o.status = "filled";
     o.failureReason = undefined;
-    if (!(await this.transition(o, "user_locked"))) {
+    const priorStatus = o.walletMode === "loop" ? "user_locked" : "settling";
+    if (!(await this.transition(o, priorStatus))) {
       const fresh = await this.must(id);
       if (fresh.status === "filled") return fresh;
       throw new Error(`cannot mark filled from status ${fresh.status}`);

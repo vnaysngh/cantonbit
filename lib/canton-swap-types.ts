@@ -36,10 +36,12 @@ export interface CantonSwapOrder {
   userLegOfferCid?: string;
   /** Loop submit update id proving user signed sell leg. */
   userLegSubmitUpdateId?: string;
-  /** Solver holding CID from preapproval auto-accept (bound to this order). */
-  userLegInboundHoldingCid?: string;
   counterLegOfferCid?: string;
   settlementUpdateId?: string;
+  /** Incremented on each successful counter reissue submit (deterministic command id). */
+  counterReissueAttempt?: number;
+  /** Unix seconds when counter offer left user pending ACS (reissue cooldown starts). */
+  counterPendingClearedAt?: number;
   failureReason?: string;
   createdAt: number;
 }

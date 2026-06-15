@@ -4,6 +4,9 @@ import { test } from "node:test";
 import {
   assertFillIncludesUserLegConsumption,
   assertOfferOnlyUserLegEvidence,
+  buildLoopFillResultFromEvents,
+  counterOfferConsumedInEvents,
+  counterLegDeliveredToUserInEvents,
   extractCounterOfferCidFromEvents,
   parseUserLegEvidenceFromEvents
 } from "./canton-swap-leg-verify-logic";
@@ -62,7 +65,7 @@ test("parseUserLegEvidenceFromEvents: finds preapproval inbound holding", () => 
             createArgument: {
               owner: "solver::1",
               amount: "0.0010000000",
-              instrument: { id: "CBTC" }
+              instrument: { id: "CBTC", admin: NETWORK.instrumentId.admin }
             }
           }
         }
@@ -100,6 +103,138 @@ test("parseUserLegEvidenceFromEvents: rejects wrong sender", () => {
     orderParams
   );
   assert.equal(evidence, null);
+});
+
+test("parseUserLegEvidenceFromEvents: rejects wrong instrument on offer branch", () => {
+  const evidence = parseUserLegEvidenceFromEvents(
+    {
+      "1": {
+        CreatedTreeEvent: {
+          value: {
+            contractId: "cc-offer",
+            templateId: "pkg:Splice.Api.Token.TransferInstructionV1:TransferInstruction",
+            interfaceViews: [
+              {
+                interfaceId: TRANSFER_IFACE,
+                viewValue: {
+                  transfer: {
+                    sender: "user::1",
+                    receiver: "solver::1",
+                    amount: "0.0010000000",
+                    instrumentId: { admin: "cc-admin", id: "Amulet" }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    orderParams
+  );
+  assert.equal(evidence, null);
+});
+
+test("counterOfferConsumedInEvents: detects Accept on counter offer", () => {
+  assert.equal(
+    counterOfferConsumedInEvents(
+      {
+        "1": {
+          ExercisedTreeEvent: {
+            value: {
+              contractId: "counter-offer",
+              choice: "TransferInstruction_Accept"
+            }
+          }
+        }
+      },
+      "counter-offer"
+    ),
+    true
+  );
+  assert.equal(
+    counterOfferConsumedInEvents(
+      {
+        "1": {
+          ExercisedTreeEvent: {
+            value: {
+              contractId: "counter-offer",
+              choice: "TransferInstruction_Reject"
+            }
+          }
+        }
+      },
+      "counter-offer"
+    ),
+    false
+  );
+});
+
+test("counterLegDeliveredToUserInEvents: direct holding on user", () => {
+  assert.equal(
+    counterLegDeliveredToUserInEvents(
+      {
+        "1": {
+          CreatedTreeEvent: {
+            value: {
+              contractId: "holding-user",
+              templateId: "pkg:Utility.Registry.Holding.V0.Holding:Holding",
+              createArgument: {
+                owner: "user::1",
+                amount: "10",
+                instrument: { id: "Amulet", admin: "dso::1" }
+              }
+            }
+          }
+        }
+      },
+      {
+        senderParty: "solver::1",
+        receiverParty: "user::1",
+        amount: "10",
+        amountDecimals: 10,
+        expectedInstrument: { admin: "dso::1", id: "Amulet" }
+      }
+    ),
+    true
+  );
+});
+
+test("counterLegDeliveredToUserInEvents: pending offer is not direct delivery", () => {
+  assert.equal(
+    counterLegDeliveredToUserInEvents(
+      {
+        b: {
+          CreatedTreeEvent: {
+            value: {
+              contractId: "counter-offer",
+              templateId: "pkg:TransferInstruction",
+              interfaceViews: [
+                {
+                  interfaceId: TRANSFER_IFACE,
+                  viewValue: {
+                    transfer: {
+                      sender: "solver::1",
+                      receiver: "user::1",
+                      amount: "10"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        senderParty: "solver::1",
+        receiverParty: "user::1",
+        amount: "10",
+        amountDecimals: 10,
+        expectedInstrument: { admin: "dso::1", id: "Amulet" }
+      }
+    ),
+    false
+  );
 });
 
 test("extractCounterOfferCidFromEvents: selects solver→user counter offer", () => {

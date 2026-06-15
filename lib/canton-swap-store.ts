@@ -29,9 +29,12 @@ function rowToOrder(r: Record<string, unknown>): CantonSwapOrder {
     walletMode: r.wallet_mode as CantonSwapWalletMode,
     userLegOfferCid: (r.user_leg_offer_cid as string) ?? undefined,
     userLegSubmitUpdateId: (r.user_leg_submit_update_id as string) ?? undefined,
-    userLegInboundHoldingCid: (r.user_leg_inbound_holding_cid as string) ?? undefined,
     counterLegOfferCid: (r.counter_leg_offer_cid as string) ?? undefined,
     settlementUpdateId: (r.settlement_update_id as string) ?? undefined,
+    counterReissueAttempt: Number(r.counter_reissue_attempt ?? 0),
+    counterPendingClearedAt: r.counter_pending_cleared_at
+      ? Math.floor(new Date(r.counter_pending_cleared_at as string).getTime() / 1000)
+      : undefined,
     failureReason: (r.failure_reason as string) ?? undefined,
     createdAt: r.created_at
       ? Math.floor(new Date(r.created_at as string).getTime() / 1000)
@@ -55,9 +58,12 @@ function orderToRow(o: CantonSwapOrder): Record<string, unknown> {
     wallet_mode: o.walletMode,
     user_leg_offer_cid: o.userLegOfferCid ?? null,
     user_leg_submit_update_id: o.userLegSubmitUpdateId ?? null,
-    user_leg_inbound_holding_cid: o.userLegInboundHoldingCid ?? null,
     counter_leg_offer_cid: o.counterLegOfferCid ?? null,
     settlement_update_id: o.settlementUpdateId ?? null,
+    counter_reissue_attempt: o.counterReissueAttempt ?? 0,
+    counter_pending_cleared_at: o.counterPendingClearedAt
+      ? new Date(o.counterPendingClearedAt * 1000).toISOString()
+      : null,
     failure_reason: o.failureReason ?? null,
     updated_at: new Date().toISOString()
   };
@@ -68,6 +74,12 @@ export interface CantonSwapStore {
   put(o: CantonSwapOrder): Promise<void>;
   /** Optimistic status transition — returns false if status changed concurrently. */
   putIfStatus(o: CantonSwapOrder, expectedStatus: CantonSwapStatus): Promise<boolean>;
+  /** Status + counter offer CAS — prevents concurrent counter reissues. */
+  putIfStatusAndCounterOffer(
+    o: CantonSwapOrder,
+    expectedStatus: CantonSwapStatus,
+    expectedCounterLegOfferCid: string | null
+  ): Promise<boolean>;
   byStatus(status: CantonSwapStatus): Promise<CantonSwapOrder[]>;
   byParty(party: string, limit?: number): Promise<CantonSwapOrder[]>;
   /** Sum out_amount reserved by in-flight orders (includes open Loop intents). */
@@ -110,7 +122,38 @@ export class SupabaseCantonSwapStore implements CantonSwapStore {
       .select("id")
       .maybeSingle();
     if (error) {
-      throw new Error(`canton_swap_orders putIfStatus: ${error.message}`);
+      const err = new Error(
+        `canton_swap_orders putIfStatus: ${error.message}`
+      ) as Error & { code?: string };
+      err.code = error.code;
+      throw err;
+    }
+    return !!data;
+  }
+
+  async putIfStatusAndCounterOffer(
+    o: CantonSwapOrder,
+    expectedStatus: CantonSwapStatus,
+    expectedCounterLegOfferCid: string | null
+  ): Promise<boolean> {
+    const sb = await createSupabaseServiceClient();
+    let query = sb
+      .from(TABLE)
+      .update(orderToRow(o))
+      .eq("id", o.id)
+      .eq("status", expectedStatus);
+    if (expectedCounterLegOfferCid === null) {
+      query = query.is("counter_leg_offer_cid", null);
+    } else {
+      query = query.eq("counter_leg_offer_cid", expectedCounterLegOfferCid);
+    }
+    const { data, error } = await query.select("id").maybeSingle();
+    if (error) {
+      const err = new Error(
+        `canton_swap_orders putIfStatusAndCounterOffer: ${error.message}`
+      ) as Error & { code?: string };
+      err.code = error.code;
+      throw err;
     }
     return !!data;
   }

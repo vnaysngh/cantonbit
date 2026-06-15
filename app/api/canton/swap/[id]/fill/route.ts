@@ -1,5 +1,5 @@
 /**
- * POST /api/canton/swap/[id]/fill — solver atomic Loop fill (daemon or owner poll).
+ * POST /api/canton/swap/[id]/fill — solver atomic Loop fill (daemon only).
  */
 import { NextResponse } from "next/server";
 

@@ -3,7 +3,7 @@
  * No server-only — safe for unit tests.
  */
 import { toBaseUnits, toBaseUnitsFloor } from "./amount-units";
-import { getSwapAsset } from "./canton-assets";
+import { getSwapAsset, matchesInstrument } from "./canton-assets";
 import type { InstrumentId } from "./constants";
 import type { CantonSwapMvpAssetId, CantonSwapOrder } from "./canton-swap-types";
 import { swapParty } from "./canton-swap-types";
@@ -44,15 +44,6 @@ function amountsEqual(expected: string, actual: string, decimals: number): boole
   } catch {
     return false;
   }
-}
-
-function holdingInstrumentId(
-  arg: {
-    instrumentId?: { id?: string };
-    instrument?: { id?: string };
-  } | undefined
-): string | undefined {
-  return arg?.instrumentId?.id ?? arg?.instrument?.id;
 }
 
 function createdEventFromNode(node: unknown): {
@@ -110,6 +101,9 @@ export function parseUserLegEvidenceFromEvents(
       if (transfer.sender !== params.userParty) continue;
       if (transfer.receiver !== params.solverParty) continue;
       if (!amountsEqual(params.inAmount, transfer.amount, decimals)) continue;
+      if (!matchesInstrument(transfer.instrumentId, params.expectedInstrument)) {
+        continue;
+      }
       offerCid = created.contractId;
       continue;
     }
@@ -127,18 +121,10 @@ export function parseUserLegEvidenceFromEvents(
       const amount = arg?.amount;
       if (owner !== params.solverParty || !amount) continue;
       if (!amountsEqual(params.inAmount, amount, decimals)) continue;
-      const instrumentId = holdingInstrumentId(arg);
+      const holdingInst = arg?.instrumentId ?? arg?.instrument;
       if (
-        params.fromAsset === "CBTC" &&
-        instrumentId &&
-        instrumentId !== "CBTC"
-      ) {
-        continue;
-      }
-      if (
-        params.fromAsset === "CC" &&
-        instrumentId &&
-        instrumentId !== "Amulet"
+        holdingInst?.id &&
+        !matchesInstrument(holdingInst, params.expectedInstrument)
       ) {
         continue;
       }
@@ -149,6 +135,25 @@ export function parseUserLegEvidenceFromEvents(
   if (offerCid) return { offerCid, inboundHoldingCid };
   if (inboundHoldingCid) return { inboundHoldingCid };
   return null;
+}
+
+/** True when a transaction tree consumed a counter offer via Accept. */
+export function counterOfferConsumedInEvents(
+  eventsById: Record<string, unknown> | null | undefined,
+  offerCid: string
+): boolean {
+  if (!eventsById) return false;
+  for (const node of Object.values(eventsById)) {
+    const n = node as {
+      ExercisedTreeEvent?: { value?: { contractId?: string; choice?: string } };
+      ExercisedEvent?: { contractId?: string; choice?: string };
+    };
+    const exercised = n.ExercisedTreeEvent?.value ?? n.ExercisedEvent;
+    if (!exercised?.contractId || exercised.contractId !== offerCid) continue;
+    const choice = exercised.choice ?? "";
+    if (choice.includes("Accept")) return true;
+  }
+  return false;
 }
 
 /** Reject preapproval direct-settle path — Loop swaps require pending offer only. */
@@ -187,6 +192,45 @@ export function extractCounterOfferCidFromEvents(
   }
 
   return hits.length ? hits[hits.length - 1]! : null;
+}
+
+/** True when counter asset reached the user via direct transfer (holding created). */
+export function counterLegDeliveredToUserInEvents(
+  eventsById: Record<string, unknown> | null | undefined,
+  params: {
+    senderParty: string;
+    receiverParty: string;
+    amount: string;
+    amountDecimals: number;
+    expectedInstrument: InstrumentId;
+  }
+): boolean {
+  if (!eventsById) return false;
+  for (const node of Object.values(eventsById)) {
+    const created = createdEventFromNode(node);
+    if (!created?.contractId || !created.templateId) continue;
+    if (!isHoldingTemplate(created.templateId)) continue;
+
+    const arg = created.createArgument as
+      | {
+          owner?: string;
+          amount?: string;
+          instrumentId?: { admin?: string; id?: string };
+          instrument?: { admin?: string; id?: string };
+        }
+      | undefined;
+    if (arg?.owner !== params.receiverParty || !arg.amount) continue;
+    if (!amountsEqual(params.amount, arg.amount, params.amountDecimals)) continue;
+    const holdingInst = arg.instrumentId ?? arg.instrument;
+    if (
+      holdingInst?.id &&
+      !matchesInstrument(holdingInst, params.expectedInstrument)
+    ) {
+      continue;
+    }
+    return true;
+  }
+  return false;
 }
 
 function isDirectTransferKind(kind: string): boolean {
