@@ -199,7 +199,21 @@ Lighthouse `total_consumed` is currently **0** on warpx — bot falls back to le
 
 Pacing flags: `--target-utilization`, `--bytes-per-swap`, `--calibrate-every`, `--min-interval`, `--max-interval`, `--cbtc-in`, `--cc-in`.
 
-Default swap inputs: **0.0001 CBTC** (CBTC→CC) and **50 CC** (CC→CBTC).
+Default swap inputs: **0.00001 CBTC** (CBTC→CC) and **10 CC** (CC→CBTC). Override with `--cbtc-in=` / `--cc-in=`.
+
+### Float drift (why plan fails after many swaps)
+
+If the two legs are **not notionally matched** (CC in vs CC out per cycle), traders or vault slowly drain one asset. Smaller sizes extend runway but do not remove drift if inputs are asymmetric.
+
+**Symptoms:** `✗ plan failed: no viable swap` with `traders=0 … CC need 10+10` or `vault=low CBTC`.
+
+**Fix now:** fund from treasury; tune `--cbtc-in` / `--cc-in` to match Tradecraft quotes if drift appears.
+
+```bash
+npm run fund-swap-vault:mainnet -- --cbtc=0.05 --cc=500
+# Re-fund traders if CC depleted (provision --skip-preapproval or manual CC transfer)
+npm run farm:status:mainnet
+```
 
 ---
 

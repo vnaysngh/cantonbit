@@ -157,10 +157,9 @@ export async function runFarmBot(): Promise<void> {
         { label: "plan", onRetry: logRetry("plan") }
       );
       pick = planned.pick;
-      plannerState = planned.state;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      console.error(`✗ plan failed: ${msg.slice(0, 200)}`);
+      console.error(`✗ plan failed:\n${msg.split("\n").map((l) => `  ${l}`).join("\n")}`);
       if (/401|unauthorized|jwt/i.test(msg)) {
         jwt = await retry(() => getLedgerJwt(), { label: "jwt", onRetry: logRetry("jwt") });
       }
@@ -224,6 +223,11 @@ export async function runFarmBot(): Promise<void> {
         wallIntervalSec:
           wallIntervalSec != null ? Math.round(wallIntervalSec * 10) / 10 : null
       });
+      plannerState = {
+        lastDirection:
+          result.fromAsset === "CBTC" ? "CBTC→CC" : "CC→CBTC",
+        lastTraderParty: pick.traderParty
+      };
       lastSwapLogAt = loggedAt;
 
       if (calibrateSwaps >= pacing.calibrateEvery) {

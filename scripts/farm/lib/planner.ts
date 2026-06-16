@@ -260,9 +260,7 @@ export async function planNextSwap(params: {
   }
 
   if (candidates.length === 0) {
-    throw new Error(
-      "no viable swap — check trader/vault float, UTXO caps, or fund from treasury"
-    );
+    throw new Error(formatPlanBlockers({ float, pacing, quotes, state: params.state }));
   }
 
   const chosen = pickScored(candidates);
@@ -284,4 +282,86 @@ export async function planNextSwap(params: {
 
 export function directionLabel(from: FarmAsset, to: FarmAsset): string {
   return dirKey(from, to);
+}
+
+/** Match CC→CBTC input to CBTC→CC quote output so alternating swaps don't drift float. */
+export async function balancePacingAmounts(
+  pacing: PacingConfig
+): Promise<PacingConfig> {
+  const q = await quoteFarmSwap({
+    fromAsset: "CBTC",
+    toAsset: "CC",
+    inAmount: pacing.cbtcInAmount
+  });
+  return { ...pacing, ccInAmount: q.outAmount };
+}
+
+interface PlanBlockerReport {
+  float: FleetFloatSnapshot;
+  pacing: PacingConfig;
+  quotes: DirectionQuotes;
+  state: PlannerState;
+}
+
+function countDirectionBlockers(
+  report: PlanBlockerReport,
+  direction: "CBTC→CC" | "CC→CBTC"
+): {
+  tradersOk: number;
+  vaultOk: boolean;
+  directionOk: boolean;
+  sampleTraderIssue?: string;
+} {
+  const toAsset: FarmAsset = direction === "CBTC→CC" ? "CC" : "CBTC";
+  const directionOk = directionAllowed(direction, report.state);
+  const vaultOk = vaultCanDeliver(report.float.vault, toAsset, report.quotes);
+  let tradersOk = 0;
+  let sampleTraderIssue: string | undefined;
+
+  for (const t of report.float.traders) {
+    const canSell =
+      direction === "CBTC→CC"
+        ? traderCanSellCbtc(t, report.pacing)
+        : traderCanSellCc(t, report.pacing);
+    const traderOk =
+      canSell && traderDirectionAllowed(t.party, direction, report.state);
+    if (traderOk) {
+      tradersOk++;
+      continue;
+    }
+    if (!sampleTraderIssue) {
+      if (
+        direction === "CBTC→CC"
+          ? t.utxoCbtc >= 10
+          : t.utxoCc >= 10
+      ) {
+        sampleTraderIssue = `${t.hint}: UTXO cap`;
+      } else if (!canSell) {
+        sampleTraderIssue =
+          direction === "CBTC→CC"
+            ? `${t.hint}: CBTC ${t.cbtc} (need ${report.pacing.cbtcInAmount}+${RESERVE_CBTC})`
+            : `${t.hint}: CC ${t.cc} (need ${report.pacing.ccInAmount}+${RESERVE_CC})`;
+      } else {
+        sampleTraderIssue = `${t.hint}: same trader+direction blocked`;
+      }
+    }
+  }
+
+  return { tradersOk, vaultOk, directionOk, sampleTraderIssue };
+}
+
+export function formatPlanBlockers(report: PlanBlockerReport): string {
+  const cbtc = countDirectionBlockers(report, "CBTC→CC");
+  const cc = countDirectionBlockers(report, "CC→CBTC");
+  const vaultNeedCbtc = report.quotes.ccToCbtcOut;
+  const vaultNeedCc = report.quotes.cbtcToCcOut;
+
+  const lines = [
+    "no viable swap — float/UTXO/direction blockers:",
+    `  vault CBTC=${report.float.vault.cbtc} (need ≥${vaultNeedCbtc} for CC→CBTC) CC=${report.float.vault.cc} (need ≥${vaultNeedCc} for CBTC→CC)`,
+    `  CBTC→CC: traders=${cbtc.tradersOk}/${report.float.traders.length} vault=${cbtc.vaultOk ? "ok" : "low CC"} dir=${cbtc.directionOk ? "ok" : "blocked"}${cbtc.sampleTraderIssue ? ` e.g. ${cbtc.sampleTraderIssue}` : ""}`,
+    `  CC→CBTC: traders=${cc.tradersOk}/${report.float.traders.length} vault=${cc.vaultOk ? "ok" : "low CBTC"} dir=${cc.directionOk ? "ok" : "blocked"}${cc.sampleTraderIssue ? ` e.g. ${cc.sampleTraderIssue}` : ""}`,
+    "  fix: fund vault CBTC (fund-swap-vault:mainnet) and/or traders CC from treasury; tune --cbtc-in / --cc-in"
+  ];
+  return lines.join("\n");
 }

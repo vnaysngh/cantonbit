@@ -4,6 +4,10 @@ export function parseArg(name: string, fallback?: string): string | undefined {
   return v || fallback;
 }
 
+export function hasCliArg(name: string): boolean {
+  return process.argv.some((a) => a.startsWith(`--${name}=`));
+}
+
 export function parseFlag(name: string): boolean {
   return process.argv.includes(`--${name}`);
 }

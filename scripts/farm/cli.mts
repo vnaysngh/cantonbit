@@ -15,6 +15,7 @@ import { runProvision } from "./provision";
 import { runFarmBot } from "./run";
 import { runStatus } from "./status";
 import { runBurnAudit } from "./audit-burns";
+import { runFundTradersCc } from "./fund-traders-cc";
 
 const sub = process.argv[2]?.trim() ?? "help";
 
@@ -80,6 +81,7 @@ Commands:
   swap        One managed swap (--trader --from --to --in)
   run         Continuous bot (--i-understand-mainnet --bitsafe-eligible-confirmed)
   status      Fleet balances + UTXO
+  fund-traders-cc  Send CC from vault to all traders (--cc --trader --dry-run)
   audit-burns Scan farm-swap.log for CC burn/fee choices
 
 npm scripts (via with-env.sh mainnet):
@@ -89,6 +91,8 @@ npm scripts (via with-env.sh mainnet):
   npm run farm:swap:mainnet -- --i-understand-mainnet --trader=0 --from=CBTC --to=CC --in=0.001
   npm run farm:run:mainnet -- --i-understand-mainnet --bitsafe-eligible-confirmed --dry-run --max-swaps=3
   npm run farm:status:mainnet
+  npm run farm:fund-traders-cc:mainnet -- --i-understand-mainnet --dry-run
+  npm run farm:fund-traders-cc:mainnet -- --i-understand-mainnet --cc=50
 `);
 }
 
@@ -111,6 +115,9 @@ async function main(): Promise<void> {
       break;
     case "status":
       await runStatus();
+      break;
+    case "fund-traders-cc":
+      await runFundTradersCc();
       break;
     case "audit-burns":
       await runBurnAudit();
