@@ -3,10 +3,8 @@
  *
  *   npm run canton-swap:daemon
  *
- * Env: HTLC_DAEMON_SECRET, NEXT_PUBLIC_APP_URL (or SWAP_API_URL base)
+ * Env: HTLC_DAEMON_SECRET, CANTON_SWAP_API_URL (or NEXT_PUBLIC_APP_URL)
  */
-import "dotenv/config";
-
 const APP_URL =
   process.env.CANTON_SWAP_API_URL ??
   process.env.NEXT_PUBLIC_APP_URL ??
