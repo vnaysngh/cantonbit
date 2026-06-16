@@ -1550,6 +1550,7 @@ export default function SwapPage() {
         userEvmAddress?: string;
         userTimelock?: number;
         solverTimelock?: number;
+        createdAt?: number;
       } | null;
       if (!o) return;
 
