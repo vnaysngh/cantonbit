@@ -3,10 +3,13 @@ FROM node:22-slim
 
 WORKDIR /app
 
-COPY package.json package-lock.json ./
-# Railway/Docker use npm 10; tsx is a devDependency but required at runtime.
+# Match repo .npmrc (legacy-peer-deps). Use npm install — not npm ci — so
+# minor lock drift between npm 10 (Docker) and npm 11 (dev) cannot fail builds.
+COPY package.json package-lock.json .npmrc ./
 ENV NODE_ENV=development
-RUN npm ci --include=dev --no-audit --no-fund
+ENV NPM_CONFIG_PRODUCTION=false
+RUN npm install -g npm@11.12.1 \
+  && npm install --include=dev --no-audit --no-fund --legacy-peer-deps
 
 COPY lib ./lib
 COPY scripts ./scripts

@@ -15,7 +15,7 @@ Use a **separate git branch** and **separate Railway service** from `oranjswap-w
 | **Dockerfile path** | `Dockerfile.farm` |
 | **Start command** | *(from Dockerfile — do not override)* |
 
-If deploy logs show `next build` or `npm run build:devnet`, Railway is building the **web app**, not the farm worker. Fix **Settings → Build → Dockerfile path** = `Dockerfile.farm` and redeploy.
+If deploy logs show `npm ci` / `EUSAGE` / `picomatch`, the service is using an old cached build layer or wrong Dockerfile. Confirm **Dockerfile path** = `Dockerfile.farm`, then **Redeploy → Clear build cache**. The farm Dockerfile uses `npm install` (not `npm ci`) and copies `.npmrc`.
 
 ### Volume (recommended)
 
