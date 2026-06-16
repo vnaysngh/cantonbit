@@ -143,6 +143,14 @@ links the 4-step lifecycle, the list of stuck burns, the on-disk evidence
 (snapshots), and the BitSafe escalation status (`docs/bitsafe-stuck-withdrawal.md`).
 Do NOT re-litigate the disproven theories.
 
+## CBTC farm (separate branch / Railway service)
+
+Mainnet volume farming runs on branch **`cbtc-farming`**, Railway service **`cbtc-farming`** — not the web app. Before changing farm code or deploy, read **`docs/FARM-OPERATIONS-HANDBOOK.md`**.
+
+## Same-chain C2C swaps (web branch)
+
+Mainnet CBTC↔CC user swaps and public API: branch **`c2c-swaps`**, deploy **`oranjswap-web-mainnet`**. Launch checklist: **`docs/C2C-MAINNET-LAUNCH.md`**. Design: **`docs/CANTON-SWAP-INTENT-PLAN.md`**.
+
 ## Key resources
 
 Token Standard API docs:

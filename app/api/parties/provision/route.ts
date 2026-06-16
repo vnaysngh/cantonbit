@@ -14,6 +14,7 @@
 import { NextResponse } from "next/server";
 
 import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
+import { isPartyOnCurrentNetwork } from "@/lib/party-network";
 import { onboardParticipantManagedParty } from "@/lib/party-onboarding";
 
 const TAG = "[parties/provision]";
@@ -38,12 +39,29 @@ export async function POST() {
         return NextResponse.json({ partyId: existing.canton_party_id, isNew: false });
       }
       if (existing.party_hint === "participant-managed") {
-        return NextResponse.json({ partyId: existing.canton_party_id, isNew: false });
+        if (isPartyOnCurrentNetwork(existing.canton_party_id)) {
+          return NextResponse.json({ partyId: existing.canton_party_id, isNew: false });
+        }
+        console.warn(
+          `${TAG} repointing wrong-network party ${existing.canton_party_id.slice(0, 28)}…`
+        );
       }
     }
 
-    // Allocate on warpx + grant backend CanActAs (the proven participant-managed path).
     const { party } = await onboardParticipantManagedParty();
+
+    if (existing?.canton_party_id) {
+      const { error: updErr } = await service
+        .from("party_mappings")
+        .update({ canton_party_id: party, party_hint: "participant-managed" })
+        .eq("user_id", user.id);
+      if (updErr) {
+        console.error(`${TAG} update error:`, updErr);
+        return NextResponse.json({ error: "Failed to store party mapping" }, { status: 500 });
+      }
+      console.log(`${TAG} repointed participant-managed party for user=${user.id}`);
+      return NextResponse.json({ partyId: party, isNew: true });
+    }
 
     const { error: insErr } = await service
       .from("party_mappings")

@@ -264,7 +264,7 @@ If the user lacks CC preapproval, solver fill creates a counter **offer**; UI sh
 
 ## Operations
 
-- Canton swap daemon: `npm run solver:canton-swap`
+- Canton swap daemon: `npm run solver:canton-swap` (devnet) · `npm run solver:canton-swap:mainnet` (mainnet)
 - Cross-chain HTLC daemon: `npm run solver:htlc`
 - HTLC solver party: `NEXT_PUBLIC_SOLVER_CANTON` (warpx — **not** used for C2C float)
 - C2C settlement vault: `CANTON_SWAP_SETTLEMENT_PARTY` (required for all C2C swaps)

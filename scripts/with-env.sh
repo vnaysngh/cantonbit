@@ -36,10 +36,17 @@ fi
 cp "$ENV_FILE" "$ROOT/.env.development.local"
 
 # dotenv-cli: first -e file wins on duplicate keys; later files only fill gaps.
+# Use repo-local binary — bare `dotenv` on PATH may be Python dotenv-cli (different -e semantics).
+DOTENV="$ROOT/node_modules/.bin/dotenv"
+if [[ ! -x "$DOTENV" ]]; then
+  echo "Missing $DOTENV — run npm install" >&2
+  exit 1
+fi
+
 ARGS=(-e "$ENV_FILE")
 if [[ -f "$ROOT/.env.local" ]]; then
   ARGS+=(-e "$ROOT/.env.local")
 fi
 
 cd "$ROOT"
-exec dotenv "${ARGS[@]}" -- "$@"
+exec "$DOTENV" "${ARGS[@]}" -- "$@"

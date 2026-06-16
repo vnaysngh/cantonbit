@@ -8,7 +8,7 @@
  * Production table view + a portal-rendered detail drawer (portal escapes any
  * ancestor containing-block so the drawer is never clipped/collapsed).
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, Suspense } from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams } from "next/navigation";
 
@@ -308,6 +308,20 @@ function Route({ order }: { order: HistoryOrder }) {
 }
 
 export default function OrdersPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex min-h-[40vh] items-center justify-center text-muted-foreground">
+          Loading orders…
+        </div>
+      }
+    >
+      <OrdersPageInner />
+    </Suspense>
+  );
+}
+
+function OrdersPageInner() {
   const wallet = useWallet();
   const evm = useEvmWallet();
   const searchParams = useSearchParams();

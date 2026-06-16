@@ -82,9 +82,11 @@ async function getLedgerJwt(): Promise<string> {
 
 function printBalances(label: string, party: string): void {
   console.log(`\n--- ${label} (${party.slice(0, 32)}…) ---`);
+  const npmScript =
+    NETWORK.name === "mainnet" ? "party-balances:mainnet" : "party-balances:devnet";
   const r = spawnSync(
     "npm",
-    ["run", "party-balances:devnet", "--", party],
+    ["run", npmScript, "--", party],
     { stdio: "inherit", cwd: process.cwd(), env: process.env }
   );
   if (r.status !== 0) {
@@ -219,7 +221,14 @@ function readTransferFromCreatedEvent(ev: {
       | { sender?: string; receiver?: string; amount?: string; instrumentId?: { id?: string } }
       | undefined;
     const t =
-      vv && "transfer" in vv && vv.transfer ? vv.transfer : (vv as typeof arg.transfer);
+      vv && "transfer" in vv && vv.transfer
+        ? vv.transfer
+        : (vv as {
+            sender?: string;
+            receiver?: string;
+            amount?: string;
+            instrumentId?: { id?: string };
+          });
     if (t?.sender && t.receiver) return t;
   }
   return null;

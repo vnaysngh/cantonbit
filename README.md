@@ -377,12 +377,12 @@ Do **not** use `npm run build` on Railway — it runs `build:devnet` and require
 | | Devnet | Mainnet |
 | --- | --- | --- |
 | `NEXT_PUBLIC_NETWORK` | `devnet` | `mainnet` |
-| `NEXT_PUBLIC_SWAP_CHAIN` | `base-sepolia` | `arbitrum` |
-| `NEXT_PUBLIC_HTLC_ESCROW` | Base Sepolia escrow | Arbitrum escrow |
+| `NEXT_PUBLIC_SWAP_CHAIN` | `base-sepolia` | `base` |
+| `NEXT_PUBLIC_HTLC_ESCROW` | Base Sepolia escrow | Base mainnet escrow |
 | Solver `SWAP_NETWORK` | `devnet` | `mainnet` |
 | Solver `ALLOW_MAINNET` | unset | `true` |
-| Solver `EVM_CHAIN` | `base-sepolia` | `arbitrum` |
-| Solver `ORIGIN_RPC_URL` | `https://sepolia.base.org` | `https://arb1.arbitrum.io/rpc` |
+| Solver `EVM_CHAIN` | `base-sepolia` | `base` |
+| Solver `ORIGIN_RPC_URL` | `https://sepolia.base.org` | `https://mainnet.base.org` |
 
 Use [`.env.devnet.example`](.env.devnet.example) / [`.env.mainnet.example`](.env.mainnet.example) for the full web matrix.
 

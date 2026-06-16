@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import { balanceQueryKey } from "@/lib/balance-query";
 import { readLoopCbtcBalance, readLoopCcBalance } from "@/lib/loop-holdings";
+import { useCantonIdentity } from "./useCantonIdentity";
 import { useLoopWallet } from "./useLoopWallet";
 
 interface BalanceState {
@@ -55,13 +56,22 @@ const POLL_INTERVAL_MS = 30_000;
  *    to show 0.
  */
 export function useBalance(): BalanceState {
-  const { provider, connected, party } = useLoopWallet();
-  const useLoop = connected && !!provider;
+  const { isManaged, isLoop, party: identityParty, ready: identityReady } =
+    useCantonIdentity();
+  const { provider, connected, party: loopParty } = useLoopWallet();
+
+  // Match /swap: email (participant-managed) always uses the session party via
+  // server-side ledger reads — even if Loop auto-reconnected in the background.
+  const useLoopPath =
+    !isManaged && isLoop && connected && !!provider;
 
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: balanceQueryKey(useLoop ? party : "session"),
+    queryKey: balanceQueryKey(
+      useLoopPath ? loopParty : (identityParty ?? "session")
+    ),
+    enabled: identityReady && (useLoopPath ? !!provider : true),
     queryFn: async (): Promise<Fetched> => {
-      if (useLoop && provider) {
+      if (useLoopPath && provider) {
         const [{ total, locked, count }, ccTotal] = await Promise.all([
           readLoopCbtcBalance(provider),
           readLoopCcBalance(provider)
@@ -77,7 +87,9 @@ export function useBalance(): BalanceState {
       }
       // Session-party (email) path — server reads the warpx party's holdings.
       const r = await fetch("/api/parties/balance");
-      if (!r.ok) return ZERO;
+      if (!r.ok) {
+        return { ...ZERO, ccTotal: "0", ccReady: false };
+      }
       const j = (await r.json()) as {
         total?: string;
         utxoCount?: number;
@@ -105,7 +117,7 @@ export function useBalance(): BalanceState {
     total: view.total,
     locked: view.locked,
     utxoCount: view.utxoCount,
-    ccTotal: view.ccTotal,
+    ccTotal: view.ccTotal ?? (isLoading ? null : "0"),
     ccReady: view.ccReady,
     ccSubsidizedOnDevnet: view.ccSubsidizedOnDevnet,
     isLoading,

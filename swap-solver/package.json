@@ -14,6 +14,7 @@
     "htlc-daemon": "tsx --env-file=../.env.local --env-file=../.env.devnet --env-file=.env.htlc-devnet src/htlc-solver-daemon.mts",
     "htlc-daemon:mainnet": "tsx --env-file=../.env.local --env-file=../.env.mainnet --env-file=.env.htlc-mainnet src/htlc-solver-daemon.mts",
     "canton-swap-daemon": "tsx --env-file=../.env.local --env-file=../.env.devnet src/canton-swap-daemon.mts",
+    "canton-swap-daemon:mainnet": "tsx --env-file=../.env.local --env-file=../.env.mainnet src/canton-swap-daemon.mts",
     "api:prod": "tsx src/serve.ts",
     "watch:prod": "tsx src/index.ts"
   },

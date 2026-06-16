@@ -6,6 +6,10 @@ import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 
 import { ChainIcon } from "@/components/ChainIcon";
+import {
+  SwapWaitBanner,
+  swapWaitButtonLabel
+} from "@/components/SwapWaitBanner";
 import { TokenIcon, type SwapTokenId } from "@/components/TokenIcon";
 import { SwapLegBadge } from "@/components/SwapLegPicker";
 import { useManagedPreapproval } from "@/hooks/useManagedPreapproval";
@@ -74,10 +78,15 @@ import {
   rememberSecret,
   recallSecret,
   readActiveHtlcSwap,
+  dismissActiveHtlcSwap,
   vaultExpiryFromTimelock,
   vaultMetaFromOrder,
   type SecretVaultMeta
 } from "@/lib/secret-vault";
+import {
+  SWAP_WAIT_POLL_MS,
+  swapWaitTerminalMessage
+} from "@/lib/swap-wait-copy";
 import {
   timelocksFromExpiration,
   timelocksFromExpirationCanton,
@@ -116,6 +125,7 @@ type Stage =
       swapId: string;
       secret: string;
       lockTx: string;
+      waitStartedAt: number;
     }
   // HTLC: both legs locked — the USER can now claim (press to reveal).
   | {
@@ -153,6 +163,7 @@ type Stage =
       swapId: string;
       secret: string;
       phase?: "custody" | "solver";
+      waitStartedAt?: number;
     }
   | {
       kind: "rev-claimable";
@@ -186,6 +197,7 @@ type Stage =
       inAmount: string;
       outAmount: string;
       note?: string;
+      waitStartedAt: number;
     }
   | { kind: "error"; message: string };
 
@@ -195,22 +207,6 @@ type Stage =
 const FEE_BPS = Number(
   process.env.NEXT_PUBLIC_FEE_BPS ?? DEFAULT_PLATFORM_FEE_BPS
 );
-
-type ReversePollResult = "claimable" | "failed" | "timeout";
-
-async function pollReverseCounterLock(
-  swapId: string
-): Promise<ReversePollResult> {
-  for (let i = 0; i < 60; i++) {
-    await sleep(3000);
-    const { order } = await htlcApi.getOrder(swapId);
-    const st = (order as { status?: string } | undefined)?.status;
-    if (st === "counter_locked" || st === "counter_claimed") return "claimable";
-    if (st === "refunded" || st === "cancelled" || st === "failed")
-      return "failed";
-  }
-  return "timeout";
-}
 
 export default function SwapPage() {
   const evm = useEvmWallet();
@@ -1088,7 +1084,8 @@ export default function SwapPage() {
           fromAsset,
           toAsset,
           inAmount,
-          outAmount: quote.outAmount
+          outAmount: quote.outAmount,
+          waitStartedAt: Date.now()
         });
       } catch (e) {
         retry(`Could not submit swap: ${getSwapErrorMessage(e)}`);
@@ -1203,45 +1200,15 @@ export default function SwapPage() {
         return;
       }
 
-      // 4. WAIT for the INDEPENDENT SOLVER to lock the CBTC counter (htlc_active).
-      // The solver daemon verifies our on-chain WBTC lock first, then locks. We do
-      // NOT lock or claim here — the user claims as a separate, deliberate step.
-      try {
-        setStage({ kind: "htlc-locking", quote, swapId: id, secret, lockTx });
-        let counterLocked = false;
-        for (let i = 0; i < 60; i++) {
-          await sleep(3000);
-          const { order } = await htlcApi.getOrder(id);
-          // LOOP orders skip the Canton counter-lock entirely (custody ordering: the
-          // CBTC is delivered at reveal time) — claimable as soon as the WBTC lock
-          // is recorded. Managed orders wait for the on-ledger HtlcLock as before.
-          if (
-            order?.counterMode === "loop" &&
-            order?.status === "main_locked"
-          ) {
-            counterLocked = true;
-            break;
-          }
-          if (
-            order?.status === "counter_locked" ||
-            order?.status === "counter_claimed" ||
-            order?.status === "main_claimed"
-          ) {
-            counterLocked = true;
-            break;
-          }
-        }
-        if (!counterLocked) {
-          retry(
-            "The solver hasn't locked the CBTC counter yet. Is the solver running? Try again or refund after the timelock."
-          );
-          return;
-        }
-        // htlc_active — both legs locked. Now the USER claims.
-        setStage({ kind: "htlc-claimable", swapId: id, secret, lockTx });
-      } catch (e) {
-        retry(`Waiting for the solver failed: ${getSwapErrorMessage(e)}`);
-      }
+      // 4. WAIT for the INDEPENDENT SOLVER to lock the CBTC counter — polled in UI.
+      setStage({
+        kind: "htlc-locking",
+        quote,
+        swapId: id,
+        secret,
+        lockTx,
+        waitStartedAt: Date.now()
+      });
     },
     [
       evm,
@@ -1473,19 +1440,13 @@ export default function SwapPage() {
             return;
           }
         }
-        setStage({ kind: "rev-locking", swapId: id, secret, phase: "solver" });
-        const pollResult = await pollReverseCounterLock(id);
-        if (pollResult === "failed") {
-          retry(`Swap ended while waiting for the solver.`);
-          return;
-        }
-        if (pollResult === "timeout") {
-          retry(
-            "The solver hasn't locked the WBTC yet. Is the daemon running? Your CBTC auto-refunds after the timelock."
-          );
-          return;
-        }
-        setStage({ kind: "rev-claimable", swapId: id, secret });
+        setStage({
+          kind: "rev-locking",
+          swapId: id,
+          secret,
+          phase: "solver",
+          waitStartedAt: Date.now()
+        });
       } catch (e) {
         retry(getSwapErrorMessage(e));
       }
@@ -1644,12 +1605,13 @@ export default function SwapPage() {
           });
           return;
         }
-        setStage({ kind: "rev-locking", swapId, secret, phase: "solver" });
-        const pollResult = await pollReverseCounterLock(swapId);
-        if (cancelled) return;
-        if (pollResult === "claimable") {
-          setStage({ kind: "rev-claimable", swapId, secret });
-        }
+        setStage({
+          kind: "rev-locking",
+          swapId,
+          secret,
+          phase: "solver",
+          waitStartedAt: (o.createdAt ?? Math.floor(Date.now() / 1000)) * 1000
+        });
       }
     })().catch(() => {});
     return () => {
@@ -1737,6 +1699,114 @@ export default function SwapPage() {
     void cancelC2cDraft();
     setStage({ kind: "idle" });
   }, [cancelC2cDraft]);
+
+  const dismissToNewSwap = useCallback(
+    (swapId?: string) => {
+      dismissActiveHtlcSwap(swapId);
+      void cancelC2cDraft();
+      setStage({ kind: "idle" });
+    },
+    [cancelC2cDraft]
+  );
+
+  const [waitNowMs, setWaitNowMs] = useState(() => Date.now());
+  const waitStartedAt = useMemo(() => {
+    if (stage.kind === "htlc-locking") return stage.waitStartedAt;
+    if (stage.kind === "rev-locking" && stage.phase === "solver")
+      return stage.waitStartedAt;
+    if (stage.kind === "c2c-waiting") return stage.waitStartedAt;
+    return undefined;
+  }, [stage]);
+  useEffect(() => {
+    if (!waitStartedAt) return;
+    setWaitNowMs(Date.now());
+    const t = setInterval(() => setWaitNowMs(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [waitStartedAt]);
+  const waitElapsedSec = waitStartedAt
+    ? Math.max(0, Math.floor((waitNowMs - waitStartedAt) / 1000))
+    : 0;
+
+  const htlcSolverWait = useMemo(() => {
+    if (stage.kind === "htlc-locking") {
+      return {
+        swapId: stage.swapId,
+        mode: "forward" as const,
+        secret: stage.secret,
+        lockTx: stage.lockTx
+      };
+    }
+    if (stage.kind === "rev-locking" && stage.phase === "solver") {
+      return {
+        swapId: stage.swapId,
+        mode: "reverse" as const,
+        secret: stage.secret
+      };
+    }
+    return null;
+  }, [stage]);
+
+  useEffect(() => {
+    if (!htlcSolverWait) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const { order } = await htlcApi.getOrder(htlcSolverWait.swapId);
+        if (cancelled || !order) return;
+        const st = order.status;
+        if (st === "refunded" || st === "cancelled" || st === "failed") {
+          dismissActiveHtlcSwap(htlcSolverWait.swapId);
+          setStage({
+            kind: "error",
+            message: swapWaitTerminalMessage(st)
+          });
+          return;
+        }
+        if (htlcSolverWait.mode === "forward") {
+          if (
+            order.counterMode === "loop" &&
+            st === "main_locked"
+          ) {
+            setStage({
+              kind: "htlc-claimable",
+              swapId: htlcSolverWait.swapId,
+              secret: htlcSolverWait.secret,
+              lockTx: htlcSolverWait.lockTx
+            });
+            return;
+          }
+          if (
+            st === "counter_locked" ||
+            st === "counter_claimed" ||
+            st === "main_claimed"
+          ) {
+            setStage({
+              kind: "htlc-claimable",
+              swapId: htlcSolverWait.swapId,
+              secret: htlcSolverWait.secret,
+              lockTx: htlcSolverWait.lockTx
+            });
+          }
+          return;
+        }
+        if (st === "counter_locked" || st === "counter_claimed") {
+          setStage({
+            kind: "rev-claimable",
+            swapId: htlcSolverWait.swapId,
+            secret: htlcSolverWait.secret
+          });
+        }
+      } catch {
+        /* keep polling */
+      }
+    };
+    void poll();
+    const timer = setInterval(() => void poll(), SWAP_WAIT_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [htlcSolverWait]);
 
   // The form stays mounted for idle/quoting/error and while the review modal is open.
   const reviewing =
@@ -1856,7 +1926,7 @@ export default function SwapPage() {
   if (showForm) {
     if (stage.kind === "htlc-locking") {
       primary = {
-        label: "Waiting for solver…",
+        label: swapWaitButtonLabel(waitElapsedSec, "solver"),
         onClick: () => {},
         disabled: true,
         busy: true
@@ -1864,7 +1934,9 @@ export default function SwapPage() {
     } else if (stage.kind === "rev-locking") {
       primary = {
         label:
-          stage.phase === "solver" ? "Waiting for solver…" : "Locking CBTC",
+          stage.phase === "solver"
+            ? swapWaitButtonLabel(waitElapsedSec, "solver")
+            : swapWaitButtonLabel(waitElapsedSec, "locking"),
         onClick: () => {},
         disabled: true,
         busy: true
@@ -2080,6 +2152,25 @@ export default function SwapPage() {
                 )}
                 {primary.label}
               </button>
+            )}
+
+            {stage.kind === "htlc-locking" && (
+              <SwapWaitBanner
+                elapsedSec={waitElapsedSec}
+                mode="solver"
+                orderId={stage.swapId}
+                ordersHref={`/orders?id=${encodeURIComponent(stage.swapId)}`}
+                onStartNewSwap={() => dismissToNewSwap(stage.swapId)}
+              />
+            )}
+            {stage.kind === "rev-locking" && stage.phase === "solver" && (
+              <SwapWaitBanner
+                elapsedSec={waitElapsedSec}
+                mode="solver"
+                orderId={stage.swapId}
+                ordersHref={`/orders?id=${encodeURIComponent(stage.swapId)}`}
+                onStartNewSwap={() => dismissToNewSwap(stage.swapId)}
+              />
             )}
           </>
         )}
@@ -2328,18 +2419,15 @@ export default function SwapPage() {
               </div>
               <div>
                 <h3 className="text-xl font-semibold text-foreground">
-                  Finishing your swap
+                  {swapWaitButtonLabel(waitElapsedSec, "settling")}
                 </h3>
                 <p className="mt-0.5 text-sm text-muted-foreground">
-                  Pending sell offer — waiting for vault settlement
+                  {stage.note ??
+                    "Settlement is in progress on Canton — usually under a minute."}
                 </p>
               </div>
             </div>
-            <p className="text-sm leading-6 text-muted-foreground">
-              {stage.note ??
-                "Your sell leg is a pending transfer offer on Canton. The settlement vault will accept it and deliver the counter asset in one fill transaction — usually under a minute."}
-            </p>
-            <div className="mt-5 overflow-hidden rounded-2xl bg-muted/40">
+            <div className="overflow-hidden rounded-2xl bg-muted/40">
               <div className="flex items-center justify-between gap-3 border-b border-foreground/5 px-4 py-3">
                 <span className="text-sm text-muted-foreground">You pay</span>
                 <span className="text-sm font-semibold tabular-nums">
@@ -2353,12 +2441,13 @@ export default function SwapPage() {
                 </span>
               </div>
             </div>
-            <Link
-              href={`/orders?id=${encodeURIComponent(stage.orderId)}&kind=canton-swap`}
-              className="mt-5 block rounded-2xl border border-foreground/15 px-4 py-3 text-center text-sm font-semibold text-foreground transition-colors hover:bg-foreground/5"
-            >
-              View in Orders
-            </Link>
+            <SwapWaitBanner
+              elapsedSec={waitElapsedSec}
+              mode="settling"
+              orderId={stage.orderId}
+              ordersHref={`/orders?id=${encodeURIComponent(stage.orderId)}&kind=canton-swap`}
+              onStartNewSwap={() => dismissToNewSwap()}
+            />
           </div>
         )}
 

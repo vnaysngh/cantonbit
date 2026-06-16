@@ -43,3 +43,7 @@ next-env.d.ts
 
 # Debug ledger snapshots (hand-run scripts/snapshot.mjs output) — never commit
 snapshots/
+
+# CBTC farm fleet state (party ids + calibration) — never commit
+.farm-fleet.mainnet.json
+farm-swap.log

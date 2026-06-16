@@ -20,13 +20,16 @@
     "provision-settlement:devnet": "bash scripts/with-env.sh devnet npx tsx scripts/provision-settlement-party.mts",
     "party-balances:devnet": "bash scripts/with-env.sh devnet npx tsx scripts/party-swap-balances.mts",
     "fund-swap-vault:devnet": "bash scripts/with-env.sh devnet npx tsx scripts/fund-swap-vault.mts",
+    "party-balances:mainnet": "bash scripts/with-env.sh mainnet npx tsx scripts/party-swap-balances.mts",
+    "fund-swap-vault:mainnet": "bash scripts/with-env.sh mainnet npx tsx scripts/fund-swap-vault.mts",
     "dev:all": "bash scripts/dev-all.sh",
     "stop": "bash scripts/stop-all.sh",
     "solver:api": "npm --prefix swap-solver run api",
     "solver:watch": "npm --prefix swap-solver run watch",
     "solver:htlc": "npm --prefix swap-solver run htlc-daemon",
     "solver:htlc:mainnet": "npm --prefix swap-solver run htlc-daemon:mainnet",
-    "solver:canton-swap": "npm --prefix swap-solver run canton-swap-daemon"
+    "solver:canton-swap": "npm --prefix swap-solver run canton-swap-daemon",
+    "solver:canton-swap:mainnet": "npm --prefix swap-solver run canton-swap-daemon:mainnet"
   },
   "dependencies": {
     "@base-ui/react": "^1.5.0",

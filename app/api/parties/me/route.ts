@@ -10,7 +10,38 @@ import {
   createSupabaseServerClient,
   createSupabaseServiceClient
 } from "@/lib/supabase/server";
+import { NETWORK } from "@/lib/constants";
+import {
+  formatPartyNetworkMismatch,
+  isPartyOnCurrentNetwork
+} from "@/lib/party-network";
 import { onboardParticipantManagedParty } from "@/lib/party-onboarding";
+
+const TAG = "[parties/me]";
+
+async function bindParticipantManagedParty(
+  service: Awaited<ReturnType<typeof createSupabaseServiceClient>>,
+  userId: string,
+  current: string | undefined
+): Promise<string> {
+  const { party } = await onboardParticipantManagedParty();
+  if (current) {
+    console.warn(
+      `${TAG} repointing user=${userId.slice(0, 8)}… from ${current.slice(0, 28)}… → ${party.slice(0, 28)}… (${NETWORK.name})`
+    );
+    await service
+      .from("party_mappings")
+      .update({ canton_party_id: party, party_hint: "participant-managed" })
+      .eq("user_id", userId);
+  } else {
+    await service.from("party_mappings").insert({
+      user_id: userId,
+      canton_party_id: party,
+      party_hint: "participant-managed"
+    });
+  }
+  return party;
+}
 
 export async function GET() {
   try {
@@ -40,8 +71,12 @@ export async function GET() {
       });
     }
 
-    // Already provisioned participant-managed party — return it.
-    if (current && row?.party_hint === "participant-managed") {
+    // Already provisioned participant-managed party on this network — return it.
+    if (
+      current &&
+      row?.party_hint === "participant-managed" &&
+      isPartyOnCurrentNetwork(current)
+    ) {
       return NextResponse.json({
         partyId: current,
         authed: true,
@@ -49,22 +84,12 @@ export async function GET() {
       });
     }
 
-    // Missing mapping — provision a warpx party now and bind it.
-    const { party } = await onboardParticipantManagedParty();
-    if (current) {
-      await service
-        .from("party_mappings")
-        .update({ canton_party_id: party, party_hint: "participant-managed" })
-        .eq("user_id", user.id);
-    } else {
-      await service
-        .from("party_mappings")
-        .insert({
-          user_id: user.id,
-          canton_party_id: party,
-          party_hint: "participant-managed"
-        });
+    if (current && row?.party_hint === "participant-managed") {
+      console.warn(`${TAG} ${formatPartyNetworkMismatch(current)}`);
     }
+
+    // Missing mapping or wrong-network / legacy hint — provision on current stack.
+    const party = await bindParticipantManagedParty(service, user.id, current);
     return NextResponse.json({
       partyId: party,
       authed: true,

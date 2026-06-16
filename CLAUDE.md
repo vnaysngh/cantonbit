@@ -158,6 +158,14 @@ https://docs.fivenorth.io/
 Canton JSON API:
 https://docs.daml.com/json-api/
 
+## CBTC farm (separate branch / deploy)
+
+Mainnet volume farming: branch **`cbtc-farming`**, Railway **`cbtc-farming`**. Read **`docs/FARM-OPERATIONS-HANDBOOK.md`** before changing farm code or deploy.
+
+## C2C swaps (web + API)
+
+Mainnet CBTC↔CC swaps: branch **`c2c-swaps`**, deploy **`oranjswap-web-mainnet`**. Launch checklist: **`docs/C2C-MAINNET-LAUNCH.md`**.
+
 ## Current state
 
 ### Completed

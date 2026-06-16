@@ -11,6 +11,20 @@ import type {
 
 const TABLE = "canton_swap_orders";
 
+function enrichSchemaError(op: string, message: string): string {
+  if (
+    message.includes("schema cache") ||
+    message.includes("counter_pending_cleared_at") ||
+    message.includes("counter_reissue_attempt")
+  ) {
+    return (
+      `${TABLE} ${op}: database schema out of date — apply Supabase migrations ` +
+      `018–021 in supabase/migrations/ (missing column/index). Original: ${message}`
+    );
+  }
+  return `${TABLE} ${op}: ${message}`;
+}
+
 function rowToOrder(r: Record<string, unknown>): CantonSwapOrder {
   return {
     id: r.id as string,
@@ -97,7 +111,7 @@ export class SupabaseCantonSwapStore implements CantonSwapStore {
       .select("*")
       .eq("id", id)
       .maybeSingle();
-    if (error) throw new Error(`canton_swap_orders get: ${error.message}`);
+    if (error) throw new Error(enrichSchemaError("get", error.message));
     return data ? rowToOrder(data) : undefined;
   }
 
@@ -106,7 +120,7 @@ export class SupabaseCantonSwapStore implements CantonSwapStore {
     const { error } = await sb
       .from(TABLE)
       .upsert(orderToRow(o), { onConflict: "id" });
-    if (error) throw new Error(`canton_swap_orders put: ${error.message}`);
+    if (error) throw new Error(enrichSchemaError("put", error.message));
   }
 
   async putIfStatus(
@@ -161,7 +175,7 @@ export class SupabaseCantonSwapStore implements CantonSwapStore {
   async byStatus(status: CantonSwapStatus): Promise<CantonSwapOrder[]> {
     const sb = await createSupabaseServiceClient();
     const { data, error } = await sb.from(TABLE).select("*").eq("status", status);
-    if (error) throw new Error(`canton_swap_orders byStatus: ${error.message}`);
+    if (error) throw new Error(enrichSchemaError("byStatus", error.message));
     return (data ?? []).map(rowToOrder);
   }
 
@@ -173,7 +187,7 @@ export class SupabaseCantonSwapStore implements CantonSwapStore {
       .eq("user_party", party)
       .order("created_at", { ascending: false })
       .limit(limit);
-    if (error) throw new Error(`canton_swap_orders byParty: ${error.message}`);
+    if (error) throw new Error(enrichSchemaError("byParty", error.message));
     return (data ?? []).map(rowToOrder);
   }
 
@@ -189,7 +203,7 @@ export class SupabaseCantonSwapStore implements CantonSwapStore {
       .eq("to_asset", toAsset)
       .in("status", ["open", "settling", "filling", "user_locked"]);
     if (error) {
-      throw new Error(`canton_swap_orders sumReservedOut: ${error.message}`);
+      throw new Error(enrichSchemaError("sumReservedOut", error.message));
     }
     const asset = getSwapAsset(toAsset);
     let total = 0n;

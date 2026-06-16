@@ -112,9 +112,9 @@ export function TopNav() {
 /** CC (Amulet) balance for any connected Canton party (Loop or email). */
 function CcBalanceBadge() {
   const { party, ready } = useCantonIdentity();
-  const { ccTotal } = useBalance();
+  const { ccTotal, isLoading } = useBalance();
 
-  if (!ready || !party || ccTotal === null) return null;
+  if (!ready || !party) return null;
 
   return (
     <div
@@ -122,7 +122,9 @@ function CcBalanceBadge() {
       title="Canton Coin balance for network fees"
     >
       <span className="text-[11px] uppercase tracking-wide">CC</span>
-      <span className="font-mono tabular-nums text-foreground">{ccTotal}</span>
+      <span className="font-mono tabular-nums text-foreground">
+        {isLoading && ccTotal === null ? "…" : (ccTotal ?? "0")}
+      </span>
     </div>
   );
 }

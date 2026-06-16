@@ -105,7 +105,8 @@ export const HTLC_PROGRESS_COPY: Record<
   delivering: { title: "Swapping…", caption: "Completing the swap" },
   delayed: {
     title: "Taking longer than usual",
-    caption: "Your funds are safe — the swap is still in progress"
+    caption:
+      "Your funds are safe — track progress on the Orders page"
   },
   finished: { title: "Swap complete", caption: "Funds delivered" },
   expired: { title: "Swap expired", caption: "You can refund your locked funds" },

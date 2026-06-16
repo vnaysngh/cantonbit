@@ -149,6 +149,11 @@ function clearActiveHtlcSwap(swapId?: string): void {
   }
 }
 
+/** Stop auto-resuming this swap on /swap (order still visible on Orders). */
+export function dismissActiveHtlcSwap(swapId?: string): void {
+  clearActiveHtlcSwap(swapId);
+}
+
 /** @internal test hook */
 export function __readActiveHtlcSwapForTests(): string | null {
   return readActiveHtlcSwap();

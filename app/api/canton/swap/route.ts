@@ -40,13 +40,17 @@ export async function POST(req: Request) {
     if (auth.error) return auth.error;
 
     const managed = await isParticipantManagedParty(userParty);
-    let walletMode: CantonSwapWalletMode = managed ? "managed" : "loop";
-    if (walletModeRaw === "loop") walletMode = "loop";
-    if (walletModeRaw === "managed" && !managed) {
+    let walletMode: CantonSwapWalletMode;
+    if (managed) {
+      // Participant-managed parties always settle via backend — never Loop workflow.
+      walletMode = "managed";
+    } else if (walletModeRaw === "managed") {
       return NextResponse.json(
         { error: "managed mode requires participant-managed party" },
         { status: 400 }
       );
+    } else {
+      walletMode = "loop";
     }
 
     const order = await cantonSwapService().createOrder({

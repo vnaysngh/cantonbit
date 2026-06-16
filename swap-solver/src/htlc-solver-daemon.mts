@@ -237,6 +237,7 @@ async function main() {
       };
 
       for (const o of orders ?? []) {
+        try {
         // ================= REVERSE (canton-to-evm) =================
         // Main leg = user's CBTC (locked by our backend, LONG timelock); counter
         // leg = OUR WBTC (SHORT timelock). See docs/canton-to-evm-design.md.
@@ -523,6 +524,12 @@ async function main() {
               }
             );
           }
+        }
+        } catch (e) {
+          console.error(
+            `[solver] ${o.id.slice(0, 12)} error:`,
+            e instanceof Error ? e.message : e
+          );
         }
       }
     } catch (e) {
