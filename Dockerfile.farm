@@ -8,8 +8,7 @@ WORKDIR /app
 COPY package.json package-lock.json .npmrc ./
 ENV NODE_ENV=development
 ENV NPM_CONFIG_PRODUCTION=false
-RUN npm install -g npm@11.12.1 \
-  && npm install --include=dev --no-audit --no-fund --legacy-peer-deps
+RUN npm install --include=dev --no-audit --no-fund --legacy-peer-deps
 
 COPY lib ./lib
 COPY scripts ./scripts
@@ -17,10 +16,11 @@ COPY swap-solver/src/canton.ts ./swap-solver/src/canton.ts
 COPY swap-solver/src/retry.ts ./swap-solver/src/retry.ts
 COPY tsconfig.json ./
 
-ENV NODE_ENV=production
 ENV NEXT_PUBLIC_NETWORK=mainnet
 ENV FARM_DATA_DIR=/data
+# Do not set NODE_ENV=production — Railway/npm omit dev deps and npx tsx crashes.
 
 RUN mkdir -p /data
 
-CMD ["npx", "tsx", "scripts/farm/railway-start.mts"]
+# Invoke tsx directly; never use npx under production (breaks on Railway).
+CMD ["./node_modules/.bin/tsx", "scripts/farm/railway-start.mts"]
