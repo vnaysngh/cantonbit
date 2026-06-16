@@ -18,7 +18,15 @@ import { applyOutputFee } from "./htlc-quote-math";
 import { BRIDGE_FEE_BPS, QUOTE_TTL_SECONDS } from "./htlc-quote";
 
 export class CantonQuoteUnavailableError extends Error {}
-export class CantonQuoteSanityError extends Error {}
+export class CantonQuoteSanityError extends Error {
+  readonly userMessage: string;
+
+  constructor(detail: string, userMessage: string) {
+    super(detail);
+    this.name = "CantonQuoteSanityError";
+    this.userMessage = userMessage;
+  }
+}
 
 export interface CantonQuoteResult {
   fromAsset: CantonSwapAssetId;

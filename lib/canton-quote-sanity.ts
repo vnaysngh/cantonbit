@@ -7,6 +7,7 @@ import { fromBaseUnits, toBaseUnitsFloor } from "./amount-units";
 import { getSwapAsset, type CantonSwapAssetId } from "./canton-assets";
 import { fetchAmuletPriceUsd } from "./canton-price-scan";
 import { CantonQuoteSanityError } from "./canton-quote";
+import { cantonQuoteSanityUserMessage } from "./canton-quote-messages";
 import { NETWORK } from "./constants";
 
 /** Max deviation of Tradecraft gross from reference mid (bps). Wider on devnet (mainnet Tradecraft). */
@@ -33,13 +34,17 @@ async function fetchBtcUsd(): Promise<number> {
   });
   if (!r.ok) {
     throw new CantonQuoteSanityError(
-      `BTC/USD reference unavailable (${r.status})`
+      `BTC/USD reference unavailable (${r.status})`,
+      "Could not verify the Bitcoin reference price. Please try again shortly."
     );
   }
   const j = (await r.json()) as { bitcoin?: { usd?: number } };
   const p = j.bitcoin?.usd;
   if (typeof p !== "number" || !Number.isFinite(p) || p <= 0) {
-    throw new CantonQuoteSanityError("BTC/USD reference invalid");
+    throw new CantonQuoteSanityError(
+      "BTC/USD reference invalid",
+      "Could not verify the Bitcoin reference price. Please try again shortly."
+    );
   }
   btcUsdCache = { price: p, at: now };
   return p;
@@ -81,7 +86,10 @@ export async function assertCantonQuoteSanity(
     to.decimals
   );
   if (expectedGross <= 0n) {
-    throw new CantonQuoteSanityError("reference mid produced zero output");
+    throw new CantonQuoteSanityError(
+      "reference mid produced zero output",
+      cantonQuoteSanityUserMessage(fromAsset, toAsset)
+    );
   }
 
   const diff =
@@ -90,8 +98,11 @@ export async function assertCantonQuoteSanity(
       : expectedGross - grossOutUnits;
   const maxDiff = (expectedGross * BigInt(CANTON_QUOTE_SANITY_BPS)) / 10000n;
   if (diff > maxDiff) {
+    const detail =
+      `Tradecraft quote ${fromBaseUnits(grossOutUnits, to.decimals)} deviates from reference ${fromBaseUnits(expectedGross, to.decimals)} (>${CANTON_QUOTE_SANITY_BPS}bps)`;
     throw new CantonQuoteSanityError(
-      `Tradecraft quote ${fromBaseUnits(grossOutUnits, to.decimals)} deviates from reference ${fromBaseUnits(expectedGross, to.decimals)} (>${CANTON_QUOTE_SANITY_BPS}bps)`
+      detail,
+      cantonQuoteSanityUserMessage(fromAsset, toAsset)
     );
   }
 }

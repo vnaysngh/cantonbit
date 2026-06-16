@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 
 import type { CantonSwapAssetId } from "@/lib/canton-assets";
+import { formatCantonQuoteError } from "@/lib/canton-quote-messages";
 
 /** Debounced live RFQ for same-Canton pairs (shown in "You receive" before Review). */
 export function useCantonLiveQuote(opts: {
@@ -37,7 +38,7 @@ export function useCantonLiveQuote(opts: {
         })
       });
       const j = (await r.json()) as { outAmount?: string; error?: string };
-      if (!r.ok) throw new Error(j.error ?? "Quote failed");
+      if (!r.ok) throw new Error(formatCantonQuoteError(j.error));
       return j;
     },
     enabled:

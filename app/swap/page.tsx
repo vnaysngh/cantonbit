@@ -99,6 +99,7 @@ import {
   normalizeSwapLegs,
   resolveSwapKind
 } from "@/lib/swap-leg";
+import { formatCantonQuoteError } from "@/lib/canton-quote-messages";
 import { quoteOutUnits, quoteGrossOutUnits } from "@/lib/htlc-quote-math";
 import { extractCreatedOfferCid, extractEventsByIdFromSubmitResult, extractLastCreatedOfferCid, extractSubmitUpdateId } from "@/lib/mint-processor-logic";
 
@@ -767,7 +768,7 @@ export default function SwapPage() {
           inAmount?: string;
           outAmount?: string;
         };
-        if (!r.ok) throw new Error(q.error ?? "Quote failed");
+        if (!r.ok) throw new Error(formatCantonQuoteError(q.error));
         setStage({
           kind: "quoted",
           quote: {
@@ -2127,10 +2128,17 @@ export default function SwapPage() {
               stage.kind === "idle" &&
               amount &&
               parseFloat(amount) > 0 && (
-                <div className="mb-2 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-foreground">
-                  {c2cQuoteError instanceof Error
-                    ? c2cQuoteError.message
-                    : "Could not fetch quote"}
+                <div className="mb-2 flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-foreground">
+                  <span className="material-symbols-outlined mt-0.5 shrink-0 text-[18px] text-amber-500">
+                    info
+                  </span>
+                  <span>
+                    {formatCantonQuoteError(
+                      c2cQuoteError instanceof Error
+                        ? c2cQuoteError.message
+                        : undefined
+                    )}
+                  </span>
                 </div>
               )}
             {wallet.loopError && (

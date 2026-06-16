@@ -8,7 +8,11 @@ import {
   clientIpFromRequest
 } from "@/lib/canton-swap-rate-limit";
 import { quoteMvpCantonSwap } from "@/lib/canton-swap-quote";
-import { CantonQuoteUnavailableError } from "@/lib/canton-quote";
+import {
+  CantonQuoteSanityError,
+  CantonQuoteUnavailableError
+} from "@/lib/canton-quote";
+import { cantonQuoteUnavailableUserMessage } from "@/lib/canton-quote-messages";
 import type { CantonSwapMvpAssetId } from "@/lib/canton-swap-types";
 
 export const dynamic = "force-dynamic";
@@ -46,8 +50,14 @@ export async function POST(req: Request) {
       quoteSource: q.source
     });
   } catch (e) {
+    if (e instanceof CantonQuoteSanityError) {
+      return NextResponse.json({ error: e.userMessage }, { status: 503 });
+    }
     if (e instanceof CantonQuoteUnavailableError) {
-      return NextResponse.json({ error: e.message }, { status: 503 });
+      return NextResponse.json(
+        { error: cantonQuoteUnavailableUserMessage(e.message) },
+        { status: 503 }
+      );
     }
     return NextResponse.json(
       { error: e instanceof Error ? e.message : String(e) },
