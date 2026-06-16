@@ -11,8 +11,11 @@ Use a **separate git branch** and **separate Railway service** from `oranjswap-w
 | Setting | Value |
 |---------|-------|
 | **Root directory** | `/` (repo root) |
+| **Builder** | **Dockerfile** (not Nixpacks/Railpack default) |
 | **Dockerfile path** | `Dockerfile.farm` |
 | **Start command** | *(from Dockerfile — do not override)* |
+
+If deploy logs show `next build` or `npm run build:devnet`, Railway is building the **web app**, not the farm worker. Fix **Settings → Build → Dockerfile path** = `Dockerfile.farm` and redeploy.
 
 ### Volume (recommended)
 

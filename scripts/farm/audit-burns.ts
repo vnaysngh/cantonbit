@@ -10,6 +10,7 @@ import { auditSwapUpdatesForCcBurn } from "./lib/burn-audit";
 import { getLedgerJwt } from "./lib/jwt";
 
 interface LogRow {
+  type?: "swap" | "run_summary";
   swapId?: string;
   offerUpdateId?: string;
   fillUpdateId?: string;

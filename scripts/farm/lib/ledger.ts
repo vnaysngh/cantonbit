@@ -462,8 +462,6 @@ export async function listCcHoldings(
     out.push({
       contractId: ev.contractId,
       createdEventBlob: ev.createdEventBlob ?? "",
-      amount: String(v.amount ?? "0"),
-      locked: false,
       templateId: AMULET_HOLDING_TEMPLATE_FQN,
       payload: {
         owner: party,
