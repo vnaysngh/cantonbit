@@ -28,8 +28,10 @@
     "solver:watch": "npm --prefix swap-solver run watch",
     "solver:htlc": "npm --prefix swap-solver run htlc-daemon",
     "solver:htlc:mainnet": "npm --prefix swap-solver run htlc-daemon:mainnet",
+    "solver:htlc:prod": "npm --prefix swap-solver run htlc-daemon:prod",
     "solver:canton-swap": "npm --prefix swap-solver run canton-swap-daemon",
-    "solver:canton-swap:mainnet": "npm --prefix swap-solver run canton-swap-daemon:mainnet"
+    "solver:canton-swap:mainnet": "npm --prefix swap-solver run canton-swap-daemon:mainnet",
+    "solver:canton-swap:prod": "npm --prefix swap-solver run canton-swap-daemon:prod"
   },
   "dependencies": {
     "@base-ui/react": "^1.5.0",
