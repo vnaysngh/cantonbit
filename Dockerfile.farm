@@ -1,0 +1,21 @@
+# CBTC farm bot — standalone worker (no Next.js build).
+FROM node:22-slim
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY lib ./lib
+COPY scripts ./scripts
+COPY swap-solver/src/canton.ts ./swap-solver/src/canton.ts
+COPY swap-solver/src/retry.ts ./swap-solver/src/retry.ts
+COPY tsconfig.json ./
+
+ENV NODE_ENV=production
+ENV NEXT_PUBLIC_NETWORK=mainnet
+ENV FARM_DATA_DIR=/data
+
+RUN mkdir -p /data
+
+CMD ["npx", "tsx", "scripts/farm/railway-start.mts"]

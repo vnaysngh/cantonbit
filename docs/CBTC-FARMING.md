@@ -1,197 +1,303 @@
-# CBTC Swap-Farming Fleet — Guide
+# CBTC Swap Farming (mainnet-only, standalone)
 
-A runbook for generating **legitimate CBTC usage volume** on our own Canton validator by
-running a fleet of parties that continuously execute **real CC↔CBTC swaps** through the
-production atomic-settle engine (`settleManagedSwap`). Every swap moves CBTC, so every swap
-counts as a "farming" transaction.
+Drive **real CC↔CBTC swap volume** on Canton mainnet for BitSafe reward share. This is a **standalone CLI toolkit** — no Next.js deploy, no Supabase, no HTTP farm API.
 
-> This guide is the standalone farming runbook. The broader Canton-swap/HTLC design lives in
-> the plan file (`~/.claude/plans/typed-tinkering-crab.md`) — not here.
+Every swap moves **CBTC on-ledger** (~50/50 direction randomization):
 
----
+- **CBTC→CC:** farm trader sends CBTC → settlement vault sends CC  
+- **CC→CBTC:** farm trader sends CC → settlement vault sends CBTC  
 
-## 0. Why & the honest caveats (read first)
+## Architecture
 
-**Why:** BitSafe shares part of the network reward they earn from CBTC being used. More real
-CBTC swap volume → more reward to share.
-
-**⚠️ Eligibility (the real risk — confirm before mainnet scale):** self-generated swap volume
-must be **eligible** for the BitSafe reward share. Canton DSO / featured-app governance watches
-for wash/sybil activity. Making it "look organic" helps with load realism, but it does **not**
-protect against an *eligibility clawback* — obfuscation is the pattern such systems flag, not a
-defense. **Confirm with BitSafe that bot-driven CBTC swap volume counts toward the shared reward
-before running at scale on mainnet.** DevNet is risk-free; treat mainnet as gated on this.
-
-**⚠️ More parties ≠ more budget.** Every fleet party's transactions are sequenced by our ONE
-validator and share its ONE traffic bucket (~400 KB free + ~333 B/s refill). 10 parties give
-**realistic distribution**, not 10× throughput.
-
-**⚠️ Mainnet has no extra-traffic bucket** (`total_limit = 0` as of 2026-06-15). On mainnet the
-bot must stay strictly within the free refill or swaps get **rejected** (no paid fallback). The
-mainnet command is guarded behind `--i-understand-mainnet`.
-
----
-
-## 1. How a farming swap works (the topology)
-
-`settleManagedSwap` **requires the sender's leg to arrive as a pending OFFER, not a direct
-transfer** (it throws otherwise — `lib/canton-swap-settle.ts`). So swaps are **not** symmetric
-peer-to-peer. Two role types:
-
-| Role | Count | Preapproval | Holds | Position in a swap |
-| --- | --- | --- | --- | --- |
-| **Trader** | N (e.g. 10) | CC **and** CBTC (so counter legs land direct/instant) | CC + CBTC float | always the **sender** |
-| **Vault** | ≥1 (reuse settlement party) | **NONE** (so sender's leg is an offer it accepts) | CC + CBTC float | always the **counterparty** |
-
-**One farming swap (1 atomic tx):**
 ```
-random trader  --(offer: inAmount of asset X)-->  vault
-vault          --(accept X  +  deliver outAmount of asset Y, ATOMIC, actAs:[trader,vault])-->  trader
+scripts/farm/cli.mts          ← entry (provision | quote | swap | run | status | audit)
+scripts/farm/lib/             ← script-safe quote, 2-tx settle, pacing
+.farm-fleet.mainnet.json      ← fleet party ids (gitignored)
+farm-swap.log                 ← optional JSONL audit log (gitignored)
 ```
-Direction (CC→CBTC or CBTC→CC) and amount are randomized per swap. Both legs commit or the whole
-tx reverts.
+
+**Two ledger transactions per swap** (same as production managed C2C):
+
+1. **Tx1** — `actAs: [trader]` → user-leg **offer** to settlement vault  
+2. **Tx2** — `actAs: [vault]` → **accept offer + deliver counter** (atomic)
+
+Settlement vault must stay **preapproval-free**. Farm traders need **CC + CBTC preapproval** enabled.
+
+Env: `.env.mainnet` via `scripts/with-env.sh mainnet` (Keycloak m2m, treasury, vault party).
+
+**Party roles (do not merge for “rewards”):**
+
+| Party | Role | Preapproval |
+|-------|------|-------------|
+| `warpx-mainnet-1` | Treasury + validator operator | CC/CBTC on (normal ops) |
+| `oranj-settle-mainnet` | Settlement vault | **OFF** (required for offer-path C2C) |
+| `oranj-user-*` | Farm traders | CC + CBTC **ON** |
+
+All three sit on the **same WarpX participant**. Changing settlement to `warpx-mainnet-1` does not increase validator rewards; it breaks atomic swap semantics.
 
 ---
 
-## 2. Prerequisites
+## CC economics (validator vs farm)
 
-1. **m2m JWT creds in env** (loaded by `scripts/with-env.sh <net>` from `.env.<net>` + `.env.local`):
-   `KEYCLOAK_TOKEN_URL`, `KEYCLOAK_CLIENT_ID[_DEVNET]`, `KEYCLOAK_CLIENT_SECRET[_DEVNET]`,
-   `KEYCLOAK_SCOPE`, `NEXT_PUBLIC_NETWORK`. (Secrets live in `.env.<net>` — never commit/log them.)
-2. **Treasury party with CC + CBTC float** to seed the fleet: `SOLVER_CANTON_PARTY` (a.k.a.
-   `NEXT_PUBLIC_SOLVER_CANTON`). Fund it first if empty (`npm run fund-swap-vault:devnet`).
-3. **A vault counterparty with NO preapproval:** reuse `CANTON_SWAP_SETTLEMENT_PARTY` (already
-   provisioned preapproval-free) or let the provision script allocate a dedicated farm vault.
-4. **`.farm-fleet.json` must be gitignored.** The repo's `.gitignore` covers `.env*` but **not**
-   `.farm-fleet.json` — add it (see §6) before the first provision run; it holds fleet party ids.
+This section is about **Canton Coin validator income** on `warpx-mainnet-1`. It is **separate** from **BitSafe CBTC farming share** (the reason we run this bot).
+
+### How validator rewards work
+
+Canton mints CC in **10-minute rounds**. Activity creates **coupons** in round *N*; validator automation **mints** them into the operator wallet in round *N+1* (Splice wallet shows **“Validator Rewards” from Automation**).
+
+Two validator-side coupon types:
+
+| Coupon | Created when | Paid to |
+|--------|--------------|---------|
+| **`ValidatorRewardCoupon`** | CC is **burned**, or an **`AmuletRules_Transfer`** runs | Validator operator hosting the acting party |
+| **`ValidatorLivenessActivityRecord`** | Validator is live that round | Same (uptime faucet, capped ~$2.85 USD eq. / validator / round) |
+
+Docs: [Canton Coin Tokenomics](https://docs.canton.network/overview/reference/canton-coin-tokenomics), [Tokenomics of the GS](https://docs.canton.network/overview/reference/tokenomics-of-gs), [Preapprovals](https://docs.canton.network/appdev/modules/m7-canton-coin-preapprovals).
+
+Minting is **not 1:1 with spend**. Burning ~7.4 CC on five EnableCC preapprovals can mint back ~0.5 CC in the next round — proportional to global activity that round, not a rebate.
+
+### What burns CC vs what only moves CC
+
+| Action | CC effect | Validator coupon? |
+|--------|-----------|-------------------|
+| **EnableCC preapproval** (× per trader) | **Burns** ~1.5 CC/party/90d (provider = `warpx-mainnet-1`) | **Yes** — strong signal |
+| **Traffic purchase** (auto top-up) | **Burns** CC for bytes | **Yes** |
+| **CC transfer** (fund vault/traders) | Moves CC; no fee post–CIP-0078 | Weak / nominal via `AmuletRules_Transfer` only |
+| **CBTC swap legs** | Token Standard offers; not Amulet burns | **No** app/validator activity from swap volume itself |
+| **Farm swap traffic** | Consumes **traffic bytes** (may trigger CC burn if bucket topped up) | Indirect — only if traffic purchase burns CC |
+
+**Practical takeaway:** Provisioning preapprovals is the big one-time validator-reward driver you saw (+0.59 CC after ~−1.48 CC × 5). **Routine farm swaps do not burn CC per swap** — they consume **traffic**. Validator coupons from farming come mainly from **traffic top-up burns**, not from moving CBTC/CC between parties.
+
+**App rewards** (separate bucket): if `warpx-mainnet-1` is the preapproval **provider**, inbound 1-step CC to traders can earn **`AppRewardCoupon`** — not the same line as “Validator Rewards”.
+
+### What this means for farm ops
+
+- **Do not** point `CANTON_SWAP_SETTLEMENT_PARTY` at `warpx-mainnet-1` for CC rewards.
+- **Do** monitor Lighthouse traffic (`/api/validators/<warpx-party>`) — pacing is traffic-based, not CC-burn-based.
+- **BitSafe reward share** = on-ledger **CBTC swap volume**, not CC validator minting.
 
 ---
 
-## 3. One-time: provision the fleet
+## Prerequisites
 
-Script: `scripts/provision-farm-fleet.mts` (idempotent — re-runnable; same hint → same party).
-It allocates N trader parties (`POST /v2/parties` + `CanActAs` grant), enables CC **and** CBTC
-preapproval on each, funds each with CC + CBTC from the treasury, and writes the fleet to
-`.farm-fleet.json`. It also asserts the vault has **no** preapproval and funds the vault float.
+1. **Mainnet config** — `CANTON_SWAP_SETTLEMENT_PARTY`, `NEXT_PUBLIC_SOLVER_CANTON`, Keycloak mainnet creds  
+2. **BitSafe gate** — written confirmation that bot-driven swap volume counts; then set `BITSAFE_FARMING_ELIGIBLE=1` or pass `--bitsafe-eligible-confirmed` for continuous run  
+3. **Tradecraft** — quotes from `api.tradecraft.fi` (same as production swaps)
+
+Validate config:
 
 ```bash
-# DevNet — start small to prove it out
-npm run provision-farm-fleet:devnet -- --traders=2 --cc=1000 --cbtc=0.01
-
-# DevNet — full fleet
-npm run provision-farm-fleet:devnet -- --traders=10 --cc=5000 --cbtc=0.05
+npm run farm:audit:mainnet
 ```
-
-Flags: `--traders=<N>` · `--cc=<amt per trader>` · `--cbtc=<amt per trader>` ·
-`--vaults=<N>` (default 1, or reuse settlement party).
-
-Verify: `npm run party-balances:devnet` — each trader has CC + CBTC, the vault has float, and the
-vault shows **no** preapproval.
 
 ---
 
-## 4. Run the farm bot
+## 1. Provision fleet (one-time)
 
-Script: `scripts/farm-swaps.mts`. Each loop iteration = one CC↔CBTC atomic swap. Paced to fill
-the bucket, jittered to look organic.
+Allocates 5 hosted parties (`oranj-user-<uuid>` hints), grants m2m `CanActAs`, funds each from **`warpx-mainnet-1` (treasury)**, then enables CC+CBTC preapproval.
+
+Default: **120 CC + 0.0003 CBTC per trader** from treasury (600 CC + 0.0015 CBTC total at 5 parties). Vault is **not** funded during provision; use `fund-swap-vault:mainnet` separately.
 
 ```bash
-# DevNet dry-run — prints chosen traders/dirs/amounts, mean interval, projected bytes/CC; sends nothing
-npm run farm-swaps:devnet -- --dry-run --max-swaps=5
-
-# DevNet — 5 real swaps (use this to MEASURE real bytes/swap, see §5)
-npm run farm-swaps:devnet -- --max-swaps=5
-
-# DevNet — run continuously
-npm run farm-swaps:devnet -- --max-swaps=0
-
-# Mainnet — guarded; stays within the free refill only
-npm run farm-swaps:mainnet -- --i-understand-mainnet --max-swaps=0
+npm run farm:provision:mainnet -- --i-understand-mainnet
 ```
 
 Flags:
-- `--max-swaps=<N>` — total swaps (`0` = until Ctrl-C).
-- `--target-utilization=<0..1>` — fraction of the free refill to use (default `0.8`).
-- `--min-amount` / `--max-amount` — CBTC amount band (e.g. `0.00005`–`0.002`).
-- `--i-understand-mainnet` — required for the mainnet command.
-- `--dry-run` — plan only, no ledger writes.
 
-**What it does each tick:** picks a random trader + random vault + random direction + random
-amount (varied decimals) → quotes the counter amount → checks both floats + the trader's UTXO
-count (< 8) → `settleManagedSwap(syntheticOrder)` (one atomic tx) → sleeps a jittered interval →
-backs off on traffic rejections.
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--traders` | 5 | Number of farm trader parties |
+| `--cc` | 120 | CC **per trader** from treasury |
+| `--cbtc` | 0.0003 | CBTC **per trader** from treasury |
+| `--fund-vault` | off | Also fund settlement vault from treasury |
+| `--vault-cc` | 0 | CC to vault when `--fund-vault` |
+| `--vault-cbtc` | 0 | CBTC to vault when `--fund-vault` |
+| `--skip-fund` | off | Allocate only, no transfers |
+| `--skip-preapproval` | off | Skip EnableCC / CBTC preapproval |
 
----
+Writes **`.farm-fleet.mainnet.json`** (gitignored).
 
-## 5. Pacing & budget (how fast, and why)
+Verify:
 
-- **Per-swap cost:** a CC↔CBTC swap is a 2-leg atomic tx, budget **~15–25 KB/swap** (MEASURE it,
-  below — don't trust the estimate).
-- **Free bucket:** ~400 KB cap, **~333 B/s** refill (DSO-governed; confirm live via Scan
-  `amulet-rules → fees.baseRateTrafficLimits`).
-- **At ~20 KB/swap, `--target-utilization=0.8`:** mean interval ≈ **~75 s/swap**, jittered ±40%
-  (≈ 45–105 s), with occasional longer "quiet" gaps and short "busy" bursts so it isn't a
-  metronome. That's roughly **~1,450 swaps/day, ~0 CC** on the free tier.
-- Going faster than the refill on mainnet (where `total_limit=0`) → rejected swaps. The bot
-  auto-throttles down when it sees rejections.
-
-**Measure real bytes/swap (do this once on DevNet):**
-1. Read `total_consumed` from Lighthouse (no auth):
-   - DevNet: `https://lighthouse.devnet.cantonloop.com/api/validators/<warpx-devnet-party>`
-   - Mainnet: `https://lighthouse.cantonloop.com/api/validators/<warpx-mainnet-party>`
-   - field: `traffic_status.total_consumed`
-2. Run `npm run farm-swaps:devnet -- --max-swaps=5`.
-3. Read `total_consumed` again → `(after − before) / 5` = **real bytes/swap**. Plug that into
-   `--target-utilization` math (the bot also logs the drawdown every K swaps to self-calibrate).
+```bash
+npm run farm:status:mainnet
+```
 
 ---
 
-## 6. Monitoring
+## 2. Smoke test (single swap)
 
-- **Traffic drawdown:** Lighthouse `traffic_status.{total_limit, total_consumed}` (above).
-- **Balances / UTXO counts:** `npm run party-balances:devnet` — confirm trader/vault floats move,
-  balances don't drain one-sided (the bot varies direction 50/50 + tops up), and no party nears
-  the **10-UTXO cap** (consolidate/skip kicks in at 8).
-- **Container logs:** Dozzle (your existing app) — watch for "rejected event — traffic" lines.
-- **Per-swap confirmation:** each `updateId` is visible on Lighthouse `transactions`.
+Before scaling to full fleet size:
 
-**Gitignore (one-time):** add `.farm-fleet.json` to `.gitignore` so fleet party ids aren't
-committed.
+```bash
+npm run farm:swap:mainnet -- \
+  --i-understand-mainnet \
+  --trader=0 \
+  --from=CBTC \
+  --to=CC \
+  --in=0.000847
+```
 
----
+Quote only:
 
-## 7. Tuning & operations
-
-- **Fill the bucket more:** raise `--target-utilization` toward `0.9`+ (watch for rejections).
-- **Burn CC for more volume (mainnet):** out of scope here — would require enabling the
-  validator's CC-funded traffic top-up. Only worth it if the BitSafe reward share > traffic CC
-  cost (~$60/MB). Decide deliberately.
-- **Rebalance:** if a trader or the vault runs low, top it up from treasury
-  (`fund-swap-vault`-style transfer). The bot does periodic top-ups, but a long run may still
-  drift — check balances.
-- **Look organic:** keep amounts in a band with varied decimals (no round numbers), keep the
-  jitter + busy/quiet rhythm, rotate all traders. Avoid: fixed amount, fixed cadence, single pair.
+```bash
+npm run farm:quote:mainnet -- --from=CBTC --to=CC --amount=0.001
+```
 
 ---
 
-## 8. Reuse map (what the scripts are built on — for maintainers)
+## 3. Run farm bot
 
-| Need | Function / location |
-| --- | --- |
-| Allocate party + grant CanActAs | `allocateParty` / `grantCanActAs` — `scripts/provision-settlement-party.mts`; `allocateUserParty` — `lib/party-onboarding.ts` |
-| Execute one atomic swap | `settleManagedSwap(order)` — `lib/canton-swap-settle.ts`; `CantonSwapOrder` — `lib/canton-swap-types.ts` |
-| Quote counter amount | `quoteCantonToCanton` — `lib/canton-quote.ts` |
-| Enable preapproval | `enableCcForParty` — `lib/enable-cc.ts`; `enableCbtcPreapprovalForParty` — `lib/enable-cbtc-preapproval.ts` (checks: `hasCcEnabled` / `hasCbtcPreapproval`) |
-| Holdings / funding | `getHoldings` / `holdingsForSwapAsset`; `buildTransferExercise` + `submitLedgerCommands` — `lib/transfer.ts` |
-| JWT / network | `getLedgerJwt` — `lib/auth.ts`; host + instrument from `NETWORK` — `lib/constants.ts` |
+```bash
+# Dry-run — log picks + sleep intervals, no ledger writes
+npm run farm:run:mainnet -- \
+  --i-understand-mainnet \
+  --bitsafe-eligible-confirmed \
+  --dry-run \
+  --max-swaps=5
+
+# Measure bytes (5 real swaps), then continuous
+npm run farm:run:mainnet -- \
+  --i-understand-mainnet \
+  --bitsafe-eligible-confirmed \
+  --max-swaps=0
+```
+
+Requires **`--i-understand-mainnet`** and BitSafe gate (`BITSAFE_FARMING_ELIGIBLE=1` or **`--bitsafe-eligible-confirmed`**).
 
 ---
 
-## 9. Status
+## Swap frequency & pacing
 
-- [ ] Add `.farm-fleet.json` to `.gitignore`
-- [ ] `scripts/provision-farm-fleet.mts` (+ `provision-farm-fleet:devnet` npm script)
-- [ ] `scripts/farm-swaps.mts` (+ `farm-swaps:devnet` / `farm-swaps:mainnet` npm scripts)
-- [ ] DevNet: provision 2 traders → 1 real swap settles → measure bytes/swap
-- [ ] DevNet: full 10-trader run, confirm pacing stays in-bucket
-- [ ] Confirm reward eligibility with BitSafe **before** mainnet
+Cadence targets **~92% of free traffic bucket refill** (default `--target-utilization=0.92`), not 100%.
+
+| Parameter | Default |
+|-----------|---------|
+| Free bucket refill | ~333 B/s |
+| Bytes per swap | **24,500** (ledger-measured on mainnet; override with `--bytes-per-swap`) |
+| Mean interval | ~**80s** @ 24.5 KB and 92% util |
+| Min sleep | 20s (after subtracting swap execution time) |
+
+**Formula:**
+
+```
+mean_interval_s = bytes_per_swap / (333 × target_utilization)
+sleep = max(min_interval, mean_interval - swap_duration)
+```
+
+**Why ~10 min for 5 swaps before:** almost all wall time was **intentional sleep** (~106s × 5) from the old 30 KB / 85% defaults plus jitter — not random delays in swap code. Ledger submits are ~10–20s each.
+
+**Measured mainnet sizes (2 txs/swap):**
+
+| Direction | ~Bytes/swap |
+|-----------|-------------|
+| CBTC→CC | ~27 KB |
+| CC→CBTC | ~20 KB |
+| Average | **~24.5 KB** |
+
+Lighthouse `total_consumed` is currently **0** on warpx — bot falls back to ledger estimate and saves it to `.farm-fleet.mainnet.json` after a run.
+
+Pacing flags: `--target-utilization`, `--bytes-per-swap`, `--calibrate-every`, `--min-interval`, `--max-interval`, `--cbtc-in`, `--cc-in`.
+
+Default swap inputs: **0.0001 CBTC** (CBTC→CC) and **50 CC** (CC→CBTC).
+
+---
+
+## Swap planner (balance-aware)
+
+The bot no longer picks random trader + direction. Each tick:
+
+1. Loads **trader + vault balances**
+2. Quotes vault deliverable for both directions
+3. **Alternates direction** — no two consecutive swaps in the same direction (CBTC→CC then CC→CBTC)
+4. **Same trader cannot repeat the same direction** back-to-back
+5. Picks among viable candidates by **rebalance score** (move toward ~120 CC / ~0.0003 CBTC per trader)
+6. Skips parties below reserve (`+0.00005 CBTC` / `+10 CC` above swap size) or UTXO cap
+
+---
+
+## CC burn audit
+
+Farm swaps (Token Standard offers) should **not** burn CC post–CIP-0078. CC burns come from **preapproval setup** and **traffic top-ups**, not swap volume.
+
+After each swap the bot scans offer+fill update trees for fee/burn choices (`TransferPreapproval`, `AmuletRules` burn, etc.) and logs `ccBurnSuspected` to `farm-swap.log`.
+
+Retro-audit all logged swaps:
+
+```bash
+npm run farm:audit-burns:mainnet
+```
+
+---
+
+## Monitoring
+
+```bash
+npm run farm:status:mainnet
+npm run party-balances:mainnet -- <party-id>
+```
+
+- Lighthouse traffic drawdown  
+- Trader/vault balances (50/50 direction should not drain one side)  
+- UTXO counts — warn at 8, cap at 10 per party  
+- `farm-swap.log` — one JSON line per swap  
+
+Each **swap** line includes:
+
+| Field | Meaning |
+|-------|---------|
+| `swapDurationSec` | Ledger time (offer + fill) |
+| `sleepAfterSec` | Planned wait before next swap |
+| `wallIntervalSec` | Actual seconds since previous swap log (sleep + plan + swap) |
+
+Every **5 swaps** (or at run end), a **`run_summary`** line is appended with totals and averages.
+
+Example `run_summary`:
+
+```json
+{"type":"run_summary","runId":"…","swapCount":5,"totalWallSec":397.1,"avgSwapDurationSec":48.4,"avgSleepAfterSec":36,"avgWallIntervalSec":99.3}
+```
+
+Top up float from treasury (`fund-swap-vault:mainnet`) if a trader or vault runs low.
+
+---
+
+## In-process API (for scripts)
+
+```typescript
+executeSwap({
+  jwt,
+  fleet,
+  traderParty,
+  fromAsset: "CBTC" | "CC",
+  toAsset: "CBTC" | "CC",
+  inAmount: string,
+  outAmount?: string,  // omit → Tradecraft quote
+  swapId?: string,
+})
+```
+
+Implemented in `scripts/farm/lib/execute-swap.ts`.
+
+---
+
+## What this is NOT
+
+- DevNet farming commands  
+- Web app / `/api/farm/*` routes  
+- Supabase order rows  
+- Ping-pong transfers  
+- Loop wallet mode (managed m2m only)
+
+---
+
+## Implementation checklist
+
+- [x] `npm run farm:audit:mainnet` passes  
+- [x] BitSafe written eligibility OK  
+- [x] `farm:provision:mainnet` + vault funded (`fund-swap-vault:mainnet`)  
+- [x] `farm:status:mainnet` healthy  
+- [x] Smoke swaps both directions (`CBTC→CC`, `CC→CBTC`)  
+- [ ] `farm:run:mainnet --dry-run --max-swaps=5` — verify picks + pacing  
+- [ ] `farm:run:mainnet --max-swaps=5` — measure Lighthouse bytes/swap  
+- [ ] `farm:run:mainnet --max-swaps=0` — continuous (tmux/screen; monitor balances)  
