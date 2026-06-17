@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { useLoopWallet } from "@/hooks/useLoopWallet";
-import { swapSessionActive } from "@/lib/swap-accept";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 
 type EmailStage =
@@ -27,10 +26,6 @@ const secondaryBtnClass =
 
 const otpInputClass =
   "h-[76px] w-full rounded-xl border border-[#dfc7be] bg-white px-5 pb-3 pt-8 text-[26px] font-bold leading-none tracking-[0.32em] text-[#191919] outline-none transition-all placeholder:text-transparent focus:border-[#a84e32] focus:ring-4 focus:ring-[#a84e32]/10";
-
-function deferState(fn: () => void) {
-  void Promise.resolve().then(fn);
-}
 
 function cleanError(err: unknown, fallback = "Something went wrong. Please try again."): string {
   if (!err) return fallback;
@@ -90,10 +85,6 @@ export default function LoginPage() {
   const [emailBusy, setEmailBusy] = useState<EmailBusy>(null);
   const [emailError, setEmailError] = useState<string | null>(null);
   const [loopLoginError, setLoopLoginError] = useState<string | null>(null);
-  const [loopLoginPending, setLoopLoginPending] = useState(false);
-  const [loopLoginInFlight, setLoopLoginInFlight] = useState(false);
-  const [loopSessionChecking, setLoopSessionChecking] = useState(false);
-  const [loopSessionProbe, setLoopSessionProbe] = useState<{ party: string; active: boolean } | null>(null);
 
   const loop = useLoopWallet();
   const router = useRouter();
@@ -111,93 +102,17 @@ export default function LoginPage() {
     };
   }, [router]);
 
-  // If the Loop SDK silently restored a wallet session, first check whether our
-  // server-side Loop API-key cookie is still active. This is a no-signature
-  // probe; if it succeeds, the user should not see the Exchange API Key prompt.
+  // Loop connect = logged in. Exchange API Key signing happens on /swap when needed.
   useEffect(() => {
-    if (!loop.connected || !loop.party || !loop.provider) {
-      deferState(() => {
-        setLoopSessionProbe(null);
-        setLoopSessionChecking(false);
-      });
-      return;
-    }
-    let cancelled = false;
-    deferState(() => {
-      setLoopSessionChecking(true);
-      setLoopSessionProbe(null);
-    });
-    void swapSessionActive(loop.party)
-      .then((active) => {
-        if (cancelled) return;
-        setLoopSessionProbe({ party: loop.party, active });
-        if (active) router.replace("/swap");
-      })
-      .finally(() => {
-        if (!cancelled) setLoopSessionChecking(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+    if (!loop.connected || !loop.party || !loop.provider) return;
+    router.replace("/swap");
   }, [loop.connected, loop.party, loop.provider, router]);
 
-  // Loop login: the Loop wallet IS the user's identity (it carries their email +
-  // Canton party). On connect, register the party (loop-wallet mode) -> go to swap.
-  // Use client-side nav so the in-memory Loop provider survives.
   useEffect(() => {
-    if (!loopLoginPending || loopLoginInFlight || !loop.connected || !loop.party || !loop.provider) return;
-    if (loopSessionChecking) return;
-    if (loopSessionProbe?.party !== loop.party) return;
-    if (loopSessionProbe.active) {
-      deferState(() => setLoopLoginPending(false));
-      router.replace("/swap");
-      return;
+    if (loop.error && !loop.connected) {
+      setLoopLoginError(cleanError(loop.error, "Loop wallet connection failed."));
     }
-    deferState(() => setLoopLoginInFlight(true));
-    void (async () => {
-      setLoopLoginError(null);
-      const { signExchange } = await import("@/lib/swap-accept");
-      const exchange = await signExchange(loop.provider!);
-      if (!exchange) throw new Error("Loop wallet signature rejected");
-      const res = await fetch("/api/parties/register-loop", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ partyId: loop.party, ...exchange }),
-      });
-      if (!res.ok) {
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        throw new Error(data.error ?? "Loop wallet registration failed");
-      }
-      setLoopLoginPending(false);
-      router.replace("/swap");
-    })()
-      .catch((err) => {
-        setLoopLoginError(cleanError(err, "Loop wallet sign-in failed."));
-        setLoopLoginPending(false);
-      })
-      .finally(() => {
-        setLoopLoginInFlight(false);
-      });
-  }, [
-    loop.connected,
-    loop.party,
-    loop.provider,
-    loopLoginInFlight,
-    loopLoginPending,
-    loopSessionChecking,
-    loopSessionProbe,
-    router,
-  ]);
-
-  useEffect(() => {
-    if (loopLoginPending && loop.error && (!loop.connected || !loop.provider)) {
-      deferState(() => {
-        setLoopLoginError(cleanError(loop.error, "Loop wallet connection failed."));
-        setLoopLoginPending(false);
-        setLoopLoginInFlight(false);
-      });
-    }
-  }, [loop.connected, loop.error, loop.provider, loopLoginPending]);
+  }, [loop.error, loop.connected]);
 
   useEffect(() => {
     if (emailStage.kind !== "otp") return;
@@ -268,28 +183,25 @@ export default function LoginPage() {
   };
 
   const startLoopLogin = () => {
-    if (!loop.ready || loop.restoring || loop.connecting || loopSessionChecking || loopLoginInFlight) return;
-    const shouldRefreshLoop = !!loopLoginError || !loop.connected || !loop.provider;
+    if (!loop.ready || loop.restoring || loop.connecting) return;
     setLoopLoginError(null);
-    setLoopLoginPending(true);
-    if (shouldRefreshLoop) {
-      void loop.connect();
+    if (loop.connected && loop.provider) {
+      router.replace("/swap");
+      return;
     }
+    void loop.connect();
   };
 
   const emailDisabled = emailBusy !== null;
-  const loopDisabled = !loop.ready || loop.restoring || loop.connecting || loopSessionChecking || loopLoginInFlight;
-  const loopButtonLabel =
-    loop.restoring || loopSessionChecking
-      ? "Checking Loop session..."
-      : loop.connecting
-        ? "Connecting..."
-        : loopLoginInFlight
-          ? "Signing..."
-          : loop.connected
-            ? "Sign with Loop Wallet"
-            : "Continue with Loop Wallet";
-  const loopBusy = loop.restoring || loopSessionChecking || loop.connecting || loopLoginInFlight;
+  const loopDisabled = !loop.ready || loop.restoring || loop.connecting;
+  const loopButtonLabel = loop.restoring
+    ? "Checking Loop session..."
+    : loop.connecting
+      ? "Connecting..."
+      : loop.connected
+        ? "Opening swap..."
+        : "Continue with Loop Wallet";
+  const loopBusy = loop.restoring || loop.connecting;
 
   return (
     <main className="min-h-screen bg-[#f7f5f2] px-4 py-4 text-[#191919] sm:px-6 sm:py-6">
@@ -457,7 +369,7 @@ export default function LoginPage() {
 
             <div className="mt-9 flex items-center justify-between gap-4 text-[14px] font-semibold text-[#8d7a72]">
               <span>
-                {loop.restoring || loopSessionChecking
+                {loop.restoring
                   ? "Checking Loop session"
                   : loop.connected
                     ? "Loop wallet connected"

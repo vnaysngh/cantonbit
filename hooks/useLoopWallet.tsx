@@ -76,7 +76,7 @@ const LoopContext = createContext<LoopState>({
   connect: async () => {}, logout: () => {},
 });
 
-const APP_NAME = "OranjSwap";
+const APP_NAME = "WarpX";
 const LOOP_CONNECT_KEY = "loop_connect";
 
 /** Drop a stale Loop browser session so autoConnect does not 404 on every reload. */
