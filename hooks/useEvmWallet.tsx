@@ -28,6 +28,8 @@ function getProvider(): Eip1193Provider | null {
 
 export interface EvmWallet {
   available: boolean;
+  /** False until the initial eth_accounts probe finishes (client-only). */
+  hydrated: boolean;
   account: string | null;
   chainId: number | null;
   connecting: boolean;
@@ -39,8 +41,8 @@ export interface EvmWallet {
   sendTransaction: (tx: { to: string; data: string; value?: string }) => Promise<string>;
   call: (to: string, data: string) => Promise<string>;
   switchChain: (chainId: number, params?: AddChainParams) => Promise<void>;
-  /** Forget the connection in-app (the wallet itself stays installed). */
-  disconnect: () => void;
+  /** Forget the connection in-app and revoke wallet permissions when supported. */
+  disconnect: () => Promise<void>;
 }
 
 export interface AddChainParams {
@@ -55,6 +57,14 @@ const DISCONNECTED_KEY = "oranj.evm.disconnected";
 
 const EvmContext = createContext<EvmWallet | null>(null);
 
+function readDisconnectedFlag(): boolean {
+  try {
+    return localStorage.getItem(DISCONNECTED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 function useEvmWalletState(): EvmWallet {
   const [account, setAccount] = useState<string | null>(null);
   const [chainId, setChainId] = useState<number | null>(null);
@@ -66,12 +76,16 @@ function useEvmWalletState(): EvmWallet {
   // server) and is set to its real value in the effect, so the first client
   // render matches the server and there's no hydration mismatch.
   const [available, setAvailable] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
     setAvailable(!!getProvider());
-    try { disconnected.current = localStorage.getItem(DISCONNECTED_KEY) === "1"; } catch { /* ignore */ }
+    try { disconnected.current = readDisconnectedFlag(); } catch { /* ignore */ }
     const p = getProvider();
-    if (!p?.on) return;
+    if (!p?.on) {
+      setHydrated(true);
+      return;
+    }
     const onAccounts = (...args: unknown[]) => {
       const accts = args[0] as string[];
       const next = disconnected.current ? null : (accts?.[0] ?? null);
@@ -79,6 +93,7 @@ function useEvmWalletState(): EvmWallet {
       if (!next) setChainId(null);
     };
     const onChain = (...args: unknown[]) => {
+      if (disconnected.current) return;
       const cid = args[0] as string;
       setChainId(cid ? Number.parseInt(cid, 16) : null);
     };
@@ -86,17 +101,24 @@ function useEvmWalletState(): EvmWallet {
     p.on("chainChanged", onChain);
     // Hydrate current state if already authorized AND not manually disconnected.
     if (!disconnected.current) {
-      void p.request({ method: "eth_accounts" }).then((a) => {
-        const accts = a as string[];
-        if (accts?.[0]) {
-          setAccount(accts[0]);
-          void p.request({ method: "eth_chainId" }).then((c) => {
-            setChainId(c ? Number.parseInt(c as string, 16) : null);
-          });
-        } else {
-          setChainId(null);
-        }
-      });
+      void p
+        .request({ method: "eth_accounts" })
+        .then((a) => {
+          if (disconnected.current) return;
+          const accts = a as string[];
+          if (accts?.[0]) {
+            setAccount(accts[0]);
+            void p.request({ method: "eth_chainId" }).then((c) => {
+              if (disconnected.current) return;
+              setChainId(c ? Number.parseInt(c as string, 16) : null);
+            });
+          } else {
+            setChainId(null);
+          }
+        })
+        .finally(() => setHydrated(true));
+    } else {
+      setHydrated(true);
     }
     return () => {
       p.removeListener?.("accountsChanged", onAccounts);
@@ -109,26 +131,56 @@ function useEvmWalletState(): EvmWallet {
     if (!p) { setError("No EVM wallet found. Install MetaMask."); return; }
     setConnecting(true);
     setError(null);
+    const forcePicker = disconnected.current || readDisconnectedFlag();
+    disconnected.current = false;
+    try { localStorage.removeItem(DISCONNECTED_KEY); } catch { /* ignore */ }
     try {
-      disconnected.current = false;
-      try { localStorage.removeItem(DISCONNECTED_KEY); } catch { /* ignore */ }
+      // After an explicit disconnect, ask the wallet to show the account picker again.
+      // Revoke on disconnect handles MetaMask; requestPermissions covers wallets that
+      // ignore revoke or where revoke is unsupported.
+      if (forcePicker) {
+        try {
+          await p.request({
+            method: "wallet_requestPermissions",
+            params: [{ eth_accounts: {} }],
+          });
+        } catch (e) {
+          if ((e as { code?: number })?.code === 4001) throw e;
+        }
+      }
       const accts = (await p.request({ method: "eth_requestAccounts" })) as string[];
       setAccount(accts?.[0] ?? null);
       const cid = (await p.request({ method: "eth_chainId" })) as string;
       setChainId(cid ? Number.parseInt(cid, 16) : null);
     } catch (e) {
+      disconnected.current = true;
+      try { localStorage.setItem(DISCONNECTED_KEY, "1"); } catch { /* ignore */ }
+      setAccount(null);
+      setChainId(null);
       setError(e instanceof Error ? e.message : "Failed to connect wallet");
     } finally {
       setConnecting(false);
     }
   }, []);
 
-  const disconnect = useCallback(() => {
+  const disconnect = useCallback(async () => {
     disconnected.current = true;
     try { localStorage.setItem(DISCONNECTED_KEY, "1"); } catch { /* ignore */ }
     setAccount(null);
     setChainId(null);
     setError(null);
+
+    const p = getProvider();
+    if (!p) return;
+
+    try {
+      await p.request({
+        method: "wallet_revokePermissions",
+        params: [{ eth_accounts: {} }],
+      });
+    } catch {
+      // Not all wallets implement revoke — local disconnect still applies.
+    }
   }, []);
 
   const signTypedData = useCallback(async (typedData: object): Promise<string> => {
@@ -203,7 +255,21 @@ function useEvmWalletState(): EvmWallet {
     }
   }, []);
 
-  return { available, account, chainId, connecting, switchingChain, error, connect, signTypedData, sendTransaction, call, switchChain, disconnect };
+  return {
+    available,
+    hydrated,
+    account,
+    chainId,
+    connecting,
+    switchingChain,
+    error,
+    connect,
+    signTypedData,
+    sendTransaction,
+    call,
+    switchChain,
+    disconnect
+  };
 }
 
 export function EvmWalletProvider({ children }: { children: ReactNode }) {

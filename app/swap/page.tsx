@@ -12,6 +12,7 @@ import {
 } from "@/components/SwapWaitBanner";
 import { TokenIcon, type SwapTokenId } from "@/components/TokenIcon";
 import { SwapLegBadge } from "@/components/SwapLegPicker";
+import { useCantonIdentity } from "@/hooks/useCantonIdentity";
 import { useManagedPreapproval } from "@/hooks/useManagedPreapproval";
 import {
   useCantonSwapAssets,
@@ -335,7 +336,9 @@ export default function SwapPage() {
         ? "evm-to-canton"
         : "evm-to-canton";
   const isReverse = swapKind === "canton-to-evm";
-  const { data: cantonAssets = [] } = useCantonSwapAssets();
+  const { data: cantonAssets = [], isLoading: assetsLoading } =
+    useCantonSwapAssets();
+  const { ready: identityReady } = useCantonIdentity();
   const enabledCantonIds = useMemo(
     () => cantonAssets.map((a) => a.id),
     [cantonAssets]
@@ -423,9 +426,11 @@ export default function SwapPage() {
   }, []);
 
   // In-flight swaps are tracked on /orders — not on this page.
-  const { total: cbtcBalance, ccTotal } = useBalance();
+  const { total: cbtcBalance, ccTotal, isLoading: balanceLoading } =
+    useBalance();
   const invalidateBalances = useInvalidateBalances();
-  const { data: usdcxBalance = "0" } = useQuery({
+  const usdcxEnabled = cantonAssets.some((a) => a.id === "USDCX");
+  const { data: usdcxBalance = "0", isLoading: usdcxLoading } = useQuery({
     queryKey: ["asset-balance", "USDCX"],
     queryFn: async () => {
       const r = await fetch("/api/parties/asset-balance?asset=USDCX");
@@ -433,7 +438,7 @@ export default function SwapPage() {
       const j = (await r.json()) as { total?: string };
       return j.total ?? "0";
     },
-    enabled: cantonAssets.some((a) => a.id === "USDCX"),
+    enabled: usdcxEnabled,
     refetchInterval: 30_000
   });
 
@@ -711,6 +716,45 @@ export default function SwapPage() {
     wallet.provider,
     sessionReady,
     probeCbtcAutoAccept
+  ]);
+
+  /** Block the primary CTA until identity, wallets, balances, assets, and session probe finish. */
+  const swapBootstrapping = useMemo(() => {
+    if (!identityProbed || wallet.isLoading) return true;
+    if (!identityReady) return true;
+    if (
+      !loopConnected &&
+      !process.env.NEXT_PUBLIC_SWAP_DEST_PARTY
+    ) {
+      return true;
+    }
+    if (assetsLoading) return true;
+    if (loopConnected && balanceLoading) return true;
+    if (usdcxEnabled && usdcxLoading) return true;
+    if (
+      loopConnected &&
+      !isParticipantManaged &&
+      wallet.provider &&
+      sessionReady === null
+    ) {
+      return true;
+    }
+    if (evm.available && !evm.hydrated) return true;
+    return false;
+  }, [
+    identityProbed,
+    wallet.isLoading,
+    identityReady,
+    assetsLoading,
+    loopConnected,
+    balanceLoading,
+    usdcxEnabled,
+    usdcxLoading,
+    isParticipantManaged,
+    wallet.provider,
+    sessionReady,
+    evm.available,
+    evm.hydrated
   ]);
 
   const fail = (message: string) => setStage({ kind: "error", message });
@@ -1967,6 +2011,13 @@ export default function SwapPage() {
           stage.phase === "solver"
             ? swapWaitButtonLabel(waitElapsedSec, "solver")
             : swapWaitButtonLabel(waitElapsedSec, "locking"),
+        onClick: () => {},
+        disabled: true,
+        busy: true
+      };
+    } else if (swapBootstrapping) {
+      primary = {
+        label: "Loading…",
         onClick: () => {},
         disabled: true,
         busy: true

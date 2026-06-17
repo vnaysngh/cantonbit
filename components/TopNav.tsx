@@ -178,7 +178,7 @@ interface EvmLike {
   available: boolean;
   connecting: boolean;
   connect: () => void;
-  disconnect: () => void;
+  disconnect: () => void | Promise<void>;
 }
 
 /**
@@ -277,7 +277,7 @@ function WalletsMenu({
             onConnect={evm.connect}
             connectLabel={evm.connecting ? "Connecting…" : evm.available ? "Connect" : "No wallet"}
             connectDisabled={evm.connecting || !evm.available}
-            onDisconnect={evm.disconnect}
+            onDisconnect={() => void evm.disconnect()}
           />
           {evmError && (
             <p className="px-2 pb-1 text-[11px] leading-snug text-destructive">{evmError}</p>
