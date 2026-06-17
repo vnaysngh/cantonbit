@@ -5,13 +5,28 @@ import { createPortal } from "react-dom";
 
 import { ChainIcon } from "@/components/ChainIcon";
 import { TokenIcon, type SwapTokenId } from "@/components/TokenIcon";
-import type { CantonSwapAssetMeta } from "@/hooks/useCantonSwapAssets";
+import {
+  CANTON_SWAP_ASSET_FALLBACK,
+  type CantonSwapAssetMeta
+} from "@/hooks/useCantonSwapAssets";
 import type { SwapChain, SwapLeg } from "@/lib/swap-leg";
-import { legDisplay } from "@/lib/swap-leg";
+import {
+  crossChainPickerHint,
+  legDisplay,
+  swapLegPickerDisabled
+} from "@/lib/swap-leg";
 import { SWAP_CHAIN } from "@/lib/swap-evm";
 import { cn } from "@/lib/utils";
 
 type NetworkFilter = "all" | SwapChain;
+
+type TokenRow = {
+  leg: SwapLeg;
+  symbol: string;
+  name: string;
+  network: string;
+  disabled: boolean;
+};
 
 export function SwapLegBadge({
   leg,
@@ -22,7 +37,6 @@ export function SwapLegBadge({
   disabled
 }: {
   leg: SwapLeg;
-  /** Opposite swap leg — used to hide invalid same-chain/same-asset picks. */
   otherLeg?: SwapLeg;
   onChange: (leg: SwapLeg) => void;
   cantonAssets: CantonSwapAssetMeta[];
@@ -95,13 +109,15 @@ function SwapTokenSelectModal({
   onClose: () => void;
   onSelect: (leg: SwapLeg) => void;
 }) {
-  const evmBlocked = otherLeg?.chain === "evm";
   const [query, setQuery] = useState("");
-  const [network, setNetwork] = useState<NetworkFilter>(() => {
-    if (evmBlocked) return "canton";
-    return leg.chain === "evm" ? "evm" : "canton";
-  });
+  const [network, setNetwork] = useState<NetworkFilter>(() =>
+    leg.chain === "evm" ? "evm" : "canton"
+  );
   const [mounted, setMounted] = useState(false);
+
+  const cantonList =
+    cantonAssets.length > 0 ? cantonAssets : CANTON_SWAP_ASSET_FALLBACK;
+  const crossChainHint = crossChainPickerHint(otherLeg, leg);
 
   useEffect(() => {
     setMounted(true);
@@ -122,19 +138,10 @@ function SwapTokenSelectModal({
 
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const out: Array<{
-      leg: SwapLeg;
-      symbol: string;
-      name: string;
-      network: string;
-    }> = [];
-
-    const cantonTokenTaken =
-      otherLeg?.chain === "canton" ? otherLeg.token : null;
+    const out: TokenRow[] = [];
 
     if (network === "all" || network === "canton") {
-      for (const a of cantonAssets) {
-        if (cantonTokenTaken && a.id === cantonTokenTaken) continue;
+      for (const a of cantonList) {
         if (
           q &&
           !a.symbol.toLowerCase().includes(q) &&
@@ -142,16 +149,18 @@ function SwapTokenSelectModal({
         ) {
           continue;
         }
+        const candidate = { chain: "canton", token: a.id } as SwapLeg;
         out.push({
-          leg: { chain: "canton", token: a.id },
+          leg: candidate,
           symbol: a.symbol,
           name: a.label,
-          network: "Canton"
+          network: "Canton",
+          disabled: swapLegPickerDisabled(candidate, otherLeg)
         });
       }
     }
 
-    if (!evmBlocked && (network === "all" || network === "evm")) {
+    if (network === "all" || network === "evm") {
       if (
         !q ||
         "wbtc".includes(q) ||
@@ -159,17 +168,19 @@ function SwapTokenSelectModal({
         "bitcoin".includes(q) ||
         SWAP_CHAIN.name.toLowerCase().includes(q)
       ) {
+        const candidate = { chain: "evm", token: "WBTC" } as SwapLeg;
         out.push({
-          leg: { chain: "evm", token: "WBTC" },
+          leg: candidate,
           symbol: "WBTC",
           name: "Wrapped Bitcoin",
-          network: SWAP_CHAIN.name
+          network: SWAP_CHAIN.name,
+          disabled: swapLegPickerDisabled(candidate, otherLeg)
         });
       }
     }
 
     return out;
-  }, [cantonAssets, evmBlocked, network, otherLeg, query]);
+  }, [cantonList, network, otherLeg, query]);
 
   if (!mounted || typeof document === "undefined") return null;
 
@@ -182,7 +193,6 @@ function SwapTokenSelectModal({
         onClick={onClose}
       />
 
-      {/* NOTE: do NOT use max-w-md here — in our @theme, md = --spacing-md (19px). */}
       <div
         role="dialog"
         aria-modal="true"
@@ -204,6 +214,12 @@ function SwapTokenSelectModal({
         </div>
 
         <div className="space-y-3 px-4 pt-3">
+          {crossChainHint && (
+            <p className="rounded-xl bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-800">
+              {crossChainHint}
+            </p>
+          )}
+
           <div className="relative">
             <span className="material-symbols-outlined pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[18px] text-muted-foreground">
               search
@@ -220,13 +236,9 @@ function SwapTokenSelectModal({
           <div className="flex flex-wrap gap-2">
             {(
               [
-                ...(evmBlocked
-                  ? []
-                  : [{ id: "all" as const, label: "All networks" }]),
+                { id: "all" as const, label: "All networks" },
                 { id: "canton" as const, label: "Canton" },
-                ...(evmBlocked
-                  ? []
-                  : [{ id: "evm" as const, label: SWAP_CHAIN.name }])
+                { id: "evm" as const, label: SWAP_CHAIN.name }
               ] as const
             ).map((n) => (
               <button
@@ -258,19 +270,27 @@ function SwapTokenSelectModal({
                   row.leg.chain === "evm" ? "WBTC" : row.leg.token;
                 const bal = getBalance?.(row.leg);
                 const active =
+                  !row.disabled &&
                   leg.chain === row.leg.chain &&
                   (leg.chain === "evm" ||
                     (leg.chain === "canton" &&
                       row.leg.chain === "canton" &&
                       leg.token === row.leg.token));
+                const disabled = row.disabled;
 
                 return (
                   <li key={`${row.leg.chain}-${row.symbol}`}>
                     <button
                       type="button"
-                      onClick={() => onSelect(row.leg)}
+                      disabled={disabled}
+                      onClick={() => {
+                        if (!disabled) onSelect(row.leg);
+                      }}
                       className={cn(
-                        "flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition-colors hover:bg-muted/60",
+                        "flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition-colors",
+                        disabled
+                          ? "cursor-not-allowed opacity-45"
+                          : "hover:bg-muted/60",
                         active && "bg-primary/8 ring-1 ring-primary/15"
                       )}
                     >

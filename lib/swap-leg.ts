@@ -7,12 +7,17 @@ export type SwapLeg =
   | { chain: "evm"; token: "WBTC" }
   | { chain: "canton"; token: CantonSwapAssetId };
 
+/** Cross-chain HTLC leg on Canton — not CC / USDCX. */
+export const CROSS_CHAIN_CANTON_ASSET =
+  "CBTC" as const satisfies CantonSwapAssetId;
+
 export type SwapKind =
   | "evm-to-canton"
   | "canton-to-evm"
   | "canton-to-canton"
   | "invalid-evm-evm"
-  | "invalid-same-asset";
+  | "invalid-same-asset"
+  | "invalid-cross-chain-canton";
 
 export function resolveSwapKind(pay: SwapLeg, receive: SwapLeg): SwapKind {
   if (pay.chain === "evm" && receive.chain === "evm") return "invalid-evm-evm";
@@ -20,9 +25,77 @@ export function resolveSwapKind(pay: SwapLeg, receive: SwapLeg): SwapKind {
     if (pay.token === receive.token) return "invalid-same-asset";
     return "canton-to-canton";
   }
-  if (pay.chain === "evm" && receive.chain === "canton") return "evm-to-canton";
-  if (pay.chain === "canton" && receive.chain === "evm") return "canton-to-evm";
+  if (pay.chain === "evm" && receive.chain === "canton") {
+    if (receive.token !== CROSS_CHAIN_CANTON_ASSET) {
+      return "invalid-cross-chain-canton";
+    }
+    return "evm-to-canton";
+  }
+  if (pay.chain === "canton" && receive.chain === "evm") {
+    if (pay.token !== CROSS_CHAIN_CANTON_ASSET) {
+      return "invalid-cross-chain-canton";
+    }
+    return "canton-to-evm";
+  }
   return "invalid-evm-evm";
+}
+
+/** True when the opposite leg forces this picker to Canton CBTC only (WBTC cross-chain). */
+export function crossChainCantonPickerOnly(
+  leg: SwapLeg,
+  otherLeg?: SwapLeg
+): boolean {
+  return otherLeg?.chain === "evm" || leg.chain === "evm";
+}
+
+/** WBTC is only valid when the other leg is Canton CBTC (cross-chain). */
+export function wbtcPickerBlocked(otherLeg?: SwapLeg): boolean {
+  if (otherLeg?.chain === "evm") return true;
+  if (
+    otherLeg?.chain === "canton" &&
+    otherLeg.token !== CROSS_CHAIN_CANTON_ASSET
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** Whether a token row is disabled in the picker. */
+export function swapLegPickerDisabled(
+  candidate: SwapLeg,
+  otherLeg?: SwapLeg
+): boolean {
+  if (candidate.chain === "evm") {
+    if (otherLeg?.chain === "evm") return true;
+    if (
+      otherLeg?.chain === "canton" &&
+      otherLeg.token !== CROSS_CHAIN_CANTON_ASSET
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  if (otherLeg?.chain === "canton" && otherLeg.token === candidate.token) {
+    return true;
+  }
+  if (
+    otherLeg?.chain === "evm" &&
+    candidate.token !== CROSS_CHAIN_CANTON_ASSET
+  ) {
+    return true;
+  }
+  return false;
+}
+
+export function crossChainPickerHint(
+  otherLeg?: SwapLeg,
+  leg?: SwapLeg
+): string | null {
+  if (otherLeg?.chain === "evm" || leg?.chain === "evm") {
+    return "Cross-chain swaps are WBTC ↔ CBTC only.";
+  }
+  return null;
 }
 
 /** Pick a different Canton token for the opposite leg. */
@@ -48,15 +121,24 @@ export function normalizeSwapLegs(
   let r = receive;
 
   if (p.chain === "evm" && r.chain === "evm") {
-    r = { chain: "canton", token: "CBTC" };
+    r = { chain: "canton", token: CROSS_CHAIN_CANTON_ASSET };
   }
 
-  if (
-    p.chain === "canton" &&
-    r.chain === "canton" &&
-    p.token === r.token
-  ) {
-    r = { chain: "canton", token: alternateCantonToken(p.token, enabledCanton) };
+  const crossChain = p.chain === "evm" || r.chain === "evm";
+  if (crossChain) {
+    if (p.chain === "canton" && p.token !== CROSS_CHAIN_CANTON_ASSET) {
+      p = { chain: "canton", token: CROSS_CHAIN_CANTON_ASSET };
+    }
+    if (r.chain === "canton" && r.token !== CROSS_CHAIN_CANTON_ASSET) {
+      r = { chain: "canton", token: CROSS_CHAIN_CANTON_ASSET };
+    }
+  }
+
+  if (p.chain === "canton" && r.chain === "canton" && p.token === r.token) {
+    r = {
+      chain: "canton",
+      token: alternateCantonToken(p.token, enabledCanton)
+    };
   }
 
   return { pay: p, receive: r };

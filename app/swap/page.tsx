@@ -31,6 +31,10 @@ import {
 import { truncatePartyId } from "@/lib/format";
 import { toBaseUnits } from "@/lib/amount-units";
 import { getSwapAsset, type CantonSwapAssetId } from "@/lib/canton-assets";
+import {
+  checkSwapPayAmountLimit,
+  swapPayAssetFromToken
+} from "@/lib/swap-amount-limits";
 import { loopSettingsUrl, DEFAULT_PLATFORM_FEE_BPS } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import {
@@ -733,6 +737,10 @@ export default function SwapPage() {
     }
     if (swapKind === "invalid-same-asset") {
       fail("Pick two different Canton assets.");
+      return;
+    }
+    if (swapKind === "invalid-cross-chain-canton") {
+      fail("Cross-chain swaps are WBTC ↔ CBTC only.");
       return;
     }
 
@@ -1877,18 +1885,36 @@ export default function SwapPage() {
   const receiveTokenLabel =
     receiveLeg.chain === "evm" ? "WBTC" : receiveLeg.token;
 
+  const payAmountLimit = useMemo(() => {
+    if (!amount || amount === ".") return null;
+    const asset = isC2c
+      ? swapPayAssetFromToken(payLeg.token)
+      : isReverse
+        ? ("CBTC" as const)
+        : ("WBTC" as const);
+    if (!asset) return null;
+    return checkSwapPayAmountLimit(asset, amount);
+  }, [amount, isC2c, isReverse, payLeg.token]);
+
   // CoW-style amount validation (TradeFormValidation analogue): compute the
   // amount state once, ordered — the button reflects the FIRST problem.
   //   notSet   → empty or zero  → "Enter an amount" (disabled)
   //   invalid  → parse fails    → "Invalid amount"  (disabled)
+  //   overLimit→ above MVP cap  → "Max … per swap"  (disabled)
   //   overBal  → > balance      → "Insufficient WBTC balance" (disabled)
-  const amountState = ((): "ok" | "notSet" | "invalid" | "overBalance" => {
+  const amountState = (():
+    | "ok"
+    | "notSet"
+    | "invalid"
+    | "overLimit"
+    | "overBalance" => {
     if (!amount || amount === ".") return "notSet";
     if (isC2c) {
       try {
         const asset = getSwapAsset(payLeg.token as CantonSwapAssetId);
         const want = toBaseUnits(amount.trim(), asset.decimals);
         if (want <= 0n) return "notSet";
+        if (payAmountLimit && !payAmountLimit.ok) return "overLimit";
         const have = toBaseUnits(balanceForLeg(payLeg) ?? "0", asset.decimals);
         if (want > have) return "overBalance";
         return "ok";
@@ -1903,6 +1929,7 @@ export default function SwapPage() {
       return "invalid";
     }
     if (parsed <= 0n) return "notSet";
+    if (payAmountLimit && !payAmountLimit.ok) return "overLimit";
     if (isReverse) {
       // Selling CBTC — validate against the session party's CBTC balance.
       const cbtcSats = BigInt(Math.round(parseFloat(cbtcBalance || "0") * 1e8));
@@ -1962,6 +1989,12 @@ export default function SwapPage() {
         onClick: () => {},
         disabled: true
       };
+    } else if (swapKind === "invalid-cross-chain-canton") {
+      primary = {
+        label: "Cross-chain is WBTC ↔ CBTC only",
+        onClick: () => {},
+        disabled: true
+      };
     } else if (!isC2c && !evm.account) {
       primary = {
         label: evm.available ? "Connect EVM wallet" : "No EVM wallet found",
@@ -1991,6 +2024,15 @@ export default function SwapPage() {
       primary = { label: "Enter an amount", onClick: () => {}, disabled: true };
     } else if (amountState === "invalid") {
       primary = { label: "Invalid amount", onClick: () => {}, disabled: true };
+    } else if (amountState === "overLimit") {
+      primary = {
+        label:
+          payAmountLimit && !payAmountLimit.ok
+            ? payAmountLimit.message
+            : "Amount exceeds swap limit",
+        onClick: () => {},
+        disabled: true
+      };
     } else if (amountState === "overBalance") {
       primary = {
         label: `Insufficient ${payTokenLabel} balance`,
@@ -3026,6 +3068,11 @@ function ReviewModal({
     receiveNetwork = reverse ? SWAP_CHAIN.name : "Canton";
   }
 
+  const reviewPayAsset = swapPayAssetFromToken(payToken);
+  const reviewPayLimit = reviewPayAsset
+    ? checkSwapPayAmountLimit(reviewPayAsset, payAmount)
+    : null;
+
   const refundAt = new Date(
     (Math.floor(Date.now() / 1000) + expirationSeconds) * 1000
   ).toLocaleString(undefined, {
@@ -3045,7 +3092,10 @@ function ReviewModal({
   let actionDisabled = !!busy;
   let actionOnClick: () => void = onConfirm;
 
-  if (managedSetup && isC2c && !busy) {
+  if (!busy && reviewPayLimit && !reviewPayLimit.ok) {
+    actionLabel = reviewPayLimit.message;
+    actionDisabled = true;
+  } else if (managedSetup && isC2c && !busy) {
     if (managedSetup.loading) {
       actionLabel = "Checking setup…";
       actionDisabled = true;

@@ -16,6 +16,8 @@ const FALLBACK: CantonSwapAssetMeta[] = [
   { id: "CC", symbol: "CC", label: "Canton Coin", decimals: 10 }
 ];
 
+export const CANTON_SWAP_ASSET_FALLBACK = FALLBACK;
+
 /** Server-driven list (includes USDCX when CANTON_USDCX_ADMIN is set). */
 export function useCantonSwapAssets() {
   return useQuery({
