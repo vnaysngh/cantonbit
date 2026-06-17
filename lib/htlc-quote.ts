@@ -33,14 +33,77 @@ const CACHE_FRESH_MS = 30_000;
  *  breaker — a 10-min-stale price that still looks pegged IS a wrong price. Beyond
  *  this we refuse to quote rather than risk filling through a move. */
 const CACHE_MAX_STALE_MS = 90_000;
-const PRICE_URL =
-  "https://api.coingecko.com/api/v3/simple/price?ids=wrapped-bitcoin&vs_currencies=btc&precision=8";
-
 /** P scaled to 8dp (1e8 = exactly 1 BTC per WBTC). */
 let cached: { price8: bigint; at: number } | null = null;
 
 export class QuoteUnavailableError extends Error {}
 export class DepegError extends Error {}
+
+async function fetchJson(url: string, headers?: Record<string, string>): Promise<unknown> {
+  const r = await fetch(url, {
+    cache: "no-store",
+    signal: AbortSignal.timeout(5000),
+    headers: {
+      Accept: "application/json",
+      "User-Agent": "OranjSwap/1.0",
+      ...headers
+    }
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+function parsePositive(raw: unknown): number | null {
+  const p =
+    typeof raw === "number"
+      ? raw
+      : typeof raw === "string"
+        ? Number.parseFloat(raw)
+        : Number.NaN;
+  if (!Number.isFinite(p) || p <= 0) return null;
+  return p;
+}
+
+async function tryCoinGeckoWbtcBtc(): Promise<number | null> {
+  const key = process.env.COINGECKO_API_KEY?.trim();
+  const url = key
+    ? "https://pro-api.coingecko.com/api/v3/simple/price?ids=wrapped-bitcoin&vs_currencies=btc&precision=8"
+    : "https://api.coingecko.com/api/v3/simple/price?ids=wrapped-bitcoin&vs_currencies=btc&precision=8";
+  const j = (await fetchJson(url, key ? { "x-cg-pro-api-key": key } : undefined)) as {
+    "wrapped-bitcoin"?: { btc?: number };
+  };
+  return parsePositive(j["wrapped-bitcoin"]?.btc);
+}
+
+/** BTC per 1 WBTC from Binance spot ratio (Railway-friendly fallback). */
+async function tryBinanceWbtcBtc(): Promise<number | null> {
+  const [wbtcJ, btcJ] = await Promise.all([
+    fetchJson("https://api.binance.com/api/v3/ticker/price?symbol=WBTCUSDT"),
+    fetchJson("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT")
+  ]);
+  const wbtc = parsePositive((wbtcJ as { price?: string }).price);
+  const btc = parsePositive((btcJ as { price?: string }).price);
+  if (wbtc == null || btc == null) return null;
+  return wbtc / btc;
+}
+
+async function fetchWbtcBtcLive(): Promise<number> {
+  const sources: Array<{ name: string; fn: () => Promise<number | null> }> = [
+    { name: "coingecko", fn: tryCoinGeckoWbtcBtc },
+    { name: "binance", fn: tryBinanceWbtcBtc }
+  ];
+  const errors: string[] = [];
+  for (const { name, fn } of sources) {
+    try {
+      const p = await fn();
+      if (p != null) return p;
+      errors.push(`${name}: invalid payload`);
+    } catch (e) {
+      errors.push(`${name}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  throw new Error(errors.join("; "));
+}
 
 /** Live WBTC/BTC price, 8dp-scaled bigint. Throws QuoteUnavailableError/DepegError. */
 export async function getWbtcBtcPrice8(): Promise<bigint> {
@@ -48,22 +111,11 @@ export async function getWbtcBtcPrice8(): Promise<bigint> {
   if (cached && now - cached.at < CACHE_FRESH_MS)
     return checkPeg(cached.price8);
   try {
-    const r = await fetch(PRICE_URL, {
-      cache: "no-store",
-      signal: AbortSignal.timeout(5000)
-    });
-    if (!r.ok) throw new Error(`price source ${r.status}`);
-    const j = (await r.json()) as { "wrapped-bitcoin"?: { btc?: number } };
-    const p = j["wrapped-bitcoin"]?.btc;
-    if (!p || !Number.isFinite(p) || p <= 0)
-      throw new Error("bad price payload");
+    const p = await fetchWbtcBtcLive();
     cached = { price8: BigInt(Math.round(p * 1e8)), at: now };
     return checkPeg(cached.price8);
   } catch (e) {
-    // Serve stale within bounds; otherwise refuse — never silently assume 1.0.
     if (cached && now - cached.at < CACHE_MAX_STALE_MS) {
-      // Alert: we're quoting on a stale price because the source is unreachable.
-      // Ops should know — a sustained outage means quotes are flying blind to drift.
       void alert("warn", "WBTC/BTC price source down — serving stale price", {
         ageMs: now - cached.at,
         reason: e instanceof Error ? e.message : String(e),

@@ -1,5 +1,6 @@
 /**
- * Same-Canton HTLC quotes — Tradecraft AMM (single upstream call).
+ * Same-Canton (C2C) quotes — Tradecraft AMM only.
+ * Cross-chain HTLC pricing lives in lib/htlc-quote.ts (WBTC/BTC peg).
  */
 import "server-only";
 
@@ -9,7 +10,6 @@ import {
   isCantonPair,
   type CantonSwapAssetId
 } from "./canton-assets";
-import { assertCantonQuoteSanity } from "./canton-quote-sanity";
 import {
   tradecraftQuoteFixedInput,
   TradecraftQuoteError
@@ -73,8 +73,6 @@ export async function quoteCantonToCanton(
   if (gross <= 0n) {
     throw new Error("quote output must be > 0");
   }
-
-  await assertCantonQuoteSanity(fromAsset, toAsset, inUnits, gross);
 
   const outUnits = applyOutputFee(gross, BRIDGE_FEE_BPS);
   if (outUnits <= 0n) {
