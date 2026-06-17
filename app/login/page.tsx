@@ -299,11 +299,11 @@ export default function LoginPage() {
             <div className="mb-12 flex items-center justify-center">
               <Link
                 href="/swap"
-                aria-label="OranjSwap home"
+                aria-label="WarpX home"
                 className="text-[38px] font-semibold leading-none transition-opacity hover:opacity-80"
               >
-                <span className="text-primary">Oranj</span>
-                <span className="text-foreground">Swap</span>
+                <span className="text-foreground">WARP</span>
+                <span className="text-primary">X</span>
               </Link>
             </div>
 

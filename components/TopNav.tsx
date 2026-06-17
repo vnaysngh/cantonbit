@@ -83,12 +83,12 @@ export function TopNav() {
         <div className="flex flex-1 justify-start">
           <Link
             href="/swap"
-            aria-label="OranjSwap — home"
+            aria-label="WarpX — home"
             className="flex items-center gap-2 text-[22px] font-semibold tracking-[-0.02em] transition-opacity hover:opacity-80"
           >
             <span>
-              <span className="text-primary">Oranj</span>
-              <span className="text-foreground">Swap</span>
+              <span className="text-foreground">WARP</span>
+              <span className="text-primary">X</span>
             </span>
             <span className="rounded-md bg-primary/12 px-1.5 py-0.5 text-[10px] font-semibold uppercase leading-none tracking-wide text-primary">
               Beta
