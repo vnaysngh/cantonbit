@@ -1269,10 +1269,9 @@ function DetailDrawer({
           ) : awaitingSolver && !loopAccept ? (
             <div className="mt-4 space-y-2">
               <p className="rounded-xl bg-amber-500/10 px-4 py-3 text-center text-xs text-amber-700">
-                Your CBTC is delivered. Waiting for the solver to claim your
-                WBTC on EVM — refresh in a few seconds if{" "}
-                <span className="font-mono">npm run solver:htlc</span> is
-                running (not <span className="font-mono">solver:watch</span>).
+                Your CBTC has been delivered. We&apos;re completing the final
+                step on Base — this usually finishes in under a minute. Refresh
+                this page in a few seconds; no action needed from you.
               </p>
             </div>
           ) : loopAccept ? (

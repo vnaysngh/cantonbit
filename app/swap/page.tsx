@@ -3131,7 +3131,9 @@ function ReviewModal({
             value={`${receiveAmount} ${receiveToken}`}
           />
           <DetailRow label="Recipient" value={recipientLabel} />
-          <DetailRow label="Refundable after" value={refundAt} />
+          {!isC2c && (
+            <DetailRow label="Refundable after" value={refundAt} />
+          )}
         </div>
 
         {managedSetup && isC2c && (
