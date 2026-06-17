@@ -1,33 +1,18 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useState } from "react";
 
 import { useLoopWallet } from "@/hooks/useLoopWallet";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import { WarpXWordmark } from "@/components/WarpXWordmark";
 
-type EmailStage =
-  | { kind: "email" }
-  | { kind: "otp"; email: string; canResendAt: number };
-
-type EmailBusy = "sending" | "verifying" | null;
-
-const RESEND_COOLDOWN_SEC = 120;
-
-const inputClass =
-  "h-[76px] w-full rounded-xl border border-[#dfc7be] bg-white px-5 pb-3 pt-8 text-[22px] font-bold leading-none text-[#191919] outline-none transition-all placeholder:text-transparent autofill:shadow-[inset_0_0_0_1000px_white] focus:border-[#a84e32] focus:ring-4 focus:ring-[#a84e32]/10";
-
-const primaryBtnClass =
-  "inline-flex h-14 w-full items-center justify-center gap-sm rounded-xl bg-[#b65335] px-md text-[18px] font-bold text-white transition-all hover:bg-[#9f462d] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50";
-
-const secondaryBtnClass =
-  "inline-flex h-14 w-full items-center justify-center gap-sm rounded-xl border border-[#dfc7be] bg-white px-md text-[18px] font-bold text-[#1d1d1f] transition-all hover:border-[#b65335]/45 hover:bg-[#fff8f5] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50";
-
-const otpInputClass =
-  "h-[76px] w-full rounded-xl border border-[#dfc7be] bg-white px-5 pb-3 pt-8 text-[26px] font-bold leading-none tracking-[0.32em] text-[#191919] outline-none transition-all placeholder:text-transparent focus:border-[#a84e32] focus:ring-4 focus:ring-[#a84e32]/10";
-
-function cleanError(err: unknown, fallback = "Something went wrong. Please try again."): string {
+function cleanError(
+  err: unknown,
+  fallback = "Something went wrong. Please try again."
+): string {
   if (!err) return fallback;
   const maybe = err as {
     shortMessage?: unknown;
@@ -36,8 +21,15 @@ function cleanError(err: unknown, fallback = "Something went wrong. Please try a
     data?: { message?: unknown };
     error?: { message?: unknown };
   };
-  const direct = maybe.shortMessage ?? maybe.message ?? maybe.reason ?? maybe.data?.message ?? maybe.error?.message;
-  if (typeof direct === "string" && direct.trim() && direct !== "[object Object]") return direct.trim();
+  const direct =
+    maybe.shortMessage ??
+    maybe.message ??
+    maybe.reason ??
+    maybe.data?.message ??
+    maybe.error?.message;
+  if (typeof direct === "string" && direct.trim() && direct !== "[object Object]") {
+    return direct.trim();
+  }
   if (err instanceof Error && err.cause) return cleanError(err.cause, fallback);
   try {
     const json = JSON.stringify(err);
@@ -47,23 +39,6 @@ function cleanError(err: unknown, fallback = "Something went wrong. Please try a
   }
   const text = String(err);
   return text && text !== "[object Object]" ? text : fallback;
-}
-
-function emailAuthErrorMessage(err: unknown): string {
-  const maybe = err as { code?: unknown; status?: unknown };
-  const raw = cleanError(err, "Could not send the sign-in code.");
-  const normalized = raw.toLowerCase();
-  if (
-    maybe.code === "unexpected_failure" ||
-    normalized.includes("magic link email") ||
-    normalized.includes("sending")
-  ) {
-    return "We could not send the email code. The email service failed to deliver it, so try again in a minute or use Loop Wallet.";
-  }
-  if (normalized.includes("rate limit")) {
-    return "Too many email code requests. Wait a minute, then try again.";
-  }
-  return raw;
 }
 
 function Spinner() {
@@ -77,17 +52,49 @@ function Spinner() {
   );
 }
 
-export default function LoginPage() {
-  const [emailStage, setEmailStage] = useState<EmailStage>({ kind: "email" });
-  const [email, setEmail] = useState("");
-  const [otp, setOtp] = useState("");
-  const [resendCountdown, setResendCountdown] = useState(0);
-  const [emailBusy, setEmailBusy] = useState<EmailBusy>(null);
-  const [emailError, setEmailError] = useState<string | null>(null);
+function GoogleIcon() {
+  return (
+    <svg aria-hidden viewBox="0 0 24 24" className="size-5 shrink-0">
+      <path
+        fill="#4285F4"
+        d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+      />
+      <path
+        fill="#34A853"
+        d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+      />
+      <path
+        fill="#FBBC05"
+        d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"
+      />
+      <path
+        fill="#EA4335"
+        d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
+      />
+    </svg>
+  );
+}
+
+const secondaryBtnClass =
+  "inline-flex h-14 w-full items-center justify-center gap-sm rounded-xl border border-outline-variant bg-surface-container-lowest px-md text-body-lg font-semibold text-on-surface transition-all hover:border-primary/35 hover:bg-primary/5 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50";
+
+const googleBtnClass =
+  "inline-flex h-14 w-full items-center justify-center gap-3 rounded-xl border border-outline-variant bg-surface-container-lowest px-md text-body-lg font-semibold text-on-surface transition-all hover:border-primary/25 hover:bg-surface-container-low active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50";
+
+function LoginPageContent() {
+  const [googleBusy, setGoogleBusy] = useState(false);
+  const [googleError, setGoogleError] = useState<string | null>(null);
   const [loopLoginError, setLoopLoginError] = useState<string | null>(null);
 
   const loop = useLoopWallet();
   const router = useRouter();
+  const searchParams = useSearchParams();
+
+  useEffect(() => {
+    if (searchParams.get("error") === "auth_failed") {
+      setGoogleError("Google sign-in failed or was cancelled. Please try again.");
+    }
+  }, [searchParams]);
 
   useEffect(() => {
     let cancelled = false;
@@ -102,7 +109,6 @@ export default function LoginPage() {
     };
   }, [router]);
 
-  // Loop connect = logged in. Exchange API Key signing happens on /swap when needed.
   useEffect(() => {
     if (!loop.connected || !loop.party || !loop.provider) return;
     router.replace("/swap");
@@ -114,72 +120,21 @@ export default function LoginPage() {
     }
   }, [loop.error, loop.connected]);
 
-  useEffect(() => {
-    if (emailStage.kind !== "otp") return;
-    const t = setInterval(() => {
-      const r = Math.max(0, Math.ceil((emailStage.canResendAt - Date.now()) / 1000));
-      setResendCountdown(r);
-      if (r === 0) clearInterval(t);
-    }, 1000);
-    return () => clearInterval(t);
-  }, [emailStage]);
+  const signInWithGoogle = async () => {
+    if (googleBusy) return;
+    setGoogleBusy(true);
+    setGoogleError(null);
 
-  const sendOtp = async (emailOverride?: string) => {
-    const target = (emailOverride ?? email).trim().toLowerCase();
-    if (!target || emailBusy) return;
-    setEmailBusy("sending");
-    setEmailError(null);
-
-    const { error } = await createSupabaseBrowserClient().auth.signInWithOtp({
-      email: target,
-      options: {
-        shouldCreateUser: true,
-        emailRedirectTo: `${window.location.origin}/auth/callback`,
-      },
+    const redirectTo = `${window.location.origin}/auth/callback?next=${encodeURIComponent("/swap")}`;
+    const { error } = await createSupabaseBrowserClient().auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo }
     });
 
     if (error) {
-      setEmailError(emailAuthErrorMessage(error));
-      setEmailBusy(null);
-      return;
+      setGoogleError(cleanError(error, "Could not start Google sign-in."));
+      setGoogleBusy(false);
     }
-
-    setEmail(target);
-    setOtp("");
-    setEmailStage({
-      kind: "otp",
-      email: target,
-      canResendAt: Date.now() + RESEND_COOLDOWN_SEC * 1000,
-    });
-    setResendCountdown(RESEND_COOLDOWN_SEC);
-    setEmailBusy(null);
-  };
-
-  const verifyOtp = async () => {
-    if (emailStage.kind !== "otp" || otp.length < 6 || emailBusy) return;
-    setEmailBusy("verifying");
-    setEmailError(null);
-
-    const { error } = await createSupabaseBrowserClient().auth.verifyOtp({
-      email: emailStage.email,
-      token: otp.trim(),
-      type: "email",
-    });
-
-    if (error) {
-      setEmailError(cleanError(error, "Could not verify the code."));
-      setEmailBusy(null);
-      return;
-    }
-
-    for (let i = 0; i < 20; i++) {
-      const { data } = await createSupabaseBrowserClient().auth.getSession();
-      if (data.session) break;
-      await new Promise((r) => setTimeout(r, 100));
-    }
-
-    await fetch("/api/parties/provision", { method: "POST", credentials: "include" }).catch(() => {});
-    window.location.href = "/swap";
   };
 
   const startLoopLogin = () => {
@@ -192,7 +147,6 @@ export default function LoginPage() {
     void loop.connect();
   };
 
-  const emailDisabled = emailBusy !== null;
   const loopDisabled = !loop.ready || loop.restoring || loop.connecting;
   const loopButtonLabel = loop.restoring
     ? "Checking Loop session..."
@@ -204,141 +158,44 @@ export default function LoginPage() {
   const loopBusy = loop.restoring || loop.connecting;
 
   return (
-    <main className="min-h-screen bg-[#f7f5f2] px-4 py-4 text-[#191919] sm:px-6 sm:py-6">
-      <div className="flex min-h-[calc(100vh-32px)] items-center justify-center overflow-hidden rounded-[28px] border border-[#ead9d2] bg-[#fffdfb] shadow-[0_24px_80px_rgba(79,48,37,0.10)]">
+    <main className="min-h-screen bg-surface px-4 py-4 text-on-surface sm:px-6 sm:py-6">
+      <div className="flex min-h-[calc(100vh-32px)] items-center justify-center overflow-hidden rounded-[28px] border border-outline-variant/60 bg-surface-container-lowest shadow-[0_24px_80px_rgba(155,68,40,0.08)]">
         <section className="flex w-full items-center justify-center px-5 py-10 sm:px-8 lg:px-16">
           <div className="w-full max-w-[500px]">
-            <div className="mb-12 flex items-center justify-center">
-              <Link
-                href="/swap"
-                aria-label="WarpX home"
-                className="text-[38px] font-semibold leading-none transition-opacity hover:opacity-80"
-              >
-                <span className="text-foreground">WARP</span>
-                <span className="text-primary">X</span>
-              </Link>
+            <div className="mb-10 flex justify-center">
+              <WarpXWordmark href="/swap" size="lg" />
             </div>
 
-            <div className="mb-9">
-              <h1 className="text-[38px] font-extrabold leading-none tracking-normal text-[#161616]">
+            <div className="mb-8">
+              <h1 className="font-display text-[1.75rem] font-bold tracking-[-0.02em] text-on-surface sm:text-[1.875rem]">
                 Sign in
               </h1>
-              <p className="mt-3 text-[18px] font-semibold leading-7 text-[#756b66]">
-                Continue with an email code or your Loop Wallet.
+              <p className="mt-2.5 text-body-lg text-on-surface-variant">
+                Continue with Google or your Loop Wallet.
               </p>
             </div>
 
             <div className="space-y-6">
-              {emailStage.kind === "email" ? (
-                <>
-                  <div className="relative">
-                    <label
-                      htmlFor="email"
-                      className="pointer-events-none absolute left-4 top-2.5 text-[13px] font-bold text-[#8d7a72]"
-                    >
-                      Email
-                    </label>
-                    <input
-                      id="email"
-                      type="email"
-                      placeholder="you@example.com"
-                      value={email}
-                      onChange={(e) => {
-                        setEmail(e.target.value);
-                        setEmailError(null);
-                      }}
-                      onKeyDown={(e) => e.key === "Enter" && sendOtp()}
-                      autoComplete="email"
-                      className={inputClass}
-                    />
-                  </div>
+              <button
+                type="button"
+                className={googleBtnClass}
+                onClick={() => void signInWithGoogle()}
+                disabled={googleBusy}
+              >
+                {googleBusy ? <Spinner /> : <GoogleIcon />}
+                {googleBusy ? "Redirecting to Google…" : "Continue with Google"}
+              </button>
 
-                  <button
-                    type="button"
-                    className={primaryBtnClass}
-                    onClick={() => sendOtp()}
-                    disabled={emailDisabled || !email.trim()}
-                  >
-                    {emailBusy === "sending" && <Spinner />}
-                    {emailBusy === "sending" ? "Sending code..." : "Send code"}
-                  </button>
-                </>
-              ) : (
-                <>
-                  <p className="rounded-xl border border-[#dfc7be] bg-[#fff8f5] px-4 py-4 text-[15px] font-semibold leading-6 text-[#756b66]">
-                    We sent a 6-digit code to{" "}
-                    <span className="font-bold text-[#191919]">{emailStage.email}</span>.
-                  </p>
-                  <div className="relative">
-                    <label
-                      htmlFor="otp"
-                      className="pointer-events-none absolute left-4 top-2.5 text-[13px] font-bold text-[#8d7a72]"
-                    >
-                      One-time code
-                    </label>
-                    <input
-                      id="otp"
-                      type="text"
-                      inputMode="numeric"
-                      placeholder="00000000"
-                      maxLength={6}
-                      value={otp}
-                      onChange={(e) => {
-                        setOtp(e.target.value.replace(/\D/g, ""));
-                        setEmailError(null);
-                      }}
-                      onKeyDown={(e) => e.key === "Enter" && verifyOtp()}
-                      autoComplete="one-time-code"
-                      className={otpInputClass}
-                    />
-                  </div>
-
-                  <button
-                    type="button"
-                    className={primaryBtnClass}
-                    onClick={verifyOtp}
-                    disabled={emailDisabled || otp.length < 6}
-                  >
-                    {emailBusy === "verifying" && <Spinner />}
-                    {emailBusy === "verifying" ? "Verifying..." : "Verify and sign in"}
-                  </button>
-
-                  <div className="flex items-center justify-between gap-5">
-                    <button
-                      type="button"
-                      className="text-[15px] font-bold text-[#8a4d3a] underline underline-offset-2 transition-colors hover:text-[#5f2e1f] disabled:cursor-not-allowed disabled:opacity-40"
-                      disabled={emailDisabled}
-                      onClick={() => {
-                        setOtp("");
-                        setEmail(emailStage.email);
-                        setEmailStage({ kind: "email" });
-                        setEmailError(null);
-                      }}
-                    >
-                      Wrong email?
-                    </button>
-                    <button
-                      type="button"
-                      disabled={emailDisabled || resendCountdown > 0}
-                      className="text-[15px] font-bold text-[#8a4d3a] underline underline-offset-2 transition-colors hover:text-[#5f2e1f] disabled:cursor-not-allowed disabled:opacity-40"
-                      onClick={() => sendOtp(emailStage.email)}
-                    >
-                      {resendCountdown > 0 ? `Resend in ${resendCountdown}s` : "Resend code"}
-                    </button>
-                  </div>
-                </>
-              )}
-
-              {emailError && (
+              {googleError && (
                 <p className="rounded-xl border border-red-200 bg-red-50 px-4 py-4 text-[15px] font-semibold leading-6 text-red-700">
-                  {emailError}
+                  {googleError}
                 </p>
               )}
 
               <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-5 py-1">
-                <div className="h-px bg-[#e3d3cc]" />
-                <span className="text-[16px] font-semibold text-[#8d7a72]">or</span>
-                <div className="h-px bg-[#e3d3cc]" />
+                <div className="h-px bg-outline-variant/50" />
+                <span className="text-label-md font-medium text-on-surface-variant">or</span>
+                <div className="h-px bg-outline-variant/50" />
               </div>
 
               <button
@@ -350,12 +207,14 @@ export default function LoginPage() {
                 {loopBusy ? (
                   <Spinner />
                 ) : (
-                  <span
+                  <Image
+                    src="/loop.svg"
+                    alt=""
+                    width={24}
+                    height={24}
+                    className="size-6 shrink-0"
                     aria-hidden
-                    className="flex size-6 items-center justify-center rounded-full bg-[#f2eee9]"
-                  >
-                    <span className="block size-3 rotate-45 rounded-[3px] bg-[#dfff70]" />
-                  </span>
+                  />
                 )}
                 {loopButtonLabel}
               </button>
@@ -367,7 +226,7 @@ export default function LoginPage() {
               )}
             </div>
 
-            <div className="mt-9 flex items-center justify-between gap-4 text-[14px] font-semibold text-[#8d7a72]">
+            <div className="mt-9 flex items-center justify-between gap-4 text-label-md font-medium text-on-surface-variant">
               <span>
                 {loop.restoring
                   ? "Checking Loop session"
@@ -375,7 +234,10 @@ export default function LoginPage() {
                     ? "Loop wallet connected"
                     : "No wallet connected"}
               </span>
-              <Link href="/how-it-works" className="underline underline-offset-2 hover:text-[#5f2e1f]">
+              <Link
+                href="/how-it-works"
+                className="underline underline-offset-2 hover:text-primary"
+              >
                 How it works
               </Link>
             </div>
@@ -383,5 +245,19 @@ export default function LoginPage() {
         </section>
       </div>
     </main>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="flex min-h-screen items-center justify-center bg-surface">
+          <Spinner />
+        </main>
+      }
+    >
+      <LoginPageContent />
+    </Suspense>
   );
 }

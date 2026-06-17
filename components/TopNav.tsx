@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
 import { ChainIcon } from "@/components/ChainIcon";
+import { WarpXWordmark } from "@/components/WarpXWordmark";
 import { useCantonIdentity } from "@/hooks/useCantonIdentity";
 import { useWallet } from "@/hooks/useWallet";
 import { useEvmWallet } from "@/hooks/useEvmWallet";
@@ -83,19 +84,7 @@ export function TopNav() {
       <div className="mx-auto flex h-16 w-full max-w-[1200px] items-center px-container-padding">
         {/* Brand — takes up left third */}
         <div className="flex flex-1 justify-start">
-          <Link
-            href="/swap"
-            aria-label="WarpX — home"
-            className="flex items-center gap-2 text-[22px] font-semibold tracking-[-0.02em] transition-opacity hover:opacity-80"
-          >
-            <span>
-              <span className="text-foreground">WARP</span>
-              <span className="text-primary">X</span>
-            </span>
-            <span className="rounded-md bg-primary/12 px-1.5 py-0.5 text-[10px] font-semibold uppercase leading-none tracking-wide text-primary">
-              Beta
-            </span>
-          </Link>
+          <WarpXWordmark href="/swap" showBeta />
         </div>
 
         <NavLinks pathname={pathname} />

@@ -25,6 +25,7 @@
 import { NextResponse } from "next/server";
 
 import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
+import { partyMappingEmailPayload, syncPartyMappingEmail } from "@/lib/party-mapping-email";
 import { loopProfileParty } from "@/lib/htlc-auth";
 import { exchangeForJwt, loopApiBase, storeJwtCookie, type ExchangeSig } from "@/lib/swap-session";
 
@@ -94,6 +95,7 @@ export async function POST(req: Request) {
 
     if (existing?.canton_party_id) {
       if (existing.canton_party_id === partyId) {
+        await syncPartyMappingEmail(serviceClient, user.id, user);
         return NextResponse.json({ partyId, isNew: false }); // already registered
       }
       // The user previously had a DIFFERENT party (e.g. an old validator-created
@@ -101,7 +103,11 @@ export async function POST(req: Request) {
       // of truth for this user's identity.
       const { error: updErr } = await serviceClient
         .from("party_mappings")
-        .update({ canton_party_id: partyId, party_hint: "loop-wallet" })
+        .update({
+          canton_party_id: partyId,
+          party_hint: "loop-wallet",
+          ...partyMappingEmailPayload(user)
+        })
         .eq("user_id", user.id);
       if (updErr) {
         if (updErr.code === "23505") {
@@ -121,7 +127,12 @@ export async function POST(req: Request) {
     // 3. First registration — insert.
     const { error: insertError } = await serviceClient
       .from("party_mappings")
-      .insert({ user_id: user.id, canton_party_id: partyId, party_hint: "loop-wallet" });
+      .insert({
+        user_id: user.id,
+        canton_party_id: partyId,
+        party_hint: "loop-wallet",
+        ...partyMappingEmailPayload(user)
+      });
 
     if (insertError) {
       if (insertError.code === "23505") {

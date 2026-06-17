@@ -15,6 +15,7 @@ import {
   formatPartyNetworkMismatch,
   isPartyOnCurrentNetwork
 } from "@/lib/party-network";
+import { partyMappingEmailPayload, syncPartyMappingEmail } from "@/lib/party-mapping-email";
 import { onboardParticipantManagedParty } from "@/lib/party-onboarding";
 
 const TAG = "[parties/me]";
@@ -22,7 +23,8 @@ const TAG = "[parties/me]";
 async function bindParticipantManagedParty(
   service: Awaited<ReturnType<typeof createSupabaseServiceClient>>,
   userId: string,
-  current: string | undefined
+  current: string | undefined,
+  user: { email?: string | null }
 ): Promise<string> {
   const { party } = await onboardParticipantManagedParty();
   if (current) {
@@ -31,13 +33,18 @@ async function bindParticipantManagedParty(
     );
     await service
       .from("party_mappings")
-      .update({ canton_party_id: party, party_hint: "participant-managed" })
+      .update({
+        canton_party_id: party,
+        party_hint: "participant-managed",
+        ...partyMappingEmailPayload(user)
+      })
       .eq("user_id", userId);
   } else {
     await service.from("party_mappings").insert({
       user_id: userId,
       canton_party_id: party,
-      party_hint: "participant-managed"
+      party_hint: "participant-managed",
+      ...partyMappingEmailPayload(user)
     });
   }
   return party;
@@ -64,6 +71,7 @@ export async function GET() {
     // NEVER convert a Loop-wallet user to a warpx party. An email is locked to its
     // first auth method; a 'loop-wallet' mapping means this user signs via Loop.
     if (current && row?.party_hint === "loop-wallet") {
+      await syncPartyMappingEmail(service, user.id, user);
       return NextResponse.json({
         partyId: current,
         authed: true,
@@ -77,6 +85,7 @@ export async function GET() {
       row?.party_hint === "participant-managed" &&
       isPartyOnCurrentNetwork(current)
     ) {
+      await syncPartyMappingEmail(service, user.id, user);
       return NextResponse.json({
         partyId: current,
         authed: true,
@@ -89,7 +98,7 @@ export async function GET() {
     }
 
     // Missing mapping or wrong-network / legacy hint — provision on current stack.
-    const party = await bindParticipantManagedParty(service, user.id, current);
+    const party = await bindParticipantManagedParty(service, user.id, current, user);
     return NextResponse.json({
       partyId: party,
       authed: true,
