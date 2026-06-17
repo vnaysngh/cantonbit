@@ -22,8 +22,12 @@ const jakarta = Plus_Jakarta_Sans({
 });
 
 export const metadata: Metadata = {
-  title: "OranjSwap",
-  description: "Swap WBTC to CBTC across Arbitrum and Canton Network."
+  title: {
+    default: "WarpX",
+    template: "%s · WarpX"
+  },
+  description:
+    "Swap WBTC, CBTC, and Canton Coin across EVM and Canton Network."
 };
 
 export default function RootLayout({

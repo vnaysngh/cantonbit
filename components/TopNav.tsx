@@ -73,7 +73,9 @@ export function TopNav() {
       rpcUrls: SWAP_CHAIN.rpcUrls,
       nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
       blockExplorerUrls: SWAP_CHAIN.blockExplorerUrls,
-    }).catch(() => {});
+    }).catch(() => {
+      /* evm.error is set in switchChain */
+    });
   };
 
   return (
@@ -104,6 +106,8 @@ export function TopNav() {
           <WalletsMenu
             evm={evm}
             evmWrongChain={evmWrongChain}
+            evmSwitching={evm.switchingChain}
+            evmError={evm.error}
             onEvmSwitch={handleEvmSwitch}
             swapChainName={SWAP_CHAIN.name}
           />
@@ -184,10 +188,12 @@ interface EvmLike {
  * Canton party (the identity), so it's visible at a glance.
  */
 function WalletsMenu({
-  evm, evmWrongChain, onEvmSwitch, swapChainName,
+  evm, evmWrongChain, evmSwitching, evmError, onEvmSwitch, swapChainName,
 }: {
   evm: EvmLike;
   evmWrongChain: boolean;
+  evmSwitching: boolean;
+  evmError: string | null;
   onEvmSwitch: () => void;
   swapChainName: string;
 }) {
@@ -216,7 +222,11 @@ function WalletsMenu({
 
   const evmConnected = !!evm.account;
   const shortParty = party ? `${party.slice(0, 8)}…${party.slice(-6)}` : "Loading…";
-  const triggerLabel = evmWrongChain ? "Wrong network" : shortParty;
+  const triggerLabel = evmSwitching
+    ? "Switching network…"
+    : evmWrongChain
+      ? "Wrong network"
+      : shortParty;
 
   return (
     <div className="relative" ref={ref}>
@@ -253,18 +263,25 @@ function WalletsMenu({
           {/* EVM wallet — the subset for the WBTC leg. Connect/disconnect here. */}
           <WalletRow
             label="EVM wallet"
-            network="Arbitrum"
+            network={swapChainName}
             connected={evmConnected}
             address={evm.account ?? undefined}
             copied={copied === "evm"}
             warn={evmWrongChain}
-            warnAction={{ label: `Switch to ${swapChainName}`, onClick: onEvmSwitch }}
+            warnAction={{
+              label: evmSwitching ? "Switching…" : `Switch to ${swapChainName}`,
+              onClick: onEvmSwitch,
+              disabled: evmSwitching,
+            }}
             onCopy={() => evm.account && copy(evm.account, "evm")}
             onConnect={evm.connect}
             connectLabel={evm.connecting ? "Connecting…" : evm.available ? "Connect" : "No wallet"}
             connectDisabled={evm.connecting || !evm.available}
             onDisconnect={evm.disconnect}
           />
+          {evmError && (
+            <p className="px-2 pb-1 text-[11px] leading-snug text-destructive">{evmError}</p>
+          )}
         </div>
       )}
     </div>
@@ -282,7 +299,7 @@ function WalletRow({
   address?: string;
   copied: boolean;
   warn?: boolean;
-  warnAction?: { label: string; onClick: () => void };
+  warnAction?: { label: string; onClick: () => void; disabled?: boolean };
   /** Identity row (Canton party): copy only — no disconnect, no connect button. */
   readOnly?: boolean;
   onCopy: () => void;
@@ -304,7 +321,15 @@ function WalletRow({
           <div className="text-[11px] leading-tight text-on-surface-variant">{label}</div>
           {connected ? (
             warn && warnAction ? (
-              <button onClick={warnAction.onClick} className="whitespace-nowrap text-xs font-medium text-amber-600 hover:underline">
+              <button
+                type="button"
+                onClick={warnAction.onClick}
+                disabled={warnAction.disabled}
+                className={cn(
+                  "whitespace-nowrap text-xs font-medium text-amber-600 hover:underline",
+                  warnAction.disabled && "cursor-wait opacity-70"
+                )}
+              >
                 {warnAction.label}
               </button>
             ) : (

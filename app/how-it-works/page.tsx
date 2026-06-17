@@ -3,9 +3,9 @@ import Link from "next/link";
 import { Reveal } from "./Reveal";
 
 export const metadata = {
-  title: "How it works · OranjSwap",
+  title: "How it works",
   description:
-    "How OranjSwap moves Bitcoin-backed tokens between EVM and Canton with hashlocked atomic swaps."
+    "How WarpX moves Bitcoin-backed tokens between EVM and Canton with hashlocked atomic swaps."
 };
 
 const STEPS = [

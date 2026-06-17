@@ -717,6 +717,7 @@ export default function SwapPage() {
 
   // --- switch wallet to the configured swap chain (adds it if unknown) ---
   const handleSwitchChain = useCallback(async () => {
+    setStage({ kind: "idle" });
     try {
       await evm.switchChain(SWAP_CHAIN.id, {
         chainName: SWAP_CHAIN.name,
@@ -2003,8 +2004,12 @@ export default function SwapPage() {
       };
     } else if (!isC2c && wrongChain) {
       primary = {
-        label: `Switch to ${SWAP_CHAIN.name}`,
-        onClick: handleSwitchChain
+        label: evm.switchingChain
+          ? `Switching to ${SWAP_CHAIN.name}…`
+          : `Switch to ${SWAP_CHAIN.name}`,
+        onClick: handleSwitchChain,
+        busy: evm.switchingChain,
+        disabled: evm.switchingChain
       };
     } else if (!loopConnected) {
       primary = {
@@ -2186,6 +2191,11 @@ export default function SwapPage() {
             {wallet.loopError && (
               <div className="mb-2 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
                 {wallet.loopError}
+              </div>
+            )}
+            {evm.error && (
+              <div className="mb-2 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+                {evm.error}
               </div>
             )}
 

@@ -31,6 +31,8 @@ export interface EvmWallet {
   account: string | null;
   chainId: number | null;
   connecting: boolean;
+  /** True while wallet_switchEthereumChain / wallet_addEthereumChain is in flight. */
+  switchingChain: boolean;
   error: string | null;
   connect: () => Promise<void>;
   signTypedData: (typedData: object) => Promise<string>;
@@ -57,6 +59,7 @@ function useEvmWalletState(): EvmWallet {
   const [account, setAccount] = useState<string | null>(null);
   const [chainId, setChainId] = useState<number | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const [switchingChain, setSwitchingChain] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const disconnected = useRef(false);
   // `available` starts false (SSR-safe — window.ethereum doesn't exist on the
@@ -157,21 +160,50 @@ function useEvmWalletState(): EvmWallet {
 
   const switchChain = useCallback(async (targetChainId: number, params?: AddChainParams): Promise<void> => {
     const p = getProvider();
-    if (!p) throw new Error("no provider");
+    if (!p) {
+      const msg = "No EVM wallet found.";
+      setError(msg);
+      throw new Error(msg);
+    }
+    setSwitchingChain(true);
+    setError(null);
     const hexId = `0x${targetChainId.toString(16)}`;
     try {
-      await p.request({ method: "wallet_switchEthereumChain", params: [{ chainId: hexId }] });
-    } catch (e) {
-      const code = (e as { code?: number })?.code;
-      if (code === 4902 && params) {
-        await p.request({ method: "wallet_addEthereumChain", params: [{ chainId: hexId, ...params }] });
-      } else {
-        throw e;
+      try {
+        await p.request({ method: "wallet_switchEthereumChain", params: [{ chainId: hexId }] });
+      } catch (e) {
+        const code = (e as { code?: number })?.code;
+        if (code === 4902 && params) {
+          await p.request({
+            method: "wallet_addEthereumChain",
+            params: [{
+              chainId: hexId,
+              chainName: params.chainName,
+              rpcUrls: params.rpcUrls,
+              nativeCurrency: params.nativeCurrency,
+              blockExplorerUrls: params.blockExplorerUrls,
+            }],
+          });
+        } else if (code === 4001) {
+          throw new Error("Network switch cancelled.");
+        } else {
+          throw e;
+        }
       }
+      // chainChanged is unreliable (some wallets reload; others omit the event).
+      // Always refresh from the provider so the UI updates without a full reload.
+      const cid = (await p.request({ method: "eth_chainId" })) as string;
+      setChainId(cid ? Number.parseInt(cid, 16) : null);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Failed to switch network.";
+      setError(msg);
+      throw e instanceof Error ? e : new Error(msg);
+    } finally {
+      setSwitchingChain(false);
     }
   }, []);
 
-  return { available, account, chainId, connecting, error, connect, signTypedData, sendTransaction, call, switchChain, disconnect };
+  return { available, account, chainId, connecting, switchingChain, error, connect, signTypedData, sendTransaction, call, switchChain, disconnect };
 }
 
 export function EvmWalletProvider({ children }: { children: ReactNode }) {
