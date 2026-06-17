@@ -15,7 +15,7 @@ import {
   formatPartyNetworkMismatch,
   isPartyOnCurrentNetwork
 } from "@/lib/party-network";
-import { partyMappingEmailPayload, syncPartyMappingEmail } from "@/lib/party-mapping-email";
+import { partyMappingEmailPayload, syncPartyMappingEmail, type AuthUserEmail } from "@/lib/party-mapping-email";
 import { onboardParticipantManagedParty } from "@/lib/party-onboarding";
 
 const TAG = "[parties/me]";
@@ -24,7 +24,7 @@ async function bindParticipantManagedParty(
   service: Awaited<ReturnType<typeof createSupabaseServiceClient>>,
   userId: string,
   current: string | undefined,
-  user: { email?: string | null }
+  user: AuthUserEmail
 ): Promise<string> {
   const { party } = await onboardParticipantManagedParty();
   if (current) {

@@ -1,13 +1,13 @@
 import "server-only";
 
-import type { User } from "@supabase/supabase-js";
-
 import type { createSupabaseServiceClient } from "@/lib/supabase/server";
 
 type ServiceClient = Awaited<ReturnType<typeof createSupabaseServiceClient>>;
 
+export type AuthUserEmail = { email?: string | null };
+
 /** Lowercase trimmed email from Supabase auth, or null if missing. */
-export function emailFromAuthUser(user: Pick<User, "email">): string | null {
+export function emailFromAuthUser(user: AuthUserEmail): string | null {
   const email = user.email?.trim().toLowerCase();
   if (!email || !email.includes("@")) return null;
   return email;
@@ -15,7 +15,7 @@ export function emailFromAuthUser(user: Pick<User, "email">): string | null {
 
 /** Fields to spread into party_mappings insert/update payloads. */
 export function partyMappingEmailPayload(
-  user: Pick<User, "email">
+  user: AuthUserEmail
 ): { email: string } | Record<string, never> {
   const email = emailFromAuthUser(user);
   return email ? { email } : {};
@@ -25,7 +25,7 @@ export function partyMappingEmailPayload(
 export async function syncPartyMappingEmail(
   service: ServiceClient,
   userId: string,
-  user: Pick<User, "email">
+  user: AuthUserEmail
 ): Promise<void> {
   const email = emailFromAuthUser(user);
   if (!email) return;
