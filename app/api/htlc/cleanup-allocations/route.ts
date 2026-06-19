@@ -6,18 +6,20 @@
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
 import { listSolverAllocations, withdrawAllocation } from "@/lib/htlc-onledger";
-import { requireDaemon } from "@/lib/htlc-auth";
-
-const SOLVER =
-  process.env.SOLVER_CANTON_PARTY ??
-  process.env.NEXT_PUBLIC_SOLVER_CANTON ??
-  "warpx-devnet-1::1220231c1885f289f90e0d08b448579c31a655b5826802c6d885258a27371039fba9";
+import { expectedSettlementParty, requireDaemon } from "@/lib/htlc-auth";
 
 export async function POST(req: Request) {
   try {
     const auth = requireDaemon(req);
     if (auth.error) return auth.error;
-    const allocs = await listSolverAllocations(SOLVER);
+    const vault = expectedSettlementParty();
+    if (!vault) {
+      return NextResponse.json(
+        { error: "CANTON_SWAP_SETTLEMENT_PARTY not configured" },
+        { status: 503 }
+      );
+    }
+    const allocs = await listSolverAllocations(vault);
     const active = await htlcService().activeOrders();
     const referenced = new Set(
       active.map((o) => o.allocationCid).filter(Boolean)
@@ -27,7 +29,7 @@ export async function POST(req: Request) {
       [];
     for (const cid of orphaned) {
       try {
-        const { updateId } = await withdrawAllocation(SOLVER, cid);
+        const { updateId } = await withdrawAllocation(vault, cid);
         results.push({ allocationCid: cid, ok: true, detail: updateId });
       } catch (e) {
         results.push({

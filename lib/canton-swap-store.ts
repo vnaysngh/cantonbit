@@ -15,11 +15,12 @@ function enrichSchemaError(op: string, message: string): string {
   if (
     message.includes("schema cache") ||
     message.includes("counter_pending_cleared_at") ||
-    message.includes("counter_reissue_attempt")
+    message.includes("counter_reissue_attempt") ||
+    message.includes("network_fee_cc")
   ) {
     return (
       `${TABLE} ${op}: database schema out of date — apply Supabase migrations ` +
-      `018–021 in supabase/migrations/ (missing column/index). Original: ${message}`
+      `018–023 in supabase/migrations/ (missing column/index). Original: ${message}`
     );
   }
   return `${TABLE} ${op}: ${message}`;
@@ -50,6 +51,10 @@ function rowToOrder(r: Record<string, unknown>): CantonSwapOrder {
       ? Math.floor(new Date(r.counter_pending_cleared_at as string).getTime() / 1000)
       : undefined,
     failureReason: (r.failure_reason as string) ?? undefined,
+    networkFeeCc: (r.network_fee_cc as string) ?? undefined,
+    networkFeeExpiresAt: r.network_fee_expires_at
+      ? Math.floor(new Date(r.network_fee_expires_at as string).getTime() / 1000)
+      : undefined,
     createdAt: r.created_at
       ? Math.floor(new Date(r.created_at as string).getTime() / 1000)
       : 0
@@ -79,6 +84,10 @@ function orderToRow(o: CantonSwapOrder): Record<string, unknown> {
       ? new Date(o.counterPendingClearedAt * 1000).toISOString()
       : null,
     failure_reason: o.failureReason ?? null,
+    network_fee_cc: o.networkFeeCc ?? null,
+    network_fee_expires_at: o.networkFeeExpiresAt
+      ? new Date(o.networkFeeExpiresAt * 1000).toISOString()
+      : null,
     updated_at: new Date().toISOString()
   };
 }

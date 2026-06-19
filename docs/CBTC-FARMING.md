@@ -7,8 +7,8 @@ Drive **real CC↔CBTC swap volume** on Canton mainnet for BitSafe reward share.
 
 Every swap moves **CBTC on-ledger** (~50/50 direction randomization):
 
-- **CBTC→CC:** farm trader sends CBTC → settlement vault sends CC  
-- **CC→CBTC:** farm trader sends CC → settlement vault sends CBTC  
+- **CBTC→CC:** farm trader sends CBTC → settlement vault sends CC
+- **CC→CBTC:** farm trader sends CC → settlement vault sends CBTC
 
 ## Architecture
 
@@ -21,7 +21,7 @@ farm-swap.log                 ← optional JSONL audit log (gitignored)
 
 **Two ledger transactions per swap** (same as production managed C2C):
 
-1. **Tx1** — `actAs: [trader]` → user-leg **offer** to settlement vault  
+1. **Tx1** — `actAs: [trader]` → user-leg **offer** to settlement vault
 2. **Tx2** — `actAs: [vault]` → **accept offer + deliver counter** (atomic)
 
 Settlement vault must stay **preapproval-free**. Farm traders need **CC + CBTC preapproval** enabled.
@@ -30,11 +30,11 @@ Env: `.env.mainnet` via `scripts/with-env.sh mainnet` (Keycloak m2m, treasury, v
 
 **Party roles (do not merge for “rewards”):**
 
-| Party | Role | Preapproval |
-|-------|------|-------------|
-| `warpx-mainnet-1` | Treasury + validator operator | CC/CBTC on (normal ops) |
-| `oranj-settle-mainnet` | Settlement vault | **OFF** (required for offer-path C2C) |
-| `oranj-user-*` | Farm traders | CC + CBTC **ON** |
+| Party                  | Role                          | Preapproval                           |
+| ---------------------- | ----------------------------- | ------------------------------------- |
+| `warpx-mainnet-1`      | Treasury + validator operator | CC/CBTC on (normal ops)               |
+| `oranj-settle-mainnet` | Settlement vault              | **OFF** (required for offer-path C2C) |
+| `oranj-user-*`         | Farm traders                  | CC + CBTC **ON**                      |
 
 All three sit on the **same WarpX participant**. Changing settlement to `warpx-mainnet-1` does not increase validator rewards; it breaks atomic swap semantics.
 
@@ -46,14 +46,14 @@ This section is about **Canton Coin validator income** on `warpx-mainnet-1`. It 
 
 ### How validator rewards work
 
-Canton mints CC in **10-minute rounds**. Activity creates **coupons** in round *N*; validator automation **mints** them into the operator wallet in round *N+1* (Splice wallet shows **“Validator Rewards” from Automation**).
+Canton mints CC in **10-minute rounds**. Activity creates **coupons** in round _N_; validator automation **mints** them into the operator wallet in round _N+1_ (Splice wallet shows **“Validator Rewards” from Automation**).
 
 Two validator-side coupon types:
 
-| Coupon | Created when | Paid to |
-|--------|--------------|---------|
-| **`ValidatorRewardCoupon`** | CC is **burned**, or an **`AmuletRules_Transfer`** runs | Validator operator hosting the acting party |
-| **`ValidatorLivenessActivityRecord`** | Validator is live that round | Same (uptime faucet, capped ~$2.85 USD eq. / validator / round) |
+| Coupon                                | Created when                                            | Paid to                                                         |
+| ------------------------------------- | ------------------------------------------------------- | --------------------------------------------------------------- |
+| **`ValidatorRewardCoupon`**           | CC is **burned**, or an **`AmuletRules_Transfer`** runs | Validator operator hosting the acting party                     |
+| **`ValidatorLivenessActivityRecord`** | Validator is live that round                            | Same (uptime faucet, capped ~$2.85 USD eq. / validator / round) |
 
 Docs: [Canton Coin Tokenomics](https://docs.canton.network/overview/reference/canton-coin-tokenomics), [Tokenomics of the GS](https://docs.canton.network/overview/reference/tokenomics-of-gs), [Preapprovals](https://docs.canton.network/appdev/modules/m7-canton-coin-preapprovals).
 
@@ -61,13 +61,13 @@ Minting is **not 1:1 with spend**. Burning ~7.4 CC on five EnableCC preapprovals
 
 ### What burns CC vs what only moves CC
 
-| Action | CC effect | Validator coupon? |
-|--------|-----------|-------------------|
-| **EnableCC preapproval** (× per trader) | **Burns** ~1.5 CC/party/90d (provider = `warpx-mainnet-1`) | **Yes** — strong signal |
-| **Traffic purchase** (auto top-up) | **Burns** CC for bytes | **Yes** |
-| **CC transfer** (fund vault/traders) | Moves CC; no fee post–CIP-0078 | Weak / nominal via `AmuletRules_Transfer` only |
-| **CBTC swap legs** | Token Standard offers; not Amulet burns | **No** app/validator activity from swap volume itself |
-| **Farm swap traffic** | Consumes **traffic bytes** (may trigger CC burn if bucket topped up) | Indirect — only if traffic purchase burns CC |
+| Action                                  | CC effect                                                            | Validator coupon?                                     |
+| --------------------------------------- | -------------------------------------------------------------------- | ----------------------------------------------------- |
+| **EnableCC preapproval** (× per trader) | **Burns** ~1.5 CC/party/90d (provider = `warpx-mainnet-1`)           | **Yes** — strong signal                               |
+| **Traffic purchase** (auto top-up)      | **Burns** CC for bytes                                               | **Yes**                                               |
+| **CC transfer** (fund vault/traders)    | Moves CC; no fee post–CIP-0078                                       | Weak / nominal via `AmuletRules_Transfer` only        |
+| **CBTC swap legs**                      | Token Standard offers; not Amulet burns                              | **No** app/validator activity from swap volume itself |
+| **Farm swap traffic**                   | Consumes **traffic bytes** (may trigger CC burn if bucket topped up) | Indirect — only if traffic purchase burns CC          |
 
 **Practical takeaway:** Provisioning preapprovals is the big one-time validator-reward driver you saw (+0.59 CC after ~−1.48 CC × 5). **Routine farm swaps do not burn CC per swap** — they consume **traffic**. Validator coupons from farming come mainly from **traffic top-up burns**, not from moving CBTC/CC between parties.
 
@@ -83,8 +83,8 @@ Minting is **not 1:1 with spend**. Burning ~7.4 CC on five EnableCC preapprovals
 
 ## Prerequisites
 
-1. **Mainnet config** — `CANTON_SWAP_SETTLEMENT_PARTY`, `NEXT_PUBLIC_SOLVER_CANTON`, Keycloak mainnet creds  
-2. **BitSafe gate** — written confirmation that bot-driven swap volume counts; then set `BITSAFE_FARMING_ELIGIBLE=1` or pass `--bitsafe-eligible-confirmed` for continuous run  
+1. **Mainnet config** — `CANTON_SWAP_SETTLEMENT_PARTY`, `NEXT_PUBLIC_SOLVER_CANTON`, Keycloak mainnet creds
+2. **BitSafe gate** — written confirmation that bot-driven swap volume counts; then set `BITSAFE_FARMING_ELIGIBLE=1` or pass `--bitsafe-eligible-confirmed` for continuous run
 3. **Tradecraft** — quotes from `api.tradecraft.fi` (same as production swaps)
 
 Validate config:
@@ -107,16 +107,16 @@ npm run farm:provision:mainnet -- --i-understand-mainnet
 
 Flags:
 
-| Flag | Default | Meaning |
-|------|---------|---------|
-| `--traders` | 5 | Number of farm trader parties |
-| `--cc` | 120 | CC **per trader** from treasury |
-| `--cbtc` | 0.0003 | CBTC **per trader** from treasury |
-| `--fund-vault` | off | Also fund settlement vault from treasury |
-| `--vault-cc` | 0 | CC to vault when `--fund-vault` |
-| `--vault-cbtc` | 0 | CBTC to vault when `--fund-vault` |
-| `--skip-fund` | off | Allocate only, no transfers |
-| `--skip-preapproval` | off | Skip EnableCC / CBTC preapproval |
+| Flag                 | Default | Meaning                                  |
+| -------------------- | ------- | ---------------------------------------- |
+| `--traders`          | 5       | Number of farm trader parties            |
+| `--cc`               | 120     | CC **per trader** from treasury          |
+| `--cbtc`             | 0.0003  | CBTC **per trader** from treasury        |
+| `--fund-vault`       | off     | Also fund settlement vault from treasury |
+| `--vault-cc`         | 0       | CC to vault when `--fund-vault`          |
+| `--vault-cbtc`       | 0       | CBTC to vault when `--fund-vault`        |
+| `--skip-fund`        | off     | Allocate only, no transfers              |
+| `--skip-preapproval` | off     | Skip EnableCC / CBTC preapproval         |
 
 Writes **`.farm-fleet.mainnet.json`** (gitignored).
 
@@ -174,12 +174,12 @@ Requires **`--i-understand-mainnet`** and BitSafe gate (`BITSAFE_FARMING_ELIGIBL
 
 Cadence targets **~92% of free traffic bucket refill** (default `--target-utilization=0.92`), not 100%.
 
-| Parameter | Default |
-|-----------|---------|
-| Free bucket refill | ~333 B/s |
-| Bytes per swap | **24,500** (ledger-measured on mainnet; override with `--bytes-per-swap`) |
-| Mean interval | ~**80s** @ 24.5 KB and 92% util |
-| Min sleep | 20s (after subtracting swap execution time) |
+| Parameter          | Default                                                                   |
+| ------------------ | ------------------------------------------------------------------------- |
+| Free bucket refill | ~333 B/s                                                                  |
+| Bytes per swap     | **24,500** (ledger-measured on mainnet; override with `--bytes-per-swap`) |
+| Mean interval      | ~**80s** @ 24.5 KB and 92% util                                           |
+| Min sleep          | 20s (after subtracting swap execution time)                               |
 
 **Formula:**
 
@@ -192,11 +192,11 @@ sleep = max(min_interval, mean_interval - swap_duration)
 
 **Measured mainnet sizes (2 txs/swap):**
 
-| Direction | ~Bytes/swap |
-|-----------|-------------|
-| CBTC→CC | ~27 KB |
-| CC→CBTC | ~20 KB |
-| Average | **~24.5 KB** |
+| Direction | ~Bytes/swap  |
+| --------- | ------------ |
+| CBTC→CC   | ~27 KB       |
+| CC→CBTC   | ~20 KB       |
+| Average   | **~24.5 KB** |
 
 Lighthouse `total_consumed` is currently **0** on warpx — bot falls back to ledger estimate and saves it to `.farm-fleet.mainnet.json` after a run.
 
@@ -240,17 +240,17 @@ npm run farm:status:mainnet
 npm run party-balances:mainnet -- <party-id>
 ```
 
-- Lighthouse traffic drawdown  
-- Trader/vault balances (50/50 direction should not drain one side)  
-- UTXO counts — warn at 8, cap at 10 per party  
-- `farm-swap.log` — one JSON line per swap  
+- Lighthouse traffic drawdown
+- Trader/vault balances (50/50 direction should not drain one side)
+- UTXO counts — warn at 8, cap at 10 per party
+- `farm-swap.log` — one JSON line per swap
 
 Each **swap** line includes:
 
-| Field | Meaning |
-|-------|---------|
-| `swapDurationSec` | Ledger time (offer + fill) |
-| `sleepAfterSec` | Planned wait before next swap |
+| Field             | Meaning                                                      |
+| ----------------- | ------------------------------------------------------------ |
+| `swapDurationSec` | Ledger time (offer + fill)                                   |
+| `sleepAfterSec`   | Planned wait before next swap                                |
 | `wallIntervalSec` | Actual seconds since previous swap log (sleep + plan + swap) |
 
 Every **5 swaps** (or at run end), a **`run_summary`** line is appended with totals and averages.
@@ -258,7 +258,15 @@ Every **5 swaps** (or at run end), a **`run_summary`** line is appended with tot
 Example `run_summary`:
 
 ```json
-{"type":"run_summary","runId":"…","swapCount":5,"totalWallSec":397.1,"avgSwapDurationSec":48.4,"avgSleepAfterSec":36,"avgWallIntervalSec":99.3}
+{
+  "type": "run_summary",
+  "runId": "…",
+  "swapCount": 5,
+  "totalWallSec": 397.1,
+  "avgSwapDurationSec": 48.4,
+  "avgSleepAfterSec": 36,
+  "avgWallIntervalSec": 99.3
+}
 ```
 
 Top up float from treasury (`fund-swap-vault:mainnet`) if a trader or vault runs low.
@@ -286,23 +294,23 @@ Implemented in `scripts/farm/lib/execute-swap.ts`.
 
 ## What this is NOT
 
-- DevNet farming commands  
-- Web app / `/api/farm/*` routes  
-- Supabase order rows  
-- Ping-pong transfers  
+- DevNet farming commands
+- Web app / `/api/farm/*` routes
+- Supabase order rows
+- Ping-pong transfers
 - Loop wallet mode (managed m2m only)
 
 ---
 
 ## Implementation checklist
 
-- [x] `npm run farm:audit:mainnet` passes  
-- [x] BitSafe written eligibility OK  
-- [x] `farm:provision:mainnet` + vault funded (`fund-swap-vault:mainnet`)  
-- [x] `farm:status:mainnet` healthy  
-- [x] Smoke swaps both directions (`CBTC→CC`, `CC→CBTC`)  
-- [x] `farm:run:mainnet --dry-run --max-swaps=5` — verify picks + pacing  
-- [x] `farm:run:mainnet --max-swaps=5` — measure bytes/swap (~24.5 KB)  
-- [x] `farm:run:mainnet --max-swaps=0` — continuous (Railway `cbtc-farming` + local tmux)  
-- [ ] Holding-refresh hardening after TransferFactory 400 (see handbook §8)  
+- [x] `npm run farm:audit:mainnet` passes
+- [x] BitSafe written eligibility OK
+- [x] `farm:provision:mainnet` + vault funded (`fund-swap-vault:mainnet`)
+- [x] `farm:status:mainnet` healthy
+- [x] Smoke swaps both directions (`CBTC→CC`, `CC→CBTC`)
+- [x] `farm:run:mainnet --dry-run --max-swaps=5` — verify picks + pacing
+- [x] `farm:run:mainnet --max-swaps=5` — measure bytes/swap (~24.5 KB)
+- [x] `farm:run:mainnet --max-swaps=0` — continuous (Railway `cbtc-farming` + local tmux)
+- [ ] Holding-refresh hardening after TransferFactory 400 (see handbook §8)
 - [ ] `FARM_TARGET_UTILIZATION` env knob for Railway

@@ -44,6 +44,10 @@ export interface CantonSwapOrder {
   counterPendingClearedAt?: number;
   failureReason?: string;
   createdAt: number;
+  /** CC network fee charged atomically at settle (managed). */
+  networkFeeCc?: string;
+  /** Unix seconds — network fee estimate valid until (matches quote expiry). */
+  networkFeeExpiresAt?: number;
 }
 
 export function isCantonSwapMvpPair(
@@ -81,4 +85,13 @@ export function userLegReceiverParty(o: CantonSwapOrder): string {
 /** actAs parties for atomic fill (Accept + counter deliver from vault). */
 export function loopFillActAsParties(o: CantonSwapOrder): string[] {
   return [swapParty(o)];
+}
+
+/** actAs for managed fill with network fee (user CC leg + vault legs). */
+export function managedFillActAsParties(
+  o: CantonSwapOrder,
+  withNetworkFee: boolean
+): string[] {
+  if (withNetworkFee) return [o.userParty, swapParty(o)];
+  return loopFillActAsParties(o);
 }

@@ -39,10 +39,12 @@ const API_BASE = process.env.API_BASE ?? "http://localhost:3000";
 const ESCROW = (process.env.HTLC_ESCROW_ADDRESS ??
   "0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1") as Address;
 const POLL_MS = Number(process.env.SOLVER_POLL_MS ?? 4000);
-const API_AUTH_TOKEN =
+const API_AUTH_TOKEN = (
   process.env.HTLC_DAEMON_SECRET ??
+  process.env.CRON_SECRET ??
   process.env.API_AUTH_TOKEN ??
-  "";
+  ""
+).trim();
 
 function reqEnv(k: string): string {
   const v = process.env[k];
@@ -257,6 +259,26 @@ async function main() {
               o.hashLock
             ])) as readonly [bigint, bigint, Address, Address, Address];
             if (existing[1] === 0n) {
+              const tip = await pub.getBlockNumber();
+              let fromBlock = tip - 49_999n;
+              if (fromBlock < 0n) fromBlock = 0n;
+              const claimedAlready = await pub
+                .getContractEvents({
+                  address: ESCROW,
+                  abi: HTLC_ESCROW_ABI,
+                  eventName: "Claimed",
+                  args: { hashValue: o.hashLock },
+                  fromBlock,
+                  toBlock: tip
+                })
+                .then((logs) => logs.length > 0)
+                .catch(() => false);
+              if (claimedAlready) {
+                console.log(
+                  `[solver] ${o.id.slice(0, 12)} rev: EVM already claimed — skip re-lock`
+                );
+                continue;
+              }
               const wbtc = resolveWbtcAddress(slug);
               // SOLVENCY (M1): don't lock if the solver's WBTC balance is short — the
               // user's CBTC is already custodied/locked, so it auto-refunds cleanly.
@@ -301,19 +323,39 @@ async function main() {
                 [o.hashLock, unlock, amount, wbtc, o.userEvmAddress as Address],
                 { account, chain: null }
               );
-              await pub.waitForTransactionReceipt({ hash: tx });
+              const receipt = await pub.waitForTransactionReceipt({ hash: tx });
+              if (receipt.status !== "success") {
+                console.log(
+                  `[solver] ${o.id.slice(0, 12)} rev: lock tx reverted on-chain — skip record`
+                );
+                continue;
+              }
               await jpost(`/api/htlc/${o.id}/counter-lock`, {
                 counterLockTx: tx
               });
             } else {
               // Lock already on-chain (e.g. daemon crashed after lock, before the POST).
-              // Recover the REAL lock tx hash from the Locked event — NEVER record the
-              // string "already-locked", which has no 0x prefix and would blind the
-              // watchtower's claim-event scan → solver could lose both legs (M3).
+              const lockAmount = existing[1];
+              const lockReceiver = existing[4];
+              if (
+                lockAmount < amount ||
+                lockReceiver.toLowerCase() !== o.userEvmAddress.toLowerCase()
+              ) {
+                console.log(
+                  `[solver] ${o.id.slice(0, 12)} rev: on-chain lock mismatch — skip record`
+                );
+                continue;
+              }
               const realTx = await findLockTx(pub, o.hashLock);
+              if (!realTx) {
+                console.log(
+                  `[solver] ${o.id.slice(0, 12)} rev: lock on-chain but Locked tx not found — skip`
+                );
+                continue;
+              }
               await jpost(`/api/htlc/${o.id}/counter-lock`, {
-                counterLockTx: realTx ?? "0x"
-              }).catch(() => {});
+                counterLockTx: realTx
+              });
             }
             lockedCounter.add(o.id);
             continue;
@@ -441,6 +483,15 @@ async function main() {
           if (lock[1] !== amount) {
             console.log(
               `[solver] ${o.id.slice(0, 12)} lock not on-chain yet (have ${lock[1]})`
+            );
+            continue;
+          }
+          const expectedWbtc = resolveWbtcAddress(
+            resolveHtlcEvmConfig().slug
+          ).toLowerCase();
+          if (lock[2].toLowerCase() !== expectedWbtc) {
+            console.log(
+              `[solver] ${o.id.slice(0, 12)} lock token != WBTC — skip`
             );
             continue;
           }

@@ -8,13 +8,13 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { provisionParticipantManagedPartyForUser } from "@/lib/provision-participant-party";
+import { safeRedirectPath } from "@/lib/safe-redirect-path";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export async function GET(request: NextRequest) {
   const { searchParams, origin } = new URL(request.url);
   const code = searchParams.get("code");
-  let next = searchParams.get("next") ?? "/swap";
-  if (!next.startsWith("/")) next = "/swap";
+  const next = safeRedirectPath(searchParams.get("next"));
 
   if (code) {
     const supabase = await createSupabaseServerClient();
@@ -27,15 +27,8 @@ export async function GET(request: NextRequest) {
         console.error("[auth/callback] provision failed:", e);
       }
 
-      const forwardedHost = request.headers.get("x-forwarded-host");
-      const isLocalEnv = process.env.NODE_ENV === "development";
-      if (isLocalEnv) {
-        return NextResponse.redirect(new URL(next, origin));
-      }
-      if (forwardedHost) {
-        return NextResponse.redirect(`https://${forwardedHost}${next}`);
-      }
-      return NextResponse.redirect(new URL(next, origin));
+      const requestUrl = new URL(request.url);
+      return NextResponse.redirect(new URL(next, requestUrl.origin));
     }
   }
 

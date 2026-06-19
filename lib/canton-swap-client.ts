@@ -21,15 +21,35 @@ async function json<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const cantonSwapApi = {
-  quote(fromAsset: CantonSwapMvpAssetId, toAsset: CantonSwapMvpAssetId, amount: string) {
+  quote(fromAsset: CantonSwapMvpAssetId, toAsset: CantonSwapMvpAssetId, amount: string, userParty?: string) {
     return json<{
       inAmount: string;
       outAmount: string;
       feeBps: number;
       expires: number;
+      networkFeeCc?: string;
+      networkFeeUsd?: number;
+      minCcRequired?: string;
+      networkFeeSource?: string;
     }>("/api/canton/swap/quote", {
       method: "POST",
-      body: JSON.stringify({ fromAsset, toAsset, amount })
+      body: JSON.stringify({ fromAsset, toAsset, amount, userParty })
+    });
+  },
+
+  estimateNetworkFee(body: Record<string, unknown>) {
+    return json<{
+      feeCc: string;
+      feeUsd: number;
+      minCcRequired: string;
+      networkFeeSource: string;
+      trafficBytes?: number;
+      networkFeeTransactions?: import("@/lib/canton-network-fee-math").NetworkFeeTxLeg[];
+      networkFeeCharged?: boolean;
+      networkFeePreview?: boolean;
+    }>("/api/canton/network-fee/estimate", {
+      method: "POST",
+      body: JSON.stringify(body)
     });
   },
 
@@ -43,6 +63,21 @@ export const cantonSwapApi = {
     id?: string;
   }) {
     return json<{ order: CantonSwapOrder }>("/api/canton/swap", {
+      method: "POST",
+      body: JSON.stringify(params)
+    });
+  },
+
+  /** Managed: atomic create + settle (single HTTP round-trip). */
+  submitManaged(params: {
+    fromAsset: CantonSwapMvpAssetId;
+    toAsset: CantonSwapMvpAssetId;
+    inAmount: string;
+    outAmount: string;
+    userParty: string;
+    id?: string;
+  }) {
+    return json<{ order: CantonSwapOrder }>("/api/canton/swap/submit", {
       method: "POST",
       body: JSON.stringify(params)
     });

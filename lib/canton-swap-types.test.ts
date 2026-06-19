@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   isCantonSwapMvpPair,
   loopFillActAsParties,
+  managedFillActAsParties,
   swapParty,
   userLegReceiverParty
 } from "./canton-swap-types";
@@ -44,6 +45,15 @@ test("userLegReceiverParty prefers settlementParty", () => {
 
 test("userLegReceiverParty falls back to solverParty", () => {
   assert.equal(userLegReceiverParty(baseOrder), "solver::1");
+});
+
+test("managedFillActAsParties includes user when collecting fee", () => {
+  const o: CantonSwapOrder = {
+    ...baseOrder,
+    settlementParty: "settle::1"
+  };
+  assert.deepEqual(managedFillActAsParties(o, true), ["user::1", "settle::1"]);
+  assert.deepEqual(managedFillActAsParties(o, false), ["settle::1"]);
 });
 
 test("loopFillActAsParties uses vault only", () => {

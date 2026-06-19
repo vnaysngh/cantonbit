@@ -36,6 +36,10 @@ function rowToOrder(r: Record<string, unknown>): SwapOrder {
     htlcBlob: (r.htlc_blob as string) ?? undefined,
     counterTransferOfferCid: (r.counter_transfer_offer_cid as string) ?? undefined,
     counterTransferUpdateId: (r.counter_transfer_update_id as string) ?? undefined,
+    networkFeeCc: (r.network_fee_cc as string) ?? undefined,
+    networkFeeExpiresAt: r.network_fee_expires_at
+      ? Math.floor(new Date(r.network_fee_expires_at as string).getTime() / 1000)
+      : undefined,
     createdAt: r.created_at ? Math.floor(new Date(r.created_at as string).getTime() / 1000) : 0,
   };
 }
@@ -65,6 +69,10 @@ function orderToRow(o: SwapOrder): Record<string, unknown> {
     htlc_blob: o.htlcBlob ?? null,
     counter_transfer_offer_cid: o.counterTransferOfferCid ?? null,
     counter_transfer_update_id: o.counterTransferUpdateId ?? null,
+    network_fee_cc: o.networkFeeCc ?? null,
+    network_fee_expires_at: o.networkFeeExpiresAt
+      ? new Date(o.networkFeeExpiresAt * 1000).toISOString()
+      : null,
     updated_at: new Date().toISOString(),
   };
 }

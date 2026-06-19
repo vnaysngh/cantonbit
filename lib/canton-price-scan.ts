@@ -5,11 +5,17 @@
 import "server-only";
 
 import { getLedgerJwt } from "./auth";
+import {
+  parseAmuletPriceFromMiningRounds,
+  parseAmuletRulesPayload,
+  parseExtraTrafficPriceFromPayload
+} from "./canton-scan-pricing";
 import { NETWORK } from "./constants";
 
 const TAG = "[canton-price-scan]";
 
 let cached: { priceUsd: number; at: number } | null = null;
+let cachedTrafficPrice: { usdPerMb: number; at: number } | null = null;
 const CACHE_MS = 60_000;
 
 function validatorScanUrl(path: string): string {
@@ -32,24 +38,39 @@ export async function fetchAmuletPriceUsd(): Promise<number> {
       `amuletPrice fetch failed (${r.status}): ${await r.text().catch(() => "")}`
     );
   }
-  const j = (await r.json()) as {
-    open_mining_rounds?:
-      | Array<{ contract?: { payload?: { amuletPrice?: string } } }>
-      | Record<string, { contract?: { payload?: { amuletPrice?: string } } }>;
-  };
-  const rawRounds = j.open_mining_rounds ?? [];
-  const rounds = Array.isArray(rawRounds)
-    ? rawRounds
-    : Object.values(rawRounds);
-  for (const entry of rounds) {
-    const raw = entry?.contract?.payload?.amuletPrice;
-    if (raw == null) continue;
-    const p = parseFloat(String(raw));
-    if (Number.isFinite(p) && p > 0) {
-      cached = { priceUsd: p, at: now };
-      console.log(`${TAG} amuletPrice=${p} USD/CC`);
-      return p;
-    }
+  const price = parseAmuletPriceFromMiningRounds(await r.json());
+  if (price == null) {
+    throw new Error("no amuletPrice in open mining rounds");
   }
-  throw new Error("no amuletPrice in open mining rounds");
+  cached = { priceUsd: price, at: now };
+  console.log(`${TAG} amuletPrice=${price} USD/CC`);
+  return price;
+}
+
+/** USD per MB for paid synchronizer traffic — read live from AmuletRules (Scan). */
+export async function fetchExtraTrafficPriceUsdPerMb(): Promise<number> {
+  const now = Date.now();
+  if (cachedTrafficPrice && now - cachedTrafficPrice.at < CACHE_MS) {
+    return cachedTrafficPrice.usdPerMb;
+  }
+
+  const jwt = await getLedgerJwt();
+  const r = await fetch(validatorScanUrl("/amulet-rules"), {
+    method: "GET",
+    headers: { Authorization: `Bearer ${jwt}` },
+    cache: "no-store"
+  });
+  if (!r.ok) {
+    throw new Error(
+      `extraTrafficPrice fetch failed (${r.status}): ${await r.text().catch(() => "")}`
+    );
+  }
+  const payload = parseAmuletRulesPayload(await r.json());
+  const price = parseExtraTrafficPriceFromPayload(payload);
+  if (price == null) {
+    throw new Error("no extraTrafficPrice in amulet-rules payload");
+  }
+  cachedTrafficPrice = { usdPerMb: price, at: now };
+  console.log(`${TAG} extraTrafficPrice=${price} USD/MB`);
+  return price;
 }

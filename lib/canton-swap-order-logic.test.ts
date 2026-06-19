@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   isLoopFillPendingCounterAccept,
+  isLoopFillInFlight,
   isOrderExpired,
   isRetriableLoopFillError,
   counterReissueCooldownElapsed,
@@ -10,8 +11,12 @@ import {
   loopFillCommandId,
   loopOrderDeadline,
   LOOP_SWAP_ORDER_TTL_SECONDS,
+  orderUsesCurrentVault,
   resolveCreateCantonSwapOrder,
-  shouldSkipLoopFill
+  shouldExpireForVaultMigration,
+  shouldSkipLoopFill,
+  VAULT_MIGRATION_GRACE_SECONDS,
+  MANAGED_OPEN_TTL_SECONDS
 } from "./canton-swap-order-logic";
 import type { CantonSwapOrder } from "./canton-swap-types";
 
@@ -76,6 +81,27 @@ test("managed settling with counter pending never auto-expires", () => {
   assert.equal(isOrderExpired(o, 999_999), false);
 });
 
+test("managed settling mid-ledger never auto-expires", () => {
+  const o = baseOrder({
+    walletMode: "managed",
+    status: "settling",
+    quoteExpiresAt: 1
+  });
+  assert.equal(isOrderExpired(o, 999_999), false);
+});
+
+test("managed open uses long abandon TTL not RFQ quote", () => {
+  const o = baseOrder({
+    walletMode: "managed",
+    status: "open",
+    createdAt: 1_000,
+    quoteExpiresAt: 1_010
+  });
+  assert.equal(isOrderExpired(o, 1_002), false);
+  assert.equal(isOrderExpired(o, 1_000 + MANAGED_OPEN_TTL_SECONDS), false);
+  assert.equal(isOrderExpired(o, 1_000 + MANAGED_OPEN_TTL_SECONDS + 1), true);
+});
+
 test("counter reissue cooldown blocks immediate reissue", () => {
   assert.equal(counterReissueCooldownElapsed(undefined), false);
   assert.equal(counterReissueCooldownElapsed(1000, 1050), false);
@@ -130,4 +156,57 @@ test("resolveCreateCantonSwapOrder: rejects id owned by another party", () => {
     () => resolveCreateCantonSwapOrder(existing, incoming, 500),
     /another party/
   );
+});
+
+test("orderUsesCurrentVault prefers settlement party over legacy solver", () => {
+  const vault = "oranj-settle::1220abc";
+  const o = baseOrder({
+    solverParty: "warpx::1220abc",
+    settlementParty: vault
+  });
+  assert.equal(orderUsesCurrentVault(o, vault), true);
+  assert.equal(orderUsesCurrentVault(o, "warpx::1220abc"), false);
+});
+
+test("shouldExpireForVaultMigration skips managed open awaiting settle", () => {
+  const vault = "oranj-settle::1220abc";
+  const o = baseOrder({
+    walletMode: "managed",
+    status: "open",
+    solverParty: "warpx::1220abc",
+    createdAt: 1_000
+  });
+  assert.equal(shouldExpireForVaultMigration(o, vault, 1_005), false);
+});
+
+test("shouldExpireForVaultMigration skips fresh loop open orders", () => {
+  const vault = "oranj-settle::1220abc";
+  const o = baseOrder({
+    walletMode: "loop",
+    status: "open",
+    solverParty: "warpx::1220abc",
+    createdAt: 1_000
+  });
+  assert.equal(
+    shouldExpireForVaultMigration(o, vault, 1_000 + VAULT_MIGRATION_GRACE_SECONDS - 1),
+    false
+  );
+  assert.equal(
+    shouldExpireForVaultMigration(o, vault, 1_000 + VAULT_MIGRATION_GRACE_SECONDS),
+    true
+  );
+});
+
+test("isLoopFillInFlight protects filling and in-flight user_locked", () => {
+  assert.equal(
+    isLoopFillInFlight(baseOrder({ walletMode: "loop", status: "filling" })),
+    true
+  );
+  const inFlight = baseOrder({
+    walletMode: "loop",
+    status: "user_locked",
+    failureReason: "Fill still processing on ledger — retry shortly"
+  });
+  assert.equal(isLoopFillInFlight(inFlight), true);
+  assert.equal(isOrderExpired(inFlight, 999_999), false);
 });

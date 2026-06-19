@@ -49,6 +49,43 @@ export function isLoopUserLegPreapprovalSettled(cid: string | undefined | null):
 
 export const QUOTE_GRACE_SECONDS = 30;
 
+/** Managed open orders: daemon must not kill create→settle (seconds). Abandon after 5 min. */
+export const MANAGED_OPEN_TTL_SECONDS = 300;
+
+/** Do not vault-migrate brand-new loop open orders — create→sign needs a few seconds. */
+export const VAULT_MIGRATION_GRACE_SECONDS = 30;
+
+function trimParty(party: string | undefined | null): string {
+  return (party ?? "").trim();
+}
+
+/** True when order legs already target the configured C2C vault. */
+export function orderUsesCurrentVault(
+  o: CantonSwapOrder,
+  vaultParty: string
+): boolean {
+  const vault = trimParty(vaultParty);
+  if (!vault) return true;
+  const settlement = trimParty(o.settlementParty);
+  if (settlement) return settlement === vault;
+  return trimParty(o.solverParty) === vault;
+}
+
+/** Expire loop-era orders stuck on a pre-vault party (loop only). */
+export function shouldExpireForVaultMigration(
+  o: CantonSwapOrder,
+  vaultParty: string,
+  now = Math.floor(Date.now() / 1000)
+): boolean {
+  if (o.walletMode !== "loop") return false;
+  if (!trimParty(vaultParty)) return false;
+  if (orderUsesCurrentVault(o, vaultParty)) return false;
+  if (o.status === "open" && now - o.createdAt < VAULT_MIGRATION_GRACE_SECONDS) {
+    return false;
+  }
+  return true;
+}
+
 export function loopOrderDeadline(o: CantonSwapOrder): number {
   return o.createdAt + LOOP_SWAP_ORDER_TTL_SECONDS;
 }
@@ -58,10 +95,33 @@ export function quoteDeadline(o: CantonSwapOrder): number {
 }
 
 export function orderDeadline(o: CantonSwapOrder): number {
-  return o.walletMode === "loop" ? loopOrderDeadline(o) : quoteDeadline(o);
+  if (o.walletMode === "loop") return loopOrderDeadline(o);
+  if (o.status === "settling") return Number.MAX_SAFE_INTEGER;
+  if (o.status === "open") return o.createdAt + MANAGED_OPEN_TTL_SECONDS;
+  return quoteDeadline(o);
+}
+
+/** Loop fill submit committed or retry in progress — do not expire/reject user leg. */
+export function isLoopFillInFlight(o: CantonSwapOrder): boolean {
+  if (o.walletMode !== "loop") return false;
+  if (o.status === "filling") return true;
+  if (o.status !== "user_locked" || o.settlementUpdateId) return false;
+  const msg = o.failureReason ?? "";
+  return (
+    msg.includes("Fill still processing") ||
+    msg.includes("submission in flight") ||
+    msg.includes("Retrying after transient fill failure")
+  );
 }
 
 export function isOrderExpired(o: CantonSwapOrder, now = Math.floor(Date.now() / 1000)): boolean {
+  if (isLoopFillInFlight(o)) return false;
+  if (
+    o.walletMode === "managed" &&
+    o.status === "settling"
+  ) {
+    return false;
+  }
   if (
     o.walletMode === "loop" &&
     o.status === "user_locked" &&
@@ -69,14 +129,6 @@ export function isOrderExpired(o: CantonSwapOrder, now = Math.floor(Date.now() /
     o.counterLegOfferCid
   ) {
     // Solver already filled — user must accept counter; do not auto-expire.
-    return false;
-  }
-  if (
-    o.walletMode === "managed" &&
-    o.status === "settling" &&
-    o.settlementUpdateId &&
-    o.counterLegOfferCid
-  ) {
     return false;
   }
   return now > orderDeadline(o);

@@ -6,6 +6,7 @@ import "server-only";
 import { fetchTransactionTreeByCommandId, fetchTransactionTreeForOfferAccept } from "./canton-command-recovery";
 import type { CantonSwapOrder } from "./canton-swap-types";
 import { loopFillActAsParties, swapParty, userLegReceiverParty } from "./canton-swap-types";
+import { appendNetworkFeeToFill, isNetworkFeeEnabled } from "./canton-network-fee";
 import {
   holdingsForSwapAsset,
   registrarAdminForAsset,
@@ -155,7 +156,9 @@ async function buildLeg(params: {
 }
 
 /** Managed user: backend offer to vault, then vault fill (Accept + counter). */
-async function submitManagedUserLegOffer(order: CantonSwapOrder): Promise<string> {
+async function submitManagedUserLegOffer(order: CantonSwapOrder): Promise<{
+  userLegOfferCid: string;
+}> {
   const vault = swapParty(order);
   const userLeg = await buildLeg({
     senderParty: order.userParty,
@@ -180,19 +183,22 @@ async function submitManagedUserLegOffer(order: CantonSwapOrder): Promise<string
     );
   }
 
+  let commands: unknown[] = [userLeg.command];
+  let disclosed = userLeg.disclosedContracts;
+
   const commandId = `canton-swap-offer-${order.id}`;
   try {
     const { eventsById } = await submitLedgerCommands({
       actAs: [order.userParty],
-      commands: [userLeg.command],
-      disclosedContracts: userLeg.disclosedContracts,
+      commands,
+      disclosedContracts: disclosed,
       commandId,
       workflowId: commandId,
       applicationId: "canton-swap",
       synchronizerId: userLeg.synchronizerId || undefined
     });
     const cid = extractCreatedOfferCid(eventsById);
-    if (cid) return cid;
+    if (cid) return { userLegOfferCid: cid };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (
@@ -206,7 +212,7 @@ async function submitManagedUserLegOffer(order: CantonSwapOrder): Promise<string
         }
         const offers = await safeListPendingOffers(vault);
         const matched = findUserLegOfferForOrder(offers, order, expectedInstrument);
-        if (matched) return matched;
+        if (matched) return { userLegOfferCid: matched };
         if (msg.includes("duplicate command committed")) {
           const recovered = await fetchTransactionTreeByCommandId(
             commandId,
@@ -215,7 +221,7 @@ async function submitManagedUserLegOffer(order: CantonSwapOrder): Promise<string
           const cid = recovered?.eventsById
             ? extractCreatedOfferCid(recovered.eventsById)
             : null;
-          if (cid) return cid;
+          if (cid) return { userLegOfferCid: cid };
         }
       }
       if (msg.includes("submission in flight")) {
@@ -229,7 +235,9 @@ async function submitManagedUserLegOffer(order: CantonSwapOrder): Promise<string
   }
 
   const resolved = await resolveUserLegEvidence(order, { maxAttempts: 8, pollMs: 1000 });
-  return resolved.userLegOfferCid;
+  return {
+    userLegOfferCid: resolved.userLegOfferCid
+  };
 }
 
 async function fillFromUserOffer(
@@ -240,6 +248,7 @@ async function fillFromUserOffer(
   updateId: string;
   counterLegOfferCid?: string;
   counterLegPendingAccept: boolean;
+  networkFeeCollected?: import("./canton-network-fee").NetworkFeeCollection;
 }> {
   const pendingOffer = await isPendingUserLegOffer(order, userLegOfferCid);
   if (!pendingOffer) {
@@ -268,18 +277,42 @@ async function fillFromUserOffer(
     isPendingOffer: true
   });
 
-  const synchronizerId = assertSameSynchronizer([acceptLeg, deliverLeg], "fill legs");
-  const commands = [acceptLeg.command, deliverLeg.command];
-  const disclosed = mergeDisclosed([
+  let commands: unknown[] = [acceptLeg.command, deliverLeg.command];
+  let disclosed = mergeDisclosed([
     acceptLeg.disclosedContracts,
     deliverLeg.disclosedContracts
   ]);
+  let actAs = loopFillActAsParties(order);
+  let networkFeeCollected:
+    | import("./canton-network-fee").NetworkFeeCollection
+    | undefined;
+
+  if (
+    order.walletMode === "managed" &&
+    order.networkFeeCc &&
+    isNetworkFeeEnabled()
+  ) {
+    const feeBundle = await appendNetworkFeeToFill({
+      order,
+      networkFeeCc: order.networkFeeCc,
+      acceptLeg,
+      deliverLeg
+    });
+    if (feeBundle) {
+      commands = feeBundle.commands;
+      disclosed = feeBundle.disclosed;
+      actAs = feeBundle.actAs;
+      networkFeeCollected = { feeCc: order.networkFeeCc };
+    }
+  }
+
+  const synchronizerId = assertSameSynchronizer([acceptLeg, deliverLeg], "fill legs");
 
   let updateId: string;
   let eventsById: Record<string, unknown>;
   try {
     ({ updateId, eventsById } = await submitLedgerCommands({
-      actAs: loopFillActAsParties(order),
+      actAs,
       commands,
       disclosedContracts: disclosed,
       commandId,
@@ -296,12 +329,15 @@ async function fillFromUserOffer(
     throw e;
   }
 
-  return buildLoopFillResultFromEvents(
-    order,
-    updateId,
-    eventsById,
-    deliverLeg.transferKind
-  );
+  return {
+    ...buildLoopFillResultFromEvents(
+      order,
+      updateId,
+      eventsById,
+      deliverLeg.transferKind
+    ),
+    networkFeeCollected
+  };
 }
 
 export async function settleManagedSwap(
@@ -310,8 +346,9 @@ export async function settleManagedSwap(
   updateId: string;
   counterLegOfferCid?: string;
   counterLegPendingAccept: boolean;
+  networkFeeCollected?: import("./canton-network-fee").NetworkFeeCollection;
 }> {
-  const userLegOfferCid = await submitManagedUserLegOffer(order);
+  const { userLegOfferCid } = await submitManagedUserLegOffer(order);
   const commandId = `canton-swap-${order.id}`;
   const result = await fillFromUserOffer(order, userLegOfferCid, commandId);
   console.log(

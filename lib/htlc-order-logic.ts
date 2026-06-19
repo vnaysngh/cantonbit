@@ -57,6 +57,47 @@ export function resolveCreateOrder(
   incoming: Omit<SwapOrder, "status" | "createdAt">,
   nowSeconds: number,
 ): { order: SwapOrder; isNew: boolean } {
-  if (existing) return { order: existing, isNew: false };
+  if (existing) {
+    if (existing.userCantonParty !== incoming.userCantonParty) {
+      throw new Error("order id already exists for another party");
+    }
+    return { order: existing, isNew: false };
+  }
   return { order: { ...incoming, status: "open", createdAt: nowSeconds }, isNew: true };
+}
+
+/** 0x + 64 hex chars — EVM tx hash or update id mis-filed as tx. */
+export function isEvmTxHash(s: string | undefined): s is string {
+  return !!s && /^0x[0-9a-fA-F]{64}$/.test(s);
+}
+
+/**
+ * Direction-aware claim evidence on SwapOrder (see htlc-types field comments).
+ * Legacy reverse orders may have the user's WBTC claim tx in counterClaimUpdateId.
+ */
+export function htlcUserWbtcClaimTx(
+  o: Pick<SwapOrder, "direction" | "mainClaimTx" | "counterClaimUpdateId">
+): string | undefined {
+  if (o.direction !== "canton-to-evm") return undefined;
+  if (isEvmTxHash(o.mainClaimTx)) return o.mainClaimTx;
+  if (isEvmTxHash(o.counterClaimUpdateId)) return o.counterClaimUpdateId;
+  return undefined;
+}
+
+/** Solver WBTC claim on forward; undefined on reverse. */
+export function htlcSolverWbtcClaimTx(
+  o: Pick<SwapOrder, "direction" | "mainClaimTx">
+): string | undefined {
+  if (o.direction !== "evm-to-canton") return undefined;
+  return o.mainClaimTx;
+}
+
+/** Canton claim update: user CBTC (forward) or solver CBTC (reverse). */
+export function htlcCantonClaimUpdateId(
+  o: Pick<SwapOrder, "direction" | "counterClaimUpdateId">
+): string | undefined {
+  const c = o.counterClaimUpdateId;
+  if (!c) return undefined;
+  if (o.direction === "canton-to-evm" && isEvmTxHash(c)) return undefined;
+  return c;
 }

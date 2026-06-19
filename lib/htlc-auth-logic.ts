@@ -8,7 +8,7 @@ export function isBearerAuthorized(params: {
   secret: string;
   nodeEnv?: string;
 }): boolean {
-  if (!params.secret && params.nodeEnv !== "production") return true;
-  return !!params.secret && bearerTokenFromHeader(params.header) === params.secret;
+  if (!params.secret) return false;
+  return bearerTokenFromHeader(params.header) === params.secret;
 }
 

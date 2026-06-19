@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Plus_Jakarta_Sans } from "next/font/google";
 import "./globals.css";
 
+import { CantonIdentityProvider } from "@/hooks/useCantonIdentity";
 import { WalletProvider } from "@/hooks/useWallet";
 import { LoopWalletProvider } from "@/hooks/useLoopWallet";
 import { EvmWalletProvider } from "@/hooks/useEvmWallet";
@@ -66,7 +67,9 @@ export default function RootLayout({
             <EvmWalletProvider>
               <LoopWalletProvider>
                 <WalletProvider>
-                  <AppShell>{children}</AppShell>
+                  <CantonIdentityProvider>
+                    <AppShell>{children}</AppShell>
+                  </CantonIdentityProvider>
                 </WalletProvider>
               </LoopWalletProvider>
             </EvmWalletProvider>

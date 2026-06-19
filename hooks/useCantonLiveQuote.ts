@@ -12,8 +12,10 @@ export function useCantonLiveQuote(opts: {
   fromAsset: CantonSwapAssetId | null;
   toAsset: CantonSwapAssetId | null;
   amount: string;
+  /** Required for network-fee preview/estimate on quote API when user is signed in. */
+  userParty?: string | null;
 }) {
-  const { enabled, fromAsset, toAsset, amount } = opts;
+  const { enabled, fromAsset, toAsset, amount, userParty } = opts;
   const [debouncedAmount, setDebouncedAmount] = useState(amount);
 
   useEffect(() => {
@@ -25,8 +27,8 @@ export function useCantonLiveQuote(opts: {
   const amountOk =
     debouncedAmount.length > 0 && Number.isFinite(n) && n > 0;
 
-  return useQuery({
-    queryKey: ["c2c-live-quote", fromAsset, toAsset, debouncedAmount],
+  const query = useQuery({
+    queryKey: ["c2c-live-quote", fromAsset, toAsset, debouncedAmount, userParty ?? ""],
     queryFn: async () => {
       const r = await fetch("/api/canton/swap/quote", {
         method: "POST",
@@ -34,7 +36,8 @@ export function useCantonLiveQuote(opts: {
         body: JSON.stringify({
           fromAsset,
           toAsset,
-          amount: debouncedAmount
+          amount: debouncedAmount,
+          ...(userParty ? { userParty } : {})
         })
       });
       const j = (await r.json()) as { outAmount?: string; error?: string };
@@ -48,7 +51,14 @@ export function useCantonLiveQuote(opts: {
       fromAsset !== toAsset &&
       amountOk,
     staleTime: 25_000,
+    // Keep prior quote while the user edits amount, but never surface it when pay is empty.
     placeholderData: keepPreviousData,
     retry: false
   });
+
+  return {
+    ...query,
+    data: amountOk ? query.data : undefined,
+    isFetching: amountOk ? query.isFetching : false
+  };
 }

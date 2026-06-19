@@ -10,6 +10,13 @@ test("getSwapErrorMessage maps EIP-1193 user rejection objects", () => {
   );
 });
 
+test("getSwapErrorMessage maps phantom EVM claim / gas limit errors", () => {
+  assert.equal(
+    getSwapErrorMessage(new Error("RPC submit: exceeds max transaction gas limit")),
+    "No WBTC is locked on-chain for this swap — the solver counter-lock did not land. Your CBTC is still safe; wait for the solver to retry or refund after the timelock."
+  );
+});
+
 test("getSwapErrorMessage does not leak object-object placeholders", () => {
   assert.equal(getSwapErrorMessage(new Error("[object Object]")), "Something went wrong. Please try again.");
   assert.equal(getSwapErrorMessage({}), "Something went wrong. Please try again.");

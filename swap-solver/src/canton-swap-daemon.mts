@@ -75,8 +75,8 @@ async function expireAndReconcile(): Promise<void> {
 }
 
 async function tick(): Promise<void> {
-  await fillPending();
   await expireAndReconcile();
+  await fillPending();
 }
 
 /** Serial scheduler — next tick starts only after the previous finishes. */

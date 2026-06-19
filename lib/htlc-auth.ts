@@ -2,7 +2,7 @@ import "server-only";
 
 import { NextResponse } from "next/server";
 
-import { createSupabaseServiceClient } from "@/lib/supabase/server";
+import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
 import { resolveSessionParty } from "@/lib/session-party";
 import { getJwtSession, loopApiBase } from "@/lib/swap-session";
 import { htlcService, type SwapOrder } from "@/lib/htlc-service-singleton";
@@ -16,7 +16,11 @@ function unauthorized(message = "Unauthorized", status = 401): GuardErr {
 }
 
 export function daemonSecret(): string {
-  return process.env.HTLC_DAEMON_SECRET ?? "";
+  return (
+    process.env.HTLC_DAEMON_SECRET?.trim() ||
+    process.env.CRON_SECRET?.trim() ||
+    ""
+  );
 }
 
 export function isDaemonAuthorized(req: Request): boolean {
@@ -80,6 +84,38 @@ async function resolveLoopSessionParty(): Promise<string | null> {
 export async function requirePartyOwner(party: string): Promise<GuardOk<{ partyId: string }> | GuardErr> {
   if (!party || !party.includes("::")) return unauthorized("Invalid Canton party", 400);
 
+  // Email / linked-account session: one auth + party_mappings round trip.
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (user) {
+    const serviceClient = await createSupabaseServiceClient();
+    const { data: partyRow } = await serviceClient
+      .from("party_mappings")
+      .select("canton_party_id, party_hint")
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    const sessionParty = partyRow?.canton_party_id as string | undefined;
+    if (sessionParty) {
+      if (sessionParty !== party) {
+        return unauthorized(
+          "Requested party does not match the authenticated account.",
+          403
+        );
+      }
+      if (partyRow?.party_hint === "participant-managed") {
+        return { partyId: sessionParty, error: null };
+      }
+      // loop-wallet mapping: session party matches the requested Loop party.
+      if (partyRow?.party_hint === "loop-wallet") {
+        return { partyId: sessionParty, error: null };
+      }
+    }
+  }
+
+  // Loop JWT session (no Supabase cookie or legacy path).
   if (await isParticipantManagedParty(party)) {
     const session = await resolveSessionParty(party);
     if (session.error) return { error: session.error };
@@ -88,7 +124,12 @@ export async function requirePartyOwner(party: string): Promise<GuardOk<{ partyI
 
   const loopParty = await resolveLoopSessionParty();
   if (!loopParty) return unauthorized("Loop wallet session required");
-  if (loopParty !== party) return unauthorized("Requested party does not match the connected Loop wallet.", 403);
+  if (loopParty !== party) {
+    return unauthorized(
+      "Requested party does not match the connected Loop wallet.",
+      403
+    );
+  }
   return { partyId: loopParty, error: null };
 }
 
@@ -109,20 +150,26 @@ export async function requireOrderOwnerOrDaemon(req: Request, id: string): Promi
   return { order, daemon: false, error: null };
 }
 
+/** WarpX node party (legacy public label). Not used for swap vault float. */
 export function expectedSolverCanton(): string {
   return process.env.SOLVER_CANTON_PARTY ?? process.env.NEXT_PUBLIC_SOLVER_CANTON ?? "";
 }
 
-/** Loop swap user-leg receiver — must NOT have TransferPreapproval (offer-only path). */
+/** Settlement vault — receives user legs and pays counter legs (C2C + HTLC). */
 export function expectedSettlementParty(): string {
   return (
-    process.env.CANTON_SWAP_SETTLEMENT_PARTY ??
-    process.env.NEXT_PUBLIC_CANTON_SWAP_SETTLEMENT_PARTY ??
+    process.env.CANTON_SWAP_SETTLEMENT_PARTY?.trim() ||
+    process.env.NEXT_PUBLIC_CANTON_SWAP_SETTLEMENT_PARTY?.trim() ||
     ""
   );
 }
 
-/** Single funded vault for all C2C swap receive/send (Loop + managed). HTLC stays on solver party. */
+/** HTLC CBTC float / allocate / deliver — same vault as C2C. */
+export function expectedHtlcVaultParty(): string {
+  return expectedSettlementParty();
+}
+
+/** Single funded vault for all same-Canton swap receive/send (Loop + managed). */
 export function expectedCantonSwapParty(): string {
   return expectedSettlementParty();
 }

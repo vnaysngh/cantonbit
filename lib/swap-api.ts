@@ -72,6 +72,15 @@ export interface QuoteResponse {
   wbtc: string;
   expires: number;
   fillDeadline?: number;
+  /** Canton network (traffic) fee — managed swaps only when enabled. */
+  networkFeeCc?: string;
+  networkFeeUsd?: number;
+  minCcRequired?: string;
+  networkFeeSource?: string;
+  trafficBytes?: number;
+  networkFeeTransactions?: import("@/lib/canton-network-fee-math").NetworkFeeTxLeg[];
+  networkFeeCharged?: boolean;
+  networkFeePreview?: boolean;
 }
 
 export type SwapStatus =
@@ -209,7 +218,15 @@ export function getSwapErrorMessage(e: unknown): string {
       ? m.charAt(0).toUpperCase() + m.slice(1)
       : `Request failed (${e.status}).`;
   }
-  return rawErrorMessage(e) || "Something went wrong. Please try again.";
+  const raw = rawErrorMessage(e);
+  const lower = raw.toLowerCase();
+  if (
+    lower.includes("exceeds max transaction gas limit") ||
+    lower.includes("likely to fail")
+  ) {
+    return "No WBTC is locked on-chain for this swap — the solver counter-lock did not land. Your CBTC is still safe; wait for the solver to retry or refund after the timelock.";
+  }
+  return raw || "Something went wrong. Please try again.";
 }
 
 async function req<T>(
@@ -243,6 +260,7 @@ export function getQuote(input: {
   /** Reverse (canton-to-evm): CBTC input in 8dp base units. */
   cbtcAmount?: string;
   direction?: "evm-to-canton" | "canton-to-evm";
+  counterMode?: "managed" | "loop";
 }): Promise<QuoteResponse> {
   return req<QuoteResponse>(
     "/quote",

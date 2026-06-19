@@ -138,7 +138,9 @@ export function loadEnv(): SolverEnv {
         admin: req("CANTON_ADMIN_PARTY"),
         id: opt("CANTON_INSTRUMENT_ID", "CBTC")
       },
-      solverParty: req("SOLVER_CANTON_PARTY"),
+      solverParty:
+        process.env.CANTON_SWAP_SETTLEMENT_PARTY?.trim() ||
+        req("SOLVER_CANTON_PARTY"),
       auth: {
         tokenUrl: req("KEYCLOAK_TOKEN_URL"),
         clientId: req("KEYCLOAK_CLIENT_ID"),

@@ -10,12 +10,14 @@ export const EVM_CLAIM_MARGIN_SECONDS = 10 * 60;
 export type EvmLockSnapshot = {
   unlockTime: number;
   amount: bigint;
+  tokenAddress: string;
   receiver: string;
 };
 
 export type EvmLockRevealRequirements = {
   wbtcAmount: string;
   solverEvmAddress: string;
+  expectedWbtcAddress: string;
 };
 
 /**
@@ -31,6 +33,10 @@ export function assertEvmLockSafeForReveal(
     throw new Error(
       "EVM lock not found — WBTC is not locked under this hashLock"
     );
+  }
+  const expectedToken = req.expectedWbtcAddress.toLowerCase();
+  if (lock.tokenAddress !== expectedToken) {
+    throw new Error("EVM lock token is not canonical WBTC");
   }
   if (lock.amount < BigInt(req.wbtcAmount)) {
     throw new Error(

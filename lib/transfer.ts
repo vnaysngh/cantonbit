@@ -514,6 +514,77 @@ export async function submitLedgerCommands(params: {
   };
 }
 
+/** POST /v2/interactive-submission/prepare — traffic byte estimate (no submit). */
+export async function prepareLedgerCommands(params: {
+  actAs: string[];
+  commands: unknown[];
+  disclosedContracts: DisclosedContract[];
+  commandId?: string;
+  synchronizerId?: string;
+}): Promise<{
+  totalTrafficBytes: number;
+  costEstimation?: Record<string, unknown>;
+}> {
+  const jwt = await getLedgerJwt();
+  const commandId =
+    params.commandId ??
+    `prepare-${Math.random().toString(16).slice(2)}-${Date.now()}`;
+  const synchronizerId =
+    params.synchronizerId?.trim() ||
+    pickSynchronizerId([params.disclosedContracts]);
+  if (!synchronizerId) {
+    throw new Error(
+      "prepare requires synchronizerId — none on disclosed contracts"
+    );
+  }
+  const disclosedContracts = stampDisclosedSynchronizer(
+    params.disclosedContracts,
+    synchronizerId
+  );
+  const body: Record<string, unknown> = {
+    commandId,
+    actAs: params.actAs,
+    readAs: params.actAs,
+    commands: params.commands,
+    disclosedContracts,
+    synchronizerId,
+    packageIdSelectionPreference: []
+  };
+  const res = await fetch(
+    `${NETWORK.ledgerHost}/v2/interactive-submission/prepare`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${jwt}`
+      },
+      cache: "no-store",
+      body: JSON.stringify(body)
+    }
+  );
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`prepare failed (${res.status}): ${text}`);
+  }
+  const json = JSON.parse(text) as {
+    costEstimation?: Record<string, unknown>;
+    cost_estimation?: Record<string, unknown>;
+  };
+  const cost =
+    json.costEstimation ??
+    json.cost_estimation ??
+    {};
+  const rawBytes =
+    cost.totalTrafficCostEstimation ??
+    cost.total_traffic_cost_estimation ??
+    0;
+  const totalTrafficBytes = Number(rawBytes);
+  return {
+    totalTrafficBytes: Number.isFinite(totalTrafficBytes) ? totalTrafficBytes : 0,
+    costEstimation: cost
+  };
+}
+
 export {
   mergeDisclosed,
   pickSynchronizerId
@@ -869,7 +940,10 @@ async function listPendingOffersAs(partyId: string): Promise<PendingOffer[]> {
 
   const out: PendingOffer[] = [];
   for (const entry of unwrapAcsEntries(await acsRes.json())) {
-    const ev = entry.JsActiveContract.createdEvent;
+    const ev =
+      (entry as { JsActiveContract?: { createdEvent?: { contractId?: string } } })
+        .JsActiveContract?.createdEvent ??
+      (entry as { createdEvent?: { contractId?: string } }).createdEvent;
     if (!ev?.contractId) continue;
     const t = readTransferInstructionFields(ev);
     if (!t?.receiver) continue;

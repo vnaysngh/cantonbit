@@ -97,7 +97,21 @@ export async function GET() {
       console.warn(`${TAG} ${formatPartyNetworkMismatch(current)}`);
     }
 
-    // Missing mapping or wrong-network / legacy hint — provision on current stack.
+    // Legacy allocate flow (cbtc-user-* etc.) — keep existing party; do not repoint.
+    if (
+      current &&
+      row?.party_hint !== "loop-wallet" &&
+      row?.party_hint !== "participant-managed"
+    ) {
+      await syncPartyMappingEmail(service, user.id, user);
+      return NextResponse.json({
+        partyId: current,
+        authed: true,
+        mode: "participant-managed"
+      });
+    }
+
+    // No mapping yet, or participant-managed on wrong network — provision on current stack.
     const party = await bindParticipantManagedParty(service, user.id, current, user);
     return NextResponse.json({
       partyId: party,

@@ -1,5 +1,7 @@
 # Environment files
 
+**Start here for running swaps:** [SWAP-RUNBOOK.md](SWAP-RUNBOOK.md) — devnet/mainnet terminals, daemons, wallet modes, and troubleshooting.
+
 OranjSwap runs two independent stacks locally: **devnet** and **mainnet**. Each stack has its own env file — you do **not** edit one file and flip `NEXT_PUBLIC_NETWORK` by hand.
 
 ## File map
@@ -51,16 +53,24 @@ npm run dev:mainnet     # WarpX mainnet + Base (real funds)
 npm run build:devnet
 npm run build:mainnet
 
-# HTLC solver daemon (pair with matching web stack)
+# HTLC solver daemon (WBTC↔CBTC — pair with matching web stack)
 npm run solver:htlc           # devnet
 npm run solver:htlc:mainnet   # mainnet
+
+# C2C Loop fill daemon (CBTC↔CC Loop wallet only)
+npm run solver:canton-swap           # devnet
+npm run solver:canton-swap:mainnet   # mainnet
 ```
 
 Default `npm run dev` → **devnet** (unchanged safe default).
 
+**Which daemons for which swap?** See [SWAP-RUNBOOK.md](SWAP-RUNBOOK.md) §4–§6.
+
 ## Typical local session
 
-**Devnet swap test**
+Examples only — full matrix in the runbook.
+
+**Devnet HTLC (cross-chain)**
 
 ```bash
 # Terminal 1
@@ -70,23 +80,26 @@ npm run dev:devnet
 npm run solver:htlc
 ```
 
-**Mainnet smoke test**
+**Devnet C2C with Loop wallet**
 
 ```bash
-# Terminal 1
-npm run dev:mainnet
-
-# Terminal 2
-npm run solver:htlc:mainnet
+npm run dev:devnet          # terminal 1
+npm run solver:canton-swap  # terminal 2
 ```
 
-No file editing between sessions — pick the script for the stack you want.
+**Mainnet smoke (real funds)**
+
+```bash
+npm run dev:mainnet              # terminal 1
+npm run solver:htlc:mainnet      # terminal 2 — if testing HTLC
+npm run solver:canton-swap:mainnet   # terminal 3 — if testing Loop C2C
+```
 
 ## What each stack file must contain
 
 ### `.env.devnet` / `.env.mainnet` (web)
 
-Master switches, Supabase, Keycloak, HTLC addresses, solver party IDs, `CBTC_HTLC_PKG_ID`, daemon secrets. See the matching `.example` file.
+Master switches, Supabase, Keycloak, HTLC addresses, solver party IDs, `CBTC_HTLC_PKG_ID`, **`CANTON_SWAP_SETTLEMENT_PARTY`** (C2C), daemon secrets. See the matching `.example` file.
 
 ### `swap-solver/.env.htlc-devnet` / `.env.htlc-mainnet`
 

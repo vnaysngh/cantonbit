@@ -26,6 +26,12 @@ test("isDaemonAuthorized: production without a secret fails closed", () => {
   });
 });
 
+test("isDaemonAuthorized: dev without secret fails closed", () => {
+  withEnv({ NODE_ENV: "development", HTLC_DAEMON_SECRET: undefined }, () => {
+    assert.equal(isBearerAuthorized({ header: null, secret: "", nodeEnv: process.env.NODE_ENV }), false);
+  });
+});
+
 test("isDaemonAuthorized: accepts exact bearer token", () => {
   withEnv({ NODE_ENV: "production", HTLC_DAEMON_SECRET: "s3cr3t", CRON_SECRET: undefined }, () => {
     assert.equal(isBearerAuthorized({

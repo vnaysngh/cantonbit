@@ -16,6 +16,8 @@
  */
 import { type NextRequest, NextResponse } from "next/server";
 
+import { isSolverProxyPathAllowed } from "@/lib/solver-proxy-allowlist";
+
 // Always run dynamically (no caching of swap state) on the Node runtime (needs fetch
 // to a private host).
 export const dynamic = "force-dynamic";
@@ -31,6 +33,9 @@ function solverBase(): string {
 
 /** Forward the request to the solver, preserving method/body/query, return its JSON. */
 async function forward(req: NextRequest, path: string[]): Promise<NextResponse> {
+  if (!isSolverProxyPathAllowed(path)) {
+    return NextResponse.json({ error: "path not allowed" }, { status: 403 });
+  }
   const base = solverBase();
   const suffix = path.join("/");
   const search = req.nextUrl.search; // preserve any query string

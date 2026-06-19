@@ -74,6 +74,19 @@ async function jget(url: string) {
   return j;
 }
 
+/** Coalesce concurrent GETs to the same URL (poll loops + claim UI). */
+const inflightGet = new Map<string, Promise<unknown>>();
+function jgetDeduped(url: string): Promise<unknown> {
+  let pending = inflightGet.get(url);
+  if (!pending) {
+    pending = jget(url).finally(() => {
+      inflightGet.delete(url);
+    });
+    inflightGet.set(url, pending);
+  }
+  return pending;
+}
+
 /** Merge swap history when session party and Loop party differ (dual-login users). */
 export async function fetchMergedSwapHistory(opts: {
   sessionAuthed: boolean;
@@ -130,7 +143,8 @@ export const htlcApi = {
       cantonParty,
       direction: "canton-to-evm"
     }),
-  getOrder: (id: string) => jget(`/api/htlc/${id}`),
+  getOrder: (id: string) =>
+    jgetDeduped(`/api/htlc/${id}`) as Promise<{ order: unknown }>,
   accept: (id: string) => jpost(`/api/htlc/${id}/accept`),
   recordMainLock: (id: string, mainLockTx: string) =>
     jpost(`/api/htlc/${id}/main-lock`, { mainLockTx }),

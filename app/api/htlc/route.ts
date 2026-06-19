@@ -5,7 +5,7 @@
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
 import {
-  expectedSolverCanton,
+  expectedSettlementParty,
   expectedSolverEvm,
   isParticipantManagedParty,
   requirePartyOwner
@@ -16,6 +16,12 @@ import {
   QuoteUnavailableError
 } from "@/lib/htlc-quote";
 import { assertValidTimelocks, MIN_GAP } from "@/lib/htlc-timelock";
+import {
+  computeHtlcSwapNotionalUsd,
+  estimateHtlcManagedFee,
+  isNetworkFeeEnabled,
+  NetworkFeePrepareError
+} from "@/lib/canton-network-fee";
 
 export async function POST(req: Request) {
   try {
@@ -38,10 +44,14 @@ export async function POST(req: Request) {
     const partyAuth = await requirePartyOwner(String(body.userCantonParty));
     if (partyAuth.error) return partyAuth.error;
 
-    const solverCanton = expectedSolverCanton();
-    if (solverCanton && body.solverCantonParty !== solverCanton) {
-      return NextResponse.json({ error: "solver Canton party mismatch" }, { status: 403 });
+    const vaultParty = expectedSettlementParty();
+    if (!vaultParty) {
+      return NextResponse.json(
+        { error: "CANTON_SWAP_SETTLEMENT_PARTY not configured" },
+        { status: 503 }
+      );
     }
+    body.solverCantonParty = vaultParty;
 
     const evmRequired = [
       "userEvmAddress",
@@ -67,15 +77,37 @@ export async function POST(req: Request) {
       ? "managed"
       : "loop";
 
+    if (isNetworkFeeEnabled() && body.counterMode === "managed") {
+      const action =
+        direction === "canton-to-evm" ? "htlc-lock" : "htlc-claim";
+      const notionalUsd = await computeHtlcSwapNotionalUsd(
+        String(body.cbtcAmount)
+      );
+      const nf = await estimateHtlcManagedFee({
+        action,
+        userParty: String(body.userCantonParty),
+        solverParty: vaultParty,
+        cbtcAmount: String(body.cbtcAmount),
+        notionalUsd
+      });
+      body.networkFeeCc = nf.feeCc;
+      // Fee bound lasts for the order window (claim/lock), not the 60s RFQ preview TTL.
+      body.networkFeeExpiresAt = Number(body.userTimelock);
+    }
+
     const order = await htlcService().createOrder(body);
     return NextResponse.json({ order });
   } catch (e) {
+    if (e instanceof NetworkFeePrepareError) {
+      return NextResponse.json({ error: e.userMessage }, { status: 400 });
+    }
     if (e instanceof QuoteUnavailableError || e instanceof DepegError) {
       return NextResponse.json({ error: e.message }, { status: 503 });
     }
-    return NextResponse.json(
-      { error: e instanceof Error ? e.message : String(e) },
-      { status: 400 }
-    );
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes("another party")) {
+      return NextResponse.json({ error: msg }, { status: 403 });
+    }
+    return NextResponse.json({ error: msg }, { status: 400 });
   }
 }

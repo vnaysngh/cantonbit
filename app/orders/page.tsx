@@ -8,12 +8,13 @@
  * Production table view + a portal-rendered detail drawer (portal escapes any
  * ancestor containing-block so the drawer is never clipped/collapsed).
  */
-import { useCallback, useEffect, useMemo, useState, Suspense } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, Suspense } from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams } from "next/navigation";
 
 import { useWallet } from "@/hooks/useWallet";
 import { useEvmWallet } from "@/hooks/useEvmWallet";
+import { useCantonIdentity } from "@/hooks/useCantonIdentity";
 import { useVaultContext } from "@/hooks/useVaultContext";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import {
@@ -30,7 +31,12 @@ import {
   needsCantonSwapCounterAccept,
   type CantonSwapHistoryRow
 } from "@/lib/canton-swap-history";
-import { isSwapClaimable } from "@/lib/htlc-order-logic";
+import {
+  isSwapClaimable,
+  htlcCantonClaimUpdateId,
+  htlcUserWbtcClaimTx,
+  htlcSolverWbtcClaimTx
+} from "@/lib/htlc-order-logic";
 import type { SwapOrder, SwapStatus } from "@/lib/htlc-types";
 import {
   deriveHtlcProgress,
@@ -165,6 +171,31 @@ const TERMINAL_STATUSES = new Set([
   "filled",
   "expired"
 ]);
+
+const ORDERS_POLL_MS = 4_000;
+const ORDERS_SLOW_POLL_EVERY = 3;
+const ORDERS_MAX_PARALLEL = 4;
+
+/** Solver is finishing after the user leg — poll less aggressively. */
+function isSlowPollStatus(o: HistoryOrder, status: string): boolean {
+  return (
+    status === "counter_claimed" &&
+    (o.direction === "canton-to-evm" || o.direction === "evm-to-canton")
+  );
+}
+
+async function mapPool<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<PromiseSettledResult<R>[]> {
+  const out: PromiseSettledResult<R>[] = [];
+  for (let i = 0; i < items.length; i += limit) {
+    const batch = items.slice(i, i + limit);
+    out.push(...(await Promise.allSettled(batch.map(fn))));
+  }
+  return out;
+}
 
 const STATUS_STYLE: Record<string, string> = {
   main_claimed: "bg-green-500/12 text-green-600 ring-green-500/20",
@@ -324,6 +355,11 @@ export default function OrdersPage() {
 function OrdersPageInner() {
   const wallet = useWallet();
   const evm = useEvmWallet();
+  const {
+    party: sessionParty,
+    ready: identityProbed,
+    authed: sessionAuthed
+  } = useCantonIdentity();
   const searchParams = useSearchParams();
   const [orders, setOrders] = useState<HistoryOrder[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -336,10 +372,7 @@ function OrdersPageInner() {
   const [deepLinkOrder, setDeepLinkOrder] = useState<HistoryOrder | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [mounted, setMounted] = useState(false);
-  const [sessionParty, setSessionParty] = useState<string | null>(null);
-  const [sessionAuthed, setSessionAuthed] = useState(false);
   const [sessionUserId, setSessionUserId] = useState<string | null>(null);
-  const [identityProbed, setIdentityProbed] = useState(false);
 
   useEffect(() => {
     setMounted(true);
@@ -386,71 +419,83 @@ function OrdersPageInner() {
     };
   }, [searchParams, orders]);
 
-  const liveOrderIds = useMemo(() => {
-    if (!orders) return [];
-    return orders
-      .filter((o) => {
-        const status = optimisticStatus[o.id] ?? o.status;
-        return !TERMINAL_STATUSES.has(status);
-      })
-      .map((o) => o.id);
+  const pollPlan = useMemo(() => {
+    if (!orders) return { fast: [] as string[], slow: [] as string[] };
+    const fast: string[] = [];
+    const slow: string[] = [];
+    for (const o of orders) {
+      const status = optimisticStatus[o.id] ?? o.status;
+      if (TERMINAL_STATUSES.has(status)) continue;
+      if (isSlowPollStatus(o, status)) slow.push(o.id);
+      else fast.push(o.id);
+    }
+    return { fast, slow };
   }, [orders, optimisticStatus]);
 
-  useEffect(() => {
-    if (liveOrderIds.length === 0) return;
-    let alive = true;
-    const poll = async () => {
-      const updates = await Promise.allSettled(
-        liveOrderIds.map(async (id) => {
-          const existing = orders?.find((o) => o.id === id);
-          if (existing && isCantonSwapOrder(existing)) {
-            const { order } = await cantonSwapApi.get(id);
-            return mapCantonSwapToHistoryRow(order);
-          }
-          const { order } = await htlcApi.getOrder(id);
-          return order as HistoryOrder;
-        })
-      );
-      if (!alive) return;
-      setOrders((prev) => {
-        if (!prev) return prev;
-        const byId = new Map(prev.map((o) => [o.id, o]));
-        for (const result of updates) {
-          if (result.status !== "fulfilled" || !result.value?.id) continue;
-          const existing = byId.get(result.value.id);
-          byId.set(
-            result.value.id,
-            existing ? { ...existing, ...result.value } : result.value
-          );
-        }
-        return [...byId.values()].sort((a, b) => b.createdAt - a.createdAt);
-      });
-    };
-    void poll();
-    const id = setInterval(poll, 4000);
-    return () => {
-      alive = false;
-      clearInterval(id);
-    };
-  }, [liveOrderIds.join("|")]);
+  const pollInFlightRef = useRef(false);
+  const slowPollTickRef = useRef(0);
+  const ordersRef = useRef(orders);
+  ordersRef.current = orders;
 
   useEffect(() => {
+    const { fast, slow } = pollPlan;
+    if (fast.length === 0 && slow.length === 0) return;
     let alive = true;
-    fetch("/api/parties/me")
-      .then((r) => r.json())
-      .then((d) => {
+
+    const fetchOne = async (id: string): Promise<HistoryOrder | null> => {
+      const existing = ordersRef.current?.find((o) => o.id === id);
+      if (existing && isCantonSwapOrder(existing)) {
+        const { order } = await cantonSwapApi.get(id);
+        return mapCantonSwapToHistoryRow(order);
+      }
+      const { order } = await htlcApi.getOrder(id);
+      return order as HistoryOrder;
+    };
+
+    const poll = async () => {
+      if (pollInFlightRef.current) return;
+      pollInFlightRef.current = true;
+      try {
+        const ids: string[] = [...fast];
+        slowPollTickRef.current += 1;
+        const slowDue =
+          slowPollTickRef.current >= ORDERS_SLOW_POLL_EVERY ||
+          (!!openId && slow.includes(openId));
+        if (slowDue) {
+          slowPollTickRef.current = 0;
+          for (const id of slow) {
+            if (!ids.includes(id)) ids.push(id);
+          }
+        }
+        if (openId && !ids.includes(openId)) ids.unshift(openId);
+
+        const updates = await mapPool(ids, ORDERS_MAX_PARALLEL, fetchOne);
         if (!alive) return;
-        setSessionParty(d?.partyId ?? null);
-        setSessionAuthed(!!d?.authed);
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (alive) setIdentityProbed(true);
-      });
+        setOrders((prev) => {
+          if (!prev) return prev;
+          const byId = new Map(prev.map((o) => [o.id, o]));
+          for (const result of updates) {
+            if (result.status !== "fulfilled" || !result.value?.id) continue;
+            const existing = byId.get(result.value.id);
+            byId.set(
+              result.value.id,
+              existing ? { ...existing, ...result.value } : result.value
+            );
+          }
+          return [...byId.values()].sort((a, b) => b.createdAt - a.createdAt);
+        });
+      } finally {
+        pollInFlightRef.current = false;
+      }
+    };
+
+    void poll();
+    const timer = setInterval(() => void poll(), ORDERS_POLL_MS);
     return () => {
       alive = false;
+      clearInterval(timer);
     };
-  }, []);
+  }, [pollPlan.fast.join("|"), pollPlan.slow.join("|"), openId]);
 
   useEffect(() => {
     let alive = true;
@@ -998,6 +1043,10 @@ function DetailDrawer({
 }) {
   const cantonSwap = isCantonSwapOrder(o);
   const reverse = !cantonSwap && o.direction === "canton-to-evm";
+  const solverWbtcClaim =
+    !cantonSwap && !reverse ? htlcSolverWbtcClaimTx(o) : undefined;
+  const userWbtcClaim = reverse ? htlcUserWbtcClaimTx(o) : undefined;
+  const cantonClaimUpdate = !cantonSwap ? htlcCantonClaimUpdateId(o) : undefined;
   const action = recoveryAction(o);
   const claimable = isClaimableOrder(o);
   const lockConfirm = !cantonSwap && needsLoopLockConfirm(o);
@@ -1204,12 +1253,30 @@ function DetailDrawer({
                 href={txHref(o.counterLockTx)}
               />
             )}
-            {o.mainClaimTx && o.mainClaimTx.startsWith("0x") && (
+            {solverWbtcClaim && (
               <Row
-                label="WBTC claim (EVM)"
-                value={shortId(o.mainClaimTx)}
+                label="WBTC claim (EVM, solver)"
+                value={shortId(solverWbtcClaim)}
                 mono
-                href={txHref(o.mainClaimTx)}
+                href={txHref(solverWbtcClaim)}
+              />
+            )}
+            {userWbtcClaim && (
+              <Row
+                label="WBTC claim (EVM, you)"
+                value={shortId(userWbtcClaim)}
+                mono
+                href={txHref(userWbtcClaim)}
+              />
+            )}
+            {cantonClaimUpdate && (
+              <Row
+                label={
+                  reverse ? "CBTC settlement (Canton, solver)" : "CBTC claim (Canton, you)"
+                }
+                value={shortId(cantonClaimUpdate)}
+                mono
+                copyText={cantonClaimUpdate}
               />
             )}
             {o.revealedPreimage ? (

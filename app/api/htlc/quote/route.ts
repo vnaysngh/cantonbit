@@ -7,9 +7,19 @@ import {
   quoteWbtcToCbtc,
   quoteCbtcToWbtc,
   QuoteUnavailableError,
-  DepegError
+  DepegError,
+  QUOTE_TTL_SECONDS
 } from "@/lib/htlc-quote";
 import { NETWORK } from "@/lib/constants";
+import {
+  computeHtlcSwapNotionalUsd,
+  estimateHtlcManagedFee,
+  estimateToQuoteFields,
+  logNetworkFeeEstimate,
+  measureAndLogSolverCounterLockTraffic,
+  shouldQuoteNetworkFee
+} from "@/lib/canton-network-fee";
+import { expectedSettlementParty } from "@/lib/htlc-auth";
 
 export async function POST(req: Request) {
   try {
@@ -35,6 +45,47 @@ export async function POST(req: Request) {
       ? await quoteCbtcToWbtc(inUnits)
       : await quoteWbtcToCbtc(inUnits);
 
+    let networkFeeFields = estimateToQuoteFields({
+      feeCc: "0",
+      feeUsd: 0,
+      trafficBytes: 0,
+      minCcRequired: "0",
+      networkFeeSource: "disabled"
+    });
+    const managedQuote = body.counterMode === "managed";
+    if (shouldQuoteNetworkFee() && managedQuote) {
+      try {
+        const action = reverse ? "htlc-lock" : "htlc-claim";
+        const cbtcUnits = reverse ? q.inUnits : q.outUnits;
+        const cbtcDec = (Number(cbtcUnits) / 1e8).toFixed(8);
+        const notionalUsd = await computeHtlcSwapNotionalUsd(cbtcDec);
+        const vaultParty = expectedSettlementParty();
+        if (!vaultParty) {
+          throw new Error("CANTON_SWAP_SETTLEMENT_PARTY not configured");
+        }
+        const nf = await estimateHtlcManagedFee({
+          action,
+          userParty: String(cantonParty),
+          solverParty: vaultParty,
+          cbtcAmount: cbtcDec,
+          notionalUsd
+        });
+        logNetworkFeeEstimate(`htlc-quote ${action}`, nf);
+        networkFeeFields = estimateToQuoteFields(nf);
+        if (!reverse) {
+          void measureAndLogSolverCounterLockTraffic({
+            context: "htlc-quote-projection",
+            solverParty: vaultParty,
+            userParty: String(cantonParty),
+            cbtcAmount: cbtcDec
+          });
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn("[htlc-quote] network fee prepare failed — quote still returned:", msg);
+      }
+    }
+
     const order = {
       inputs: [["0", q.inUnits.toString()]],
       outputs: [{ amount: q.outUnits.toString() }]
@@ -51,7 +102,12 @@ export async function POST(req: Request) {
       expires: q.expiresAt,
       feeBps: q.feeBps,
       bridgeFeeBps: q.feeBps,
-      instrument: NETWORK.instrumentId
+      instrument: NETWORK.instrumentId,
+      networkFeeExpiresAt:
+        shouldQuoteNetworkFee() && managedQuote
+          ? Math.floor(Date.now() / 1000) + QUOTE_TTL_SECONDS
+          : undefined,
+      ...networkFeeFields
     });
   } catch (e) {
     if (e instanceof DepegError || e instanceof QuoteUnavailableError) {

@@ -36,7 +36,8 @@ import {
   checkSwapPayAmountLimit,
   swapPayAssetFromToken
 } from "@/lib/swap-amount-limits";
-import { loopSettingsUrl, DEFAULT_PLATFORM_FEE_BPS } from "@/lib/constants";
+import { loopSettingsUrl, DEFAULT_PLATFORM_FEE_BPS, isNetworkFeeUiEnabled } from "@/lib/constants";
+import { FeeBreakdown } from "@/components/FeeBreakdown";
 import { cn } from "@/lib/utils";
 import {
   getQuote,
@@ -75,8 +76,10 @@ import {
 } from "@/lib/loop-holdings";
 import { findLoopOutgoingTransferOffer } from "@/lib/loop-transfer-offers";
 import { cantonSwapApi } from "@/lib/canton-swap-client";
+import { logNetworkFeeInBrowser } from "@/lib/network-fee-client-log";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
-import { isSwapClaimable } from "@/lib/htlc-order-logic";
+import { isSwapClaimable, htlcUserWbtcClaimTx } from "@/lib/htlc-order-logic";
+import { isReverseEvmCounterLockReady } from "@/lib/htlc-evm-counter-lock";
 import type { SwapStatus } from "@/lib/htlc-types";
 import {
   forgetSecret,
@@ -114,7 +117,10 @@ const HTLC_ESCROW = HTLC_ESCROW_ADDRESS;
 const SOLVER_EVM =
   process.env.NEXT_PUBLIC_SOLVER_EVM ??
   "0x0B95ec21579aee6Ef7b712976bD86689D68b5A08";
-const SOLVER_CANTON = process.env.NEXT_PUBLIC_SOLVER_CANTON ?? "";
+/** Canton settlement vault — CBTC float + HTLC counter legs (not the node fee party). */
+const SETTLEMENT_PARTY =
+  process.env.NEXT_PUBLIC_CANTON_SWAP_SETTLEMENT_PARTY ?? "";
+const SOLVER_CANTON = SETTLEMENT_PARTY;
 
 type Stage =
   | { kind: "idle" }
@@ -170,12 +176,18 @@ type Stage =
       secret: string;
       phase?: "custody" | "solver";
       waitStartedAt?: number;
+      /** Shown when DB says counter_locked but on-chain WBTC lock is missing. */
+      solverNote?: string;
     }
   | {
       kind: "rev-claimable";
       swapId: string;
       secret: string;
       claimError?: string;
+      hashLock?: string;
+      wbtcAmount?: string;
+      userEvmAddress?: string;
+      cbtcAmount?: string;
     }
   | { kind: "rev-resume"; swapId: string; unlockError?: string }
   | { kind: "rev-claiming"; swapId: string; secret: string }
@@ -185,6 +197,8 @@ type Stage =
       claimTx: string;
       wbtcAmount?: string;
       cbtcAmount?: string;
+      /** True when WBTC claim landed but solver has not finished the Canton leg. */
+      settling?: boolean;
     }
   | {
       kind: "c2c-done";
@@ -217,33 +231,13 @@ const FEE_BPS = Number(
 export default function SwapPage() {
   const evm = useEvmWallet();
   const wallet = useWallet();
-
-  // PARTICIPANT-MANAGED (default): the CBTC recipient is the logged-in user's party
-  // hosted on OUR warpx node (fetched from /api/parties/me). The backend signs the
-  // on-ledger claim for them (CanActAs) — no Loop wallet needed. We fall back to the
-  // connected Loop party only if there's no session (the legacy/Loop path).
-  const [sessionParty, setSessionParty] = useState<string | null>(null);
+  const {
+    party: sessionParty,
+    ready: identityReady,
+    authed: sessionReadyAuth,
+    isManaged: isParticipantManagedFromSession
+  } = useCantonIdentity();
   const [sessionUserId, setSessionUserId] = useState<string | null>(null);
-  const [sessionReadyAuth, setSessionReadyAuth] = useState(false);
-  const [identityProbed, setIdentityProbed] = useState(false);
-  useEffect(() => {
-    let alive = true;
-    fetch("/api/parties/me")
-      .then((r) => r.json())
-      .then((d) => {
-        if (alive) {
-          setSessionParty(d?.partyId ?? null);
-          setSessionReadyAuth(!!d?.authed);
-        }
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (alive) setIdentityProbed(true);
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
   useEffect(() => {
     let alive = true;
     void createSupabaseBrowserClient()
@@ -257,22 +251,23 @@ export default function SwapPage() {
     };
   }, []);
 
+  const identityProbed = identityReady;
+
   const destinationParty =
     process.env.NEXT_PUBLIC_SWAP_DEST_PARTY ?? sessionParty ?? wallet.partyId;
-  // True once we have a usable recipient party (session party OR Loop wallet).
   const loopConnected = !!destinationParty;
 
-  // GATE: no Canton party = no identity → /login. Wait until BOTH the session probe
-  // and the Loop wallet have finished loading so we don't redirect prematurely.
   const router = useRouter();
   useEffect(() => {
-    if (process.env.NEXT_PUBLIC_SWAP_DEST_PARTY) return; // test override: never gate
+    if (process.env.NEXT_PUBLIC_SWAP_DEST_PARTY) return;
     if (!identityProbed || wallet.isLoading) return;
     if (!destinationParty) router.replace("/login");
   }, [identityProbed, wallet.isLoading, destinationParty, router]);
-  // Is this a participant-managed swap (backend signs the claim) vs Loop (user signs)?
+
   const isParticipantManaged =
-    !!sessionParty && destinationParty === sessionParty;
+    isParticipantManagedFromSession &&
+    !!sessionParty &&
+    destinationParty === sessionParty;
 
   const vaultRecallContext = useVaultContext({
     loopProvider: wallet.provider,
@@ -338,7 +333,6 @@ export default function SwapPage() {
   const isReverse = swapKind === "canton-to-evm";
   const { data: cantonAssets = [], isLoading: assetsLoading } =
     useCantonSwapAssets();
-  const { ready: identityReady } = useCantonIdentity();
   const enabledCantonIds = useMemo(
     () => cantonAssets.map((a) => a.id),
     [cantonAssets]
@@ -463,10 +457,11 @@ export default function SwapPage() {
     isError: c2cQuoteIsError,
     error: c2cQuoteError
   } = useCantonLiveQuote({
-    enabled: isC2c,
+    enabled: isC2c && !!destinationParty,
     fromAsset: c2cFromAsset,
     toAsset: c2cToAsset,
-    amount
+    amount,
+    userParty: destinationParty
   });
 
   const c2cQuoteOutAmount =
@@ -811,7 +806,8 @@ export default function SwapPage() {
           body: JSON.stringify({
             fromAsset: payLeg.token,
             toAsset: receiveLeg.token,
-            amount
+            amount,
+            userParty: destinationParty
           })
         });
         const q = (await r.json()) as QuoteResponse & {
@@ -820,8 +816,23 @@ export default function SwapPage() {
           toAsset?: string;
           inAmount?: string;
           outAmount?: string;
+          networkFeeCc?: string;
+          networkFeeUsd?: number;
+          minCcRequired?: string;
+          networkFeeSource?: string;
+          trafficBytes?: number;
+          networkFeeCharged?: boolean;
+          networkFeePreview?: boolean;
         };
         if (!r.ok) throw new Error(formatCantonQuoteError(q.error));
+        logNetworkFeeInBrowser("c2c quote", {
+          feeCc: q.networkFeeCc,
+          feeUsd: q.networkFeeUsd,
+          trafficBytes: q.trafficBytes,
+          networkFeeSource: q.networkFeeSource,
+          networkFeeCharged: q.networkFeeCharged,
+          networkFeePreview: q.networkFeePreview
+        });
         setStage({
           kind: "quoted",
           quote: {
@@ -835,7 +846,14 @@ export default function SwapPage() {
             fromAsset: q.fromAsset,
             toAsset: q.toAsset,
             inAmount: q.inAmount,
-            outAmount: q.outAmount
+            outAmount: q.outAmount,
+            networkFeeCc: q.networkFeeCc,
+            networkFeeUsd: q.networkFeeUsd,
+            minCcRequired: q.minCcRequired,
+            networkFeeSource: q.networkFeeSource,
+            trafficBytes: q.trafficBytes,
+            networkFeeCharged: q.networkFeeCharged,
+            networkFeePreview: q.networkFeePreview
           }
         });
       } catch (e) {
@@ -898,16 +916,27 @@ export default function SwapPage() {
               user: evm.account,
               cantonParty: destinationParty,
               cbtcAmount: inUnits.toString(),
-              direction: "canton-to-evm"
+              direction: "canton-to-evm",
+              counterMode: isParticipantManaged ? "managed" : "loop"
             }
           : {
               user: evm.account,
               wbtcAmount: inUnits.toString(),
               cantonParty: destinationParty,
-              direction: "evm-to-canton"
+              direction: "evm-to-canton",
+              counterMode: isParticipantManaged ? "managed" : "loop"
             }
       );
       if (!isReverse) void refreshBalance(quote.wbtc);
+      logNetworkFeeInBrowser("htlc quote", {
+        feeCc: quote.networkFeeCc,
+        feeUsd: quote.networkFeeUsd,
+        trafficBytes: quote.trafficBytes,
+        minCcRequired: quote.minCcRequired,
+        networkFeeSource: quote.networkFeeSource,
+        networkFeeCharged: quote.networkFeeCharged,
+        networkFeePreview: quote.networkFeePreview
+      });
       setStage({ kind: "quoted", quote });
     } catch (e) {
       if (e instanceof ApiError && e.status === 503) {
@@ -1021,24 +1050,34 @@ export default function SwapPage() {
           );
           return;
         }
+        if (
+          quote.networkFeeCharged &&
+          quote.networkFeeSource &&
+          quote.networkFeeSource !== "disabled" &&
+          quote.minCcRequired &&
+          managedPreapproval?.ccTotal != null &&
+          Number.parseFloat(managedPreapproval.ccTotal) <
+            Number.parseFloat(quote.minCcRequired)
+        ) {
+          retry(
+            `Need ${quote.minCcRequired} CC for network fee + reserve (you have ${managedPreapproval.ccTotal} CC). Send CC from Account → Send.`
+          );
+          return;
+        }
       }
 
       try {
         setStage({ kind: "submitting", quote, c2cPhase: "sign" });
         await cancelC2cDraft();
-        const { order } = await cantonSwapApi.createOrder({
-          fromAsset,
-          toAsset,
-          inAmount,
-          outAmount: quote.outAmount,
-          userParty: destinationParty,
-          walletMode
-        });
-        c2cDraftOrderIdRef.current = order.id;
 
         if (walletMode === "managed") {
-          await cantonSwapApi.settle(order.id);
-          c2cDraftOrderIdRef.current = null;
+          const { order } = await cantonSwapApi.submitManaged({
+            fromAsset,
+            toAsset,
+            inAmount,
+            outAmount: quote.outAmount,
+            userParty: destinationParty
+          });
           setAmount("");
           setStage({
             kind: "c2c-done",
@@ -1051,6 +1090,16 @@ export default function SwapPage() {
           });
           return;
         }
+
+        const { order } = await cantonSwapApi.createOrder({
+          fromAsset,
+          toAsset,
+          inAmount,
+          outAmount: quote.outAmount,
+          userParty: destinationParty,
+          walletMode
+        });
+        c2cDraftOrderIdRef.current = order.id;
 
         const provider = wallet.provider;
         if (!provider) {
@@ -1176,7 +1225,7 @@ export default function SwapPage() {
       }
       if (!SOLVER_CANTON) {
         retry(
-          "Solver Canton party not configured (NEXT_PUBLIC_SOLVER_CANTON)."
+          "Settlement vault not configured (NEXT_PUBLIC_CANTON_SWAP_SETTLEMENT_PARTY)."
         );
         return;
       }
@@ -1518,38 +1567,102 @@ export default function SwapPage() {
   // REVERSE claim — the user claims the WBTC in MetaMask. This on-chain
   // claim(preimage) IS the secret reveal; the daemon then claims the CBTC.
   const handleClaimReverse = useCallback(
-    async (swapId: string, secret: string) => {
+    async (
+      swapId: string,
+      secret: string,
+      preflight?: {
+        hashLock?: string;
+        wbtcAmount?: string;
+        userEvmAddress?: string;
+        cbtcAmount?: string;
+      }
+    ) => {
       setStage({ kind: "rev-claiming", swapId, secret });
       try {
+        let hashLock = preflight?.hashLock ?? swapId;
+        let wbtcAmount = preflight?.wbtcAmount;
+        let userEvmAddress = preflight?.userEvmAddress ?? evm.account ?? "";
+        let cbtcAmount = preflight?.cbtcAmount;
+
+        if (!wbtcAmount) {
+          const { order } = await htlcApi.getOrder(swapId);
+          const o = order as {
+            hashLock?: string;
+            wbtcAmount?: string;
+            userEvmAddress?: string;
+            cbtcAmount?: string;
+          } | null;
+          hashLock = o?.hashLock ?? hashLock;
+          wbtcAmount = o?.wbtcAmount ?? "0";
+          userEvmAddress = o?.userEvmAddress ?? userEvmAddress;
+          cbtcAmount = o?.cbtcAmount ?? cbtcAmount;
+        }
+
+        const probe = await isReverseEvmCounterLockReady({
+          hashLock,
+          wbtcAmount: wbtcAmount ?? "0",
+          userEvmAddress
+        });
+        if (!probe.ready) {
+          throw new Error(probe.reason);
+        }
         const preimage = secretToPreimage(secret);
         const tx = await evmClaim(evm.sendTransaction, HTLC_ESCROW, preimage);
-        // Report the reveal (the daemon's EVM watchtower also catches it on its own).
-        await htlcApi.recordClaim(swapId, preimage, tx).catch(() => {});
-        const { order } = await htlcApi.getOrder(swapId).catch(() => ({
-          order: null
-        }));
-        const doneAmounts = order as {
-          wbtcAmount?: string;
-          cbtcAmount?: string;
-        } | null;
+        await htlcApi.recordClaim(swapId, preimage, tx);
         forgetSecret(swapId);
         setStage({
           kind: "rev-done",
           swapId,
           claimTx: tx,
-          wbtcAmount: doneAmounts?.wbtcAmount,
-          cbtcAmount: doneAmounts?.cbtcAmount
+          wbtcAmount,
+          cbtcAmount,
+          settling: true
         });
       } catch (e) {
+        const msg = getSwapErrorMessage(e);
+        const { order } = await htlcApi.getOrder(swapId).catch(() => ({
+          order: null
+        }));
+        const o = order as {
+          hashLock?: string;
+          wbtcAmount?: string;
+          userEvmAddress?: string;
+          cbtcAmount?: string;
+          status?: string;
+        } | null;
+        const probe =
+          o?.wbtcAmount && o?.userEvmAddress
+            ? await isReverseEvmCounterLockReady({
+                hashLock: o.hashLock ?? swapId,
+                wbtcAmount: o.wbtcAmount,
+                userEvmAddress: o.userEvmAddress
+              }).catch(() => ({ ready: false as const, reason: msg }))
+            : { ready: false as const, reason: msg };
+        if (!probe.ready && o?.status === "main_locked") {
+          setStage({
+            kind: "rev-locking",
+            swapId,
+            secret,
+            phase: "solver",
+            waitStartedAt: Date.now(),
+            solverNote:
+              "Solver WBTC lock was not confirmed on-chain — waiting for the solver to retry."
+          });
+          return;
+        }
         setStage({
           kind: "rev-claimable",
           swapId,
           secret,
-          claimError: getSwapErrorMessage(e)
+          claimError: msg,
+          hashLock: o?.hashLock ?? preflight?.hashLock ?? swapId,
+          wbtcAmount: o?.wbtcAmount ?? preflight?.wbtcAmount,
+          userEvmAddress: o?.userEvmAddress ?? preflight?.userEvmAddress,
+          cbtcAmount: o?.cbtcAmount ?? preflight?.cbtcAmount
         });
       }
     },
-    [evm.sendTransaction]
+    [evm.account, evm.sendTransaction]
   );
 
   // RETAKE (EVM refund) — if a swap is stuck, the user reclaims their locked WBTC
@@ -1724,7 +1837,42 @@ export default function SwapPage() {
           return;
         }
         if (direction === "canton-to-evm") {
-          setStage({ kind: "rev-claimable", swapId, secret });
+          const { order: ord } = await htlcApi.getOrder(swapId).catch(() => ({
+            order: null
+          }));
+          const meta = ord as {
+            hashLock?: string;
+            wbtcAmount?: string;
+            userEvmAddress?: string;
+          } | null;
+          const probe =
+            meta?.wbtcAmount && meta?.userEvmAddress
+              ? await isReverseEvmCounterLockReady({
+                  hashLock: meta.hashLock ?? swapId,
+                  wbtcAmount: meta.wbtcAmount,
+                  userEvmAddress: meta.userEvmAddress
+                })
+              : { ready: false as const, reason: "Missing order fields." };
+          if (!probe.ready) {
+            setStage({
+              kind: "rev-locking",
+              swapId,
+              secret,
+              phase: "solver",
+              waitStartedAt: Date.now(),
+              solverNote: probe.reason
+            });
+            return;
+          }
+          setStage({
+            kind: "rev-claimable",
+            swapId,
+            secret,
+            hashLock: meta?.hashLock ?? swapId,
+            wbtcAmount: meta?.wbtcAmount,
+            userEvmAddress: meta?.userEvmAddress,
+            cbtcAmount: (ord as { cbtcAmount?: string } | null)?.cbtcAmount
+          });
         } else {
           setStage({
             kind: "htlc-claimable",
@@ -1752,6 +1900,7 @@ export default function SwapPage() {
 
   const reset = useCallback(() => {
     void cancelC2cDraft();
+    setAmount("");
     setStage({ kind: "idle" });
   }, [cancelC2cDraft]);
 
@@ -1759,6 +1908,7 @@ export default function SwapPage() {
     (swapId?: string) => {
       dismissActiveHtlcSwap(swapId);
       void cancelC2cDraft();
+      setAmount("");
       setStage({ kind: "idle" });
     },
     [cancelC2cDraft]
@@ -1798,16 +1948,39 @@ export default function SwapPage() {
         secret: stage.secret
       };
     }
+    if (stage.kind === "rev-done" && stage.settling) {
+      return {
+        swapId: stage.swapId,
+        mode: "reverse" as const,
+        secret: "",
+        settling: true as const
+      };
+    }
     return null;
   }, [stage]);
+
+  const htlcPollInFlightRef = useRef(false);
 
   useEffect(() => {
     if (!htlcSolverWait) return;
     let cancelled = false;
     const poll = async () => {
+      if (htlcPollInFlightRef.current) return;
+      htlcPollInFlightRef.current = true;
       try {
-        const { order } = await htlcApi.getOrder(htlcSolverWait.swapId);
-        if (cancelled || !order) return;
+        const { order: rawOrder } = await htlcApi.getOrder(htlcSolverWait.swapId);
+        const order = rawOrder as {
+          status?: string;
+          direction?: "evm-to-canton" | "canton-to-evm";
+          counterMode?: string;
+          hashLock?: string;
+          wbtcAmount?: string;
+          userEvmAddress?: string;
+          cbtcAmount?: string;
+          mainClaimTx?: string;
+          counterClaimUpdateId?: string;
+        } | null;
+        if (cancelled || !order?.status) return;
         const st = order.status;
         if (st === "refunded" || st === "cancelled" || st === "failed") {
           dismissActiveHtlcSwap(htlcSolverWait.swapId);
@@ -1844,15 +2017,100 @@ export default function SwapPage() {
           }
           return;
         }
-        if (st === "counter_locked" || st === "counter_claimed") {
+        if (st === "main_claimed") {
+          forgetSecret(htlcSolverWait.swapId);
+          setStage((prev) =>
+            prev.kind === "rev-done" && prev.swapId === htlcSolverWait.swapId
+              ? {
+                  ...prev,
+                  settling: false,
+                  wbtcAmount:
+                    (order as { wbtcAmount?: string }).wbtcAmount ??
+                    prev.wbtcAmount,
+                  cbtcAmount:
+                    (order as { cbtcAmount?: string }).cbtcAmount ??
+                    prev.cbtcAmount
+                }
+              : {
+                  kind: "rev-done",
+                  swapId: htlcSolverWait.swapId,
+                  claimTx:
+                    htlcUserWbtcClaimTx(
+                      order as {
+                        direction: "canton-to-evm";
+                        mainClaimTx?: string;
+                        counterClaimUpdateId?: string;
+                      }
+                    ) ?? "",
+                  wbtcAmount: (order as { wbtcAmount?: string }).wbtcAmount,
+                  cbtcAmount: (order as { cbtcAmount?: string }).cbtcAmount,
+                  settling: false
+                }
+          );
+          return;
+        }
+        if (st === "counter_claimed" && !htlcSolverWait.settling) {
+          setStage({
+            kind: "rev-done",
+            swapId: htlcSolverWait.swapId,
+            claimTx:
+              htlcUserWbtcClaimTx({
+                direction: "canton-to-evm",
+                mainClaimTx: order.mainClaimTx,
+                counterClaimUpdateId: order.counterClaimUpdateId
+              }) ?? "",
+            wbtcAmount: order.wbtcAmount,
+            cbtcAmount: order.cbtcAmount,
+            settling: true
+          });
+          return;
+        }
+        if (st === "counter_locked") {
+          const meta = order as {
+            hashLock?: string;
+            wbtcAmount?: string;
+            userEvmAddress?: string;
+            cbtcAmount?: string;
+          };
+          const probe = await isReverseEvmCounterLockReady({
+            hashLock: meta.hashLock ?? htlcSolverWait.swapId,
+            wbtcAmount: meta.wbtcAmount ?? "0",
+            userEvmAddress: meta.userEvmAddress ?? evm.account ?? ""
+          });
+          if (!probe.ready) {
+            setStage((prev) =>
+              prev.kind === "rev-locking" && prev.swapId === htlcSolverWait.swapId
+                ? {
+                    ...prev,
+                    phase: "solver" as const,
+                    solverNote:
+                      "Order marked ready but WBTC is not locked on-chain yet — waiting for the solver."
+                  }
+                : {
+                    kind: "rev-locking",
+                    swapId: htlcSolverWait.swapId,
+                    secret: htlcSolverWait.secret,
+                    phase: "solver",
+                    waitStartedAt: Date.now(),
+                    solverNote: probe.reason
+                  }
+            );
+            return;
+          }
           setStage({
             kind: "rev-claimable",
             swapId: htlcSolverWait.swapId,
-            secret: htlcSolverWait.secret
+            secret: htlcSolverWait.secret,
+            hashLock: meta.hashLock ?? htlcSolverWait.swapId,
+            wbtcAmount: meta.wbtcAmount,
+            userEvmAddress: meta.userEvmAddress,
+            cbtcAmount: meta.cbtcAmount
           });
         }
       } catch {
         /* keep polling */
+      } finally {
+        htlcPollInFlightRef.current = false;
       }
     };
     void poll();
@@ -1861,7 +2119,7 @@ export default function SwapPage() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [htlcSolverWait]);
+  }, [htlcSolverWait, evm.account]);
 
   // The form stays mounted for idle/quoting/error and while the review modal is open.
   const reviewing =
@@ -1873,9 +2131,11 @@ export default function SwapPage() {
     stage.kind === "idle" ||
     stage.kind === "quoting" ||
     stage.kind === "error" ||
+    reviewing;
+  const swapInProgress =
     stage.kind === "htlc-locking" ||
     stage.kind === "rev-locking" ||
-    reviewing;
+    stage.kind === "c2c-waiting";
   // Falls back to fee-only 1:1 (with "≈") until /api/htlc/price loads.
   const receiveDisplay = useMemo(() => {
     if (isC2c) {
@@ -1887,6 +2147,17 @@ export default function SwapPage() {
         stage.quote.outAmount
       ) {
         return { amount: stage.quote.outAmount, approximate: false };
+      }
+      if (!amount || amount === ".") {
+        return { amount: "0", approximate: false };
+      }
+      try {
+        const asset = getSwapAsset(payLeg.token as CantonSwapAssetId);
+        if (toBaseUnits(amount.trim(), asset.decimals) <= 0n) {
+          return { amount: "0", approximate: false };
+        }
+      } catch {
+        return { amount: "0", approximate: false };
       }
       if (c2cLiveQuote?.outAmount) {
         return {
@@ -1921,6 +2192,7 @@ export default function SwapPage() {
     direction,
     wbtcPrice,
     isC2c,
+    payLeg.token,
     stage,
     c2cLiveQuote,
     c2cQuoteLoading
@@ -1998,24 +2270,7 @@ export default function SwapPage() {
     busy?: boolean;
   } | null = null;
   if (showForm) {
-    if (stage.kind === "htlc-locking") {
-      primary = {
-        label: swapWaitButtonLabel(waitElapsedSec, "solver"),
-        onClick: () => {},
-        disabled: true,
-        busy: true
-      };
-    } else if (stage.kind === "rev-locking") {
-      primary = {
-        label:
-          stage.phase === "solver"
-            ? swapWaitButtonLabel(waitElapsedSec, "solver")
-            : swapWaitButtonLabel(waitElapsedSec, "locking"),
-        onClick: () => {},
-        disabled: true,
-        busy: true
-      };
-    } else if (swapBootstrapping) {
+    if (swapBootstrapping) {
       primary = {
         label: "Loading…",
         onClick: () => {},
@@ -2108,7 +2363,7 @@ export default function SwapPage() {
     stage.kind !== "htlc-done" &&
     stage.kind !== "rev-done" &&
     stage.kind !== "c2c-done" &&
-    stage.kind !== "c2c-waiting";
+    !swapInProgress;
 
   return (
     <div className="mx-auto w-full max-w-[460px] px-4 py-6 sm:py-10">
@@ -2266,25 +2521,85 @@ export default function SwapPage() {
               </button>
             )}
 
-            {stage.kind === "htlc-locking" && (
-              <SwapWaitBanner
-                elapsedSec={waitElapsedSec}
-                mode="solver"
-                orderId={stage.swapId}
-                ordersHref={`/orders?id=${encodeURIComponent(stage.swapId)}`}
-                onStartNewSwap={() => dismissToNewSwap(stage.swapId)}
-              />
-            )}
-            {stage.kind === "rev-locking" && stage.phase === "solver" && (
-              <SwapWaitBanner
-                elapsedSec={waitElapsedSec}
-                mode="solver"
-                orderId={stage.swapId}
-                ordersHref={`/orders?id=${encodeURIComponent(stage.swapId)}`}
-                onStartNewSwap={() => dismissToNewSwap(stage.swapId)}
-              />
-            )}
           </>
+        )}
+
+        {stage.kind === "htlc-locking" && (
+          <div className="px-1 pb-1 pt-2 text-left">
+            <div className="mb-4 flex items-center gap-3">
+              <div className="flex size-12 items-center justify-center rounded-2xl bg-primary/10">
+                <span className="inline-block size-5 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
+              </div>
+              <div>
+                <h3 className="text-xl font-semibold text-foreground">
+                  {swapWaitButtonLabel(waitElapsedSec, "solver")}
+                </h3>
+                <p className="mt-0.5 text-sm text-muted-foreground">
+                  Your WBTC is locked. Waiting for the solver to lock CBTC on
+                  Canton — usually under a minute.
+                </p>
+              </div>
+            </div>
+            <div className="overflow-hidden rounded-2xl bg-muted/40">
+              <div className="flex items-center justify-between gap-3 border-b border-foreground/5 px-4 py-3">
+                <span className="text-sm text-muted-foreground">You pay</span>
+                <span className="text-sm font-semibold tabular-nums">
+                  {formatWbtc(BigInt(stage.quote.order.inputs[0][1]))} WBTC
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-3 px-4 py-3">
+                <span className="text-sm text-muted-foreground">You receive</span>
+                <span className="text-sm font-semibold tabular-nums">
+                  {formatWbtc(BigInt(stage.quote.order.outputs[0].amount))}{" "}
+                  CBTC
+                </span>
+              </div>
+            </div>
+            <SwapWaitBanner
+              elapsedSec={waitElapsedSec}
+              mode="solver"
+              orderId={stage.swapId}
+              ordersHref={`/orders?id=${encodeURIComponent(stage.swapId)}`}
+              onStartNewSwap={() => dismissToNewSwap(stage.swapId)}
+            />
+          </div>
+        )}
+
+        {stage.kind === "rev-locking" && (
+          <div className="px-1 pb-1 pt-2 text-left">
+            <div className="mb-4 flex items-center gap-3">
+              <div className="flex size-12 items-center justify-center rounded-2xl bg-primary/10">
+                <span className="inline-block size-5 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
+              </div>
+              <div>
+                <h3 className="text-xl font-semibold text-foreground">
+                  {stage.phase === "solver"
+                    ? swapWaitButtonLabel(waitElapsedSec, "solver")
+                    : "Locking CBTC…"}
+                </h3>
+                <p className="mt-0.5 text-sm text-muted-foreground">
+                  {stage.phase === "solver"
+                    ? stage.solverNote ??
+                      "Your CBTC is locked. Waiting for the solver to lock WBTC on Base."
+                    : "Locking your CBTC on Canton…"}
+                </p>
+              </div>
+            </div>
+            {stage.phase === "solver" && stage.solverNote && (
+              <p className="mb-3 text-sm text-amber-700 dark:text-amber-400">
+                {stage.solverNote}
+              </p>
+            )}
+            {stage.phase === "solver" && (
+              <SwapWaitBanner
+                elapsedSec={waitElapsedSec}
+                mode="solver"
+                orderId={stage.swapId}
+                ordersHref={`/orders?id=${encodeURIComponent(stage.swapId)}`}
+                onStartNewSwap={() => dismissToNewSwap(stage.swapId)}
+              />
+            )}
+          </div>
         )}
 
         {stage.kind === "htlc-resume" && (
@@ -2456,7 +2771,15 @@ export default function SwapPage() {
               <p className="mt-2 text-sm text-red-500">⚠️ {stage.claimError}</p>
             )}
             <button
-              onClick={() => handleClaimReverse(stage.swapId, stage.secret)}
+              onClick={() => {
+                if (stage.kind !== "rev-claimable") return;
+                handleClaimReverse(stage.swapId, stage.secret, {
+                  hashLock: stage.hashLock,
+                  wbtcAmount: stage.wbtcAmount,
+                  userEvmAddress: stage.userEvmAddress,
+                  cbtcAmount: stage.cbtcAmount
+                });
+              }}
               disabled={stage.kind === "rev-claiming"}
               className={cn(
                 "mt-4 w-full rounded-2xl px-4 py-3 font-semibold text-white",
@@ -2495,10 +2818,18 @@ export default function SwapPage() {
 
         {stage.kind === "rev-done" && (
           <SwapResultCard
-            title="Swap complete"
-            subtitle="HTLC reveal complete"
-            badge="Claim confirmed"
-            description="You claimed your WBTC and revealed the secret on-chain. The solver can now use that same secret to claim the CBTC leg."
+            title={stage.settling ? "Settling on Canton" : "Swap complete"}
+            subtitle={
+              stage.settling
+                ? "WBTC received — solver claiming CBTC"
+                : "HTLC reveal complete"
+            }
+            badge={stage.settling ? "Settling" : "Completed"}
+            description={
+              stage.settling
+                ? "Your WBTC is in your wallet. The solver is claiming the CBTC leg on Canton — usually under a minute."
+                : "You claimed your WBTC and revealed the secret on-chain. The solver used that secret to claim the CBTC leg."
+            }
             rows={[
               {
                 label: "You paid",
@@ -2655,6 +2986,10 @@ export default function SwapPage() {
                 }
               : undefined
           }
+          isParticipantManaged={isParticipantManaged}
+          isLoopWallet={!isParticipantManaged && !!wallet.provider}
+          destinationParty={destinationParty}
+          loopProvider={wallet.provider ?? undefined}
           onConfirm={() => {
             if (stage.kind !== "quoted") return;
             if (stage.quote.direction === "canton-to-evm") {
@@ -3011,6 +3346,10 @@ function ReviewModal({
   expirationSeconds,
   evmRecipient,
   managedSetup,
+  isParticipantManaged,
+  isLoopWallet,
+  destinationParty,
+  loopProvider,
   onConfirm,
   onClose
 }: {
@@ -3039,6 +3378,10 @@ function ReviewModal({
     onEnableCbtc: () => Promise<unknown>;
     onEnableAll: () => Promise<unknown>;
   };
+  isParticipantManaged?: boolean;
+  isLoopWallet?: boolean;
+  destinationParty?: string | null;
+  loopProvider?: unknown;
   onConfirm: () => void;
   onClose: () => void;
 }) {
@@ -3051,6 +3394,174 @@ function ReviewModal({
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [busy, onClose]);
+
+  const [networkFeeLoading, setNetworkFeeLoading] = useState(false);
+  const [networkFeeCc, setNetworkFeeCc] = useState<string | undefined>(
+    quote?.networkFeeCc
+  );
+  const [networkFeeUsd, setNetworkFeeUsd] = useState<number | undefined>(
+    quote?.networkFeeUsd
+  );
+  const [networkFeeSource, setNetworkFeeSource] = useState<string | undefined>(
+    quote?.networkFeeSource
+  );
+  const [trafficBytes, setTrafficBytes] = useState<number | undefined>(
+    quote?.trafficBytes
+  );
+  const [networkFeePreview, setNetworkFeePreview] = useState<boolean | undefined>(
+    quote?.networkFeePreview
+  );
+  const [networkFeeTransactions, setNetworkFeeTransactions] = useState<
+    import("@/lib/canton-network-fee-math").NetworkFeeTxLeg[] | undefined
+  >(quote?.networkFeeTransactions);
+  const [loopNetworkFeeCc, setLoopNetworkFeeCc] = useState<string | undefined>();
+
+  useEffect(() => {
+    if (!quote) return;
+
+    const applyNetworkFeeFields = (fields: {
+      feeCc?: string;
+      feeUsd?: number;
+      networkFeeSource?: string;
+      trafficBytes?: number;
+      networkFeePreview?: boolean;
+      networkFeeTransactions?: import("@/lib/canton-network-fee-math").NetworkFeeTxLeg[];
+    }) => {
+      setNetworkFeeCc(fields.feeCc);
+      setNetworkFeeUsd(fields.feeUsd);
+      setNetworkFeeSource(fields.networkFeeSource);
+      setTrafficBytes(fields.trafficBytes);
+      setNetworkFeePreview(fields.networkFeePreview);
+      setNetworkFeeTransactions(fields.networkFeeTransactions);
+    };
+
+    applyNetworkFeeFields({
+      feeCc: quote.networkFeeCc,
+      feeUsd: quote.networkFeeUsd,
+      networkFeeSource: quote.networkFeeSource,
+      trafficBytes: quote.trafficBytes,
+      networkFeePreview: quote.networkFeePreview,
+      networkFeeTransactions: quote.networkFeeTransactions
+    });
+    logNetworkFeeInBrowser("review modal (from quote)", {
+      feeCc: quote.networkFeeCc,
+      feeUsd: quote.networkFeeUsd,
+      trafficBytes: quote.trafficBytes,
+      networkFeeSource: quote.networkFeeSource,
+      networkFeePreview: quote.networkFeePreview
+    });
+
+    if (
+      quote.direction === "canton-to-canton" &&
+      isParticipantManaged &&
+      destinationParty &&
+      quote.fromAsset &&
+      quote.toAsset
+    ) {
+      let cancelled = false;
+      setNetworkFeeLoading(true);
+      void cantonSwapApi
+        .estimateNetworkFee({
+          action: "c2c-managed-settle",
+          userParty: destinationParty,
+          fromAsset: quote.fromAsset,
+          toAsset: quote.toAsset,
+          inAmount: quote.inAmount,
+          outAmount: quote.outAmount
+        })
+        .then((est) => {
+          if (cancelled) return;
+          applyNetworkFeeFields({
+            feeCc: est.feeCc,
+            feeUsd: est.feeUsd,
+            networkFeeSource: est.networkFeeSource,
+            trafficBytes: est.trafficBytes,
+            networkFeePreview: est.networkFeePreview,
+            networkFeeTransactions: est.networkFeeTransactions
+          });
+          logNetworkFeeInBrowser("review modal estimate c2c", est);
+        })
+        .catch((e) => {
+          console.warn("[OranjSwap network-fee] c2c estimate failed", e);
+        })
+        .finally(() => {
+          if (!cancelled) setNetworkFeeLoading(false);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (
+      isParticipantManaged &&
+      destinationParty &&
+      (quote.direction === "evm-to-canton" || quote.direction === "canton-to-evm")
+    ) {
+      const action =
+        quote.direction === "canton-to-evm" ? "htlc-lock" : "htlc-claim";
+      let cancelled = false;
+      setNetworkFeeLoading(true);
+      void cantonSwapApi
+        .estimateNetworkFee({
+          action,
+          userParty: destinationParty,
+          cbtcAmount: (Number(quote.cbtcAmount) / 1e8).toFixed(8)
+        })
+        .then((est) => {
+          if (cancelled) return;
+          applyNetworkFeeFields({
+            feeCc: est.feeCc,
+            feeUsd: est.feeUsd,
+            networkFeeSource: est.networkFeeSource,
+            trafficBytes: est.trafficBytes,
+            networkFeePreview: est.networkFeePreview,
+            networkFeeTransactions: est.networkFeeTransactions
+          });
+          logNetworkFeeInBrowser(`review modal estimate ${action}`, est);
+        })
+        .catch((e) => {
+          console.warn("[OranjSwap network-fee] htlc estimate failed", e);
+        })
+        .finally(() => {
+          if (!cancelled) setNetworkFeeLoading(false);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (quote.direction === "canton-to-canton" && isLoopWallet && loopProvider) {
+      const estimateGas = (
+        loopProvider as {
+          estimateGas?: (
+            payload: unknown
+          ) => Promise<{ cc?: string; amount?: string }>;
+        }
+      ).estimateGas;
+      if (!estimateGas) return;
+      let cancelled = false;
+      setNetworkFeeLoading(true);
+      void estimateGas({})
+        .then((g) => {
+          if (cancelled) return;
+          const cc = g.cc ?? g.amount;
+          if (cc) setLoopNetworkFeeCc(String(cc));
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (!cancelled) setNetworkFeeLoading(false);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
+  }, [
+    quote,
+    isParticipantManaged,
+    isLoopWallet,
+    destinationParty,
+    loopProvider
+  ]);
 
   if (!quote) return null;
 
@@ -3145,11 +3656,41 @@ function ReviewModal({
 
   const setupBusy =
     !!managedSetup && (managedSetup.enabling || managedSetup.enablingCbtc);
-  const ccDeposited =
-    !!managedSetup &&
-    (managedSetup.ccReadyForEnable || managedSetup.ccSubsidizedOnDevnet);
 
-  let actionLabel = retryError ? "Try again" : "Confirm swap";
+  useEffect(() => {
+    if (!managedSetup || !isC2c || managedSetup.loading || busy) return;
+    if (managedSetup.needsCcDeposit) return;
+    if (
+      (managedSetup.needsEnableCc || managedSetup.needsEnableCbtc) &&
+      !setupBusy
+    ) {
+      void managedSetup.onEnableAll().catch(() => {});
+    }
+  }, [managedSetup, isC2c, busy, setupBusy]);
+
+  let setupError: string | null = null;
+  if (managedSetup && isC2c && !busy) {
+    if (managedSetup.loading) {
+      setupError = null;
+    } else if (managedSetup.needsCcDeposit) {
+      setupError = managedSetup.partyId
+        ? `Deposit at least ${managedSetup.ccMin} CC on your Canton party first. Send CC to ${truncatePartyId(managedSetup.partyId)} from Account → Send.`
+        : `Deposit at least ${managedSetup.ccMin} CC on your Canton party first.`;
+    } else if (
+      !setupBusy &&
+      (managedSetup.needsEnableCc || managedSetup.needsEnableCbtc)
+    ) {
+      setupError = null;
+    } else if (managedSetup.swapIssues && managedSetup.swapIssues.length > 0) {
+      setupError = managedSetup.swapIssues.join(" ");
+    } else if (managedSetup.error) {
+      setupError = managedSetup.error;
+    }
+  }
+
+  const blockingError = retryError ?? setupError;
+
+  let actionLabel = "Confirm swap";
   let actionDisabled = !!busy;
   let actionOnClick: () => void = onConfirm;
 
@@ -3157,31 +3698,21 @@ function ReviewModal({
     actionLabel = reviewPayLimit.message;
     actionDisabled = true;
   } else if (managedSetup && isC2c && !busy) {
-    if (managedSetup.loading) {
-      actionLabel = "Checking setup…";
+    if (managedSetup.loading || setupBusy) {
       actionDisabled = true;
-    } else if (managedSetup.needsCcDeposit) {
-      actionLabel = `Deposit ${managedSetup.ccMin} CC first`;
+    } else if (
+      managedSetup.needsCcDeposit ||
+      managedSetup.needsEnableCc ||
+      managedSetup.needsEnableCbtc ||
+      (managedSetup.swapIssues && managedSetup.swapIssues.length > 0) ||
+      managedSetup.error
+    ) {
       actionDisabled = true;
-    } else if (managedSetup.needsEnableCc && managedSetup.needsEnableCbtc) {
-      actionLabel = setupBusy ? "Setting up…" : "Set up auto-accept";
-      actionDisabled = setupBusy;
-      actionOnClick = () => {
-        void managedSetup.onEnableAll().catch(() => {});
-      };
-    } else if (managedSetup.needsEnableCc) {
-      actionLabel = setupBusy ? "Enabling CC…" : "Enable CC";
-      actionDisabled = setupBusy;
-      actionOnClick = () => {
-        void managedSetup.onEnableCc().catch(() => {});
-      };
-    } else if (managedSetup.needsEnableCbtc) {
-      actionLabel = setupBusy ? "Enabling CBTC…" : "Enable CBTC";
-      actionDisabled = setupBusy;
-      actionOnClick = () => {
-        void managedSetup.onEnableCbtc().catch(() => {});
-      };
     }
+  }
+
+  if (!actionDisabled && retryError) {
+    actionLabel = "Try again";
   }
 
   return (
@@ -3234,64 +3765,36 @@ function ReviewModal({
         </div>
 
         {/* Trade details */}
-        <div className="mt-5 flex flex-col gap-1.5 border-t border-foreground/10 pt-4 text-sm">
-          <DetailRow label="Rate" value={rateLabel} />
-          <DetailRow label="Platform fee" value={feeLabel} />
+        <div className="mt-5 border-t border-foreground/10 pt-4">
+          <div className="flex flex-col gap-1.5 text-sm">
+            <DetailRow label="Rate" value={rateLabel} />
+          </div>
+          <FeeBreakdown
+            platformFeeLabel={feeLabel}
+            networkFeeCc={networkFeeCc}
+            networkFeeUsd={networkFeeUsd}
+            networkFeeSource={networkFeeSource}
+            trafficBytes={trafficBytes}
+            networkFeeTransactions={networkFeeTransactions}
+            networkFeePreview={networkFeePreview}
+            loopNetworkFeeCc={loopNetworkFeeCc}
+            loading={networkFeeLoading}
+          />
+          <div className="mt-1.5 flex flex-col gap-1.5 text-sm">
           <DetailRow
             label="You receive"
             value={`${receiveAmount} ${receiveToken}`}
           />
           <DetailRow label="Recipient" value={recipientLabel} />
+          </div>
           {!isC2c && (
             <DetailRow label="Refundable after" value={refundAt} />
           )}
         </div>
 
-        {managedSetup && isC2c && (
-          <div className="mt-4 rounded-xl border border-foreground/10 bg-muted/30 p-3">
-            <p className="text-sm font-medium text-foreground">
-              One-time setup for Canton swaps
-            </p>
-            <ul className="mt-2 space-y-1.5 text-xs text-muted-foreground">
-              <li className={cn(ccDeposited && "text-emerald-700")}>
-                {ccDeposited ? "✓" : "○"} Deposit at least {managedSetup.ccMin}{" "}
-                CC ({managedSetup.ccTotal} CC now)
-              </li>
-              <li className={cn(managedSetup.ccEnabled && "text-emerald-700")}>
-                {managedSetup.ccEnabled ? "✓" : "○"} Enable CC (incoming Canton
-                Coin)
-              </li>
-              <li
-                className={cn(managedSetup.cbtcEnabled && "text-emerald-700")}
-              >
-                {managedSetup.cbtcEnabled ? "✓" : "○"} Enable CBTC auto-accept
-              </li>
-            </ul>
-            {managedSetup.needsCcDeposit && managedSetup.partyId && (
-              <p className="mt-2 text-xs text-foreground/70">
-                Send CC to your party{" "}
-                <span className="font-mono">
-                  {truncatePartyId(managedSetup.partyId)}
-                </span>{" "}
-                from Account → Send, or receive from another party.
-              </p>
-            )}
-            {managedSetup.swapIssues && managedSetup.swapIssues.length > 0 && (
-              <ul className="mt-2 space-y-1 text-xs text-amber-800">
-                {managedSetup.swapIssues.map((issue) => (
-                  <li key={issue}>• {issue}</li>
-                ))}
-              </ul>
-            )}
-            {managedSetup.error && (
-              <p className="mt-2 text-xs text-red-600">{managedSetup.error}</p>
-            )}
-          </div>
-        )}
-
-        {retryError && !busy && (
+        {blockingError && !busy && (
           <div className="mt-4 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-foreground">
-            {retryError}
+            {blockingError}
           </div>
         )}
 

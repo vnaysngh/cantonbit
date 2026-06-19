@@ -5,14 +5,28 @@
  */
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
-import { requireDaemon } from "@/lib/htlc-auth";
+import { expectedSettlementParty, requireDaemon } from "@/lib/htlc-auth";
 
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   try {
     const auth = requireDaemon(req);
     if (auth.error) return auth.error;
-    const preimage = await htlcService().getRevealedPreimage(id);
+    const order = await htlcService().getOrder(id);
+    if (!order) {
+      return NextResponse.json({ error: "not found" }, { status: 404 });
+    }
+    const vault = expectedSettlementParty();
+    if (vault && order.solverCantonParty !== vault) {
+      return NextResponse.json({ error: "order vault party mismatch" }, { status: 403 });
+    }
+    if (
+      order.status !== "counter_claimed" &&
+      order.status !== "main_claimed"
+    ) {
+      return NextResponse.json({ error: "counter not claimed yet" }, { status: 409 });
+    }
+    const preimage = order.revealedPreimage;
     if (!preimage) return NextResponse.json({ error: "not revealed yet" }, { status: 404 });
     return NextResponse.json({ preimage });
   } catch (e) {

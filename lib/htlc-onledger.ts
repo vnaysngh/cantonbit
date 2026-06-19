@@ -22,8 +22,10 @@ import "server-only";
 
 import { getLedgerJwt } from "./auth";
 import { fetchCcRegistry, getDsoPartyId } from "./cc-registry";
+import { buildCcFeeTransferLeg } from "./canton-network-fee";
 import type { InstrumentId } from "./constants";
 import { NETWORK } from "./constants";
+import { assertSameSynchronizer } from "./transfer";
 import {
   AMULET_HOLDING_TEMPLATE_FQN,
   isAllocationContract,
@@ -118,7 +120,8 @@ async function submit(
   jwt: string,
   actAs: string[],
   commands: unknown[],
-  disclosed: DisclosedContract[] = []
+  disclosed: DisclosedContract[] = [],
+  commandId?: string
 ): Promise<{
   updateId: string;
   createdCids: string[];
@@ -129,7 +132,8 @@ async function submit(
   }[];
   tree: any;
 }> {
-  const commandId =
+  const cid =
+    commandId ??
     "htlc-" + Math.random().toString(16).slice(2) + Date.now().toString(16);
   const res = await fetch(
     `${NETWORK.ledgerHost}/v2/commands/submit-and-wait-for-transaction-tree`,
@@ -142,8 +146,8 @@ async function submit(
       cache: "no-store",
       body: JSON.stringify({
         applicationId: "cbtc-htlc",
-        workflowId: `htlc-${commandId}`,
-        commandId,
+        workflowId: `htlc-${cid}`,
+        commandId: cid,
         actAs,
         readAs: actAs,
         commands,
@@ -152,7 +156,12 @@ async function submit(
     }
   );
   const text = await res.text();
-  if (!res.ok) throw new Error(`submit failed (${res.status}): ${text}`);
+  if (!res.ok) {
+    if (text.includes("DUPLICATE_COMMAND")) {
+      throw new Error(`duplicate command committed: ${cid}`);
+    }
+    throw new Error(`submit failed (${res.status}): ${text}`);
+  }
   const tree = JSON.parse(text);
   const events = tree?.transactionTree?.eventsById ?? {};
   const createdCids: string[] = [];
@@ -284,13 +293,9 @@ async function allocationChoiceContext(
   };
 }
 
-/** STEP 1 — lock CBTC in an Allocation.
- *  EVM→Canton (default): solver = sender = executor (locks its own float).
- *  Canton→EVM (reverse): senderParty = the USER's hosted party (backend CanActAs
- *  signs as them — platform auto-lock); executor stays the solver so
- *  ExecuteTransfer's receiver+executor authorizers are BOTH the solver (it claims
- *  alone after the on-ledger keccak gate). */
-export async function allocate(params: {
+/** Build AllocationFactory_Allocate + disclosures without submitting (for prepare estimates). */
+export async function buildAllocatePrepare(params: {
+  senderParty: string;
   solverParty: string;
   receiverParty: string;
   amountBtc: string;
@@ -299,17 +304,16 @@ export async function allocate(params: {
   settlementId: string;
   settleBefore: Date;
   allocateBefore: Date;
-  /** transferLeg.sender + actAs party. Defaults to solverParty (forward direction). */
-  senderParty?: string;
-  /** Defaults to CBTC on this network. */
   instrumentId?: InstrumentId;
-}): Promise<{ updateId: string; allocationCid: string }> {
-  const sender = params.senderParty ?? params.solverParty;
+}): Promise<{
+  command: unknown;
+  disclosedContracts: DisclosedContract[];
+  synchronizerId: string;
+}> {
   const instrumentId = params.instrumentId ?? NETWORK.instrumentId;
   const registrarAdmin = isAmuletInstrument(instrumentId)
     ? await getDsoPartyId()
     : instrumentId.admin;
-  const jwt = await getLedgerJwt();
   const now = new Date().toISOString();
   const allocation = {
     settlement: {
@@ -322,7 +326,7 @@ export async function allocate(params: {
     },
     transferLegId: "leg-0",
     transferLeg: {
-      sender,
+      sender: params.senderParty,
       receiver: params.receiverParty,
       amount: params.amountBtc,
       instrumentId,
@@ -344,10 +348,11 @@ export async function allocate(params: {
     instrumentId,
     factoryBody
   );
-  if (!factoryRes.ok)
+  if (!factoryRes.ok) {
     throw new Error(
       `AllocationFactory failed (${factoryRes.status}): ${await factoryRes.text()}`
     );
+  }
   const factory = (await factoryRes.json()) as {
     factoryId: string;
     choiceContext: {
@@ -356,7 +361,7 @@ export async function allocate(params: {
     };
   };
 
-  const disclosed: DisclosedContract[] = [
+  const disclosedContracts: DisclosedContract[] = [
     ...factory.choiceContext.disclosedContracts.map((dc) => ({
       ...dc,
       synchronizerId: dc.synchronizerId ?? ""
@@ -370,30 +375,92 @@ export async function allocate(params: {
         synchronizerId: ""
       }))
   ];
+  let synchronizerId =
+    disclosedContracts.find((d) => d.synchronizerId)?.synchronizerId ?? "";
+  if (!synchronizerId && params.inputHoldingCids[0]) {
+    const holdingBlob = await fetchContractBlob(
+      params.inputHoldingCids[0],
+      params.senderParty
+    );
+    if (holdingBlob?.synchronizerId) {
+      synchronizerId = holdingBlob.synchronizerId;
+      for (const d of disclosedContracts) {
+        if (!d.synchronizerId) d.synchronizerId = synchronizerId;
+      }
+    }
+  }
+  if (!synchronizerId) {
+    throw new Error(
+      "buildAllocatePrepare: could not resolve synchronizerId from factory or holdings"
+    );
+  }
+
+  const command = {
+    ExerciseCommand: {
+      templateId: ALLOCATION_FACTORY_INTERFACE,
+      contractId: factory.factoryId,
+      choice: "AllocationFactory_Allocate",
+      choiceArgument: {
+        expectedAdmin: registrarAdmin,
+        allocation,
+        requestedAt: now,
+        inputHoldingCids: params.inputHoldingCids,
+        extraArgs: {
+          context: factory.choiceContext.choiceContextData,
+          meta: { values: {} }
+        }
+      }
+    }
+  };
+  return { command, disclosedContracts, synchronizerId };
+}
+
+/** STEP 1 — lock CBTC in an Allocation.
+ *  EVM→Canton (default): solver = sender = executor (locks its own float).
+ *  Canton→EVM (reverse): senderParty = the USER's hosted party (backend CanActAs
+ *  signs as them — platform auto-lock); executor stays the solver so
+ *  ExecuteTransfer's receiver+executor authorizers are BOTH the solver (it claims
+ *  alone after the on-ledger keccak gate). */
+export async function allocate(params: {
+  solverParty: string;
+  receiverParty: string;
+  amountBtc: string;
+  inputHoldings: Holding[];
+  inputHoldingCids: string[];
+  settlementId: string;
+  settleBefore: Date;
+  allocateBefore: Date;
+  /** transferLeg.sender + actAs party. Defaults to solverParty (forward direction). */
+  senderParty?: string;
+  /** Defaults to CBTC on this network. */
+  instrumentId?: InstrumentId;
+  commandId?: string;
+}): Promise<{
+  updateId: string;
+  allocationCid: string;
+}> {
+  const sender = params.senderParty ?? params.solverParty;
+  const instrumentId = params.instrumentId ?? NETWORK.instrumentId;
+  const jwt = await getLedgerJwt();
+  const built = await buildAllocatePrepare({
+    senderParty: sender,
+    solverParty: params.solverParty,
+    receiverParty: params.receiverParty,
+    amountBtc: params.amountBtc,
+    inputHoldings: params.inputHoldings,
+    inputHoldingCids: params.inputHoldingCids,
+    settlementId: params.settlementId,
+    settleBefore: params.settleBefore,
+    allocateBefore: params.allocateBefore,
+    instrumentId
+  });
 
   const { updateId, created } = await submit(
     jwt,
-    [sender], // sender authority locks the holdings (CanActAs covers hosted users)
-    [
-      {
-        ExerciseCommand: {
-          templateId: ALLOCATION_FACTORY_INTERFACE,
-          contractId: factory.factoryId,
-          choice: "AllocationFactory_Allocate",
-          choiceArgument: {
-            expectedAdmin: registrarAdmin,
-            allocation,
-            requestedAt: now,
-            inputHoldingCids: params.inputHoldingCids,
-            extraArgs: {
-              context: factory.choiceContext.choiceContextData,
-              meta: { values: {} }
-            }
-          }
-        }
-      }
-    ],
-    disclosed
+    [sender],
+    [built.command],
+    built.disclosedContracts,
+    params.commandId
   );
   const allocationCid = pickAllocationCid(created);
   if (!allocationCid) throw new Error("allocate: no Allocation created");
@@ -401,6 +468,42 @@ export async function allocate(params: {
     `${TAG} allocated ${params.amountBtc} ${instrumentId.id} → alloc ${allocationCid.slice(0, 20)}…`
   );
   return { updateId, allocationCid };
+}
+
+/** Build HtlcLock CreateCommand without submitting (for prepare / traffic measurement). */
+export function buildCreateHtlcLockCommand(params: {
+  solverParty: string;
+  receiverParty: string;
+  allocationCid: string;
+  amountBtc: string;
+  hashLock: string;
+  unlockTime: Date;
+  lockerParty?: string;
+  instrumentId?: InstrumentId;
+}): { command: unknown; actAs: string[] } {
+  const locker = params.lockerParty ?? params.solverParty;
+  const instrumentId = params.instrumentId ?? NETWORK.instrumentId;
+  const hashLock = params.hashLock.startsWith("0x")
+    ? params.hashLock.slice(2)
+    : params.hashLock;
+  return {
+    actAs: [locker],
+    command: {
+      CreateCommand: {
+        templateId: htlcTemplateId(),
+        createArguments: {
+          locker,
+          receiver: params.receiverParty,
+          executor: params.solverParty,
+          allocationCid: params.allocationCid,
+          amount: params.amountBtc,
+          instrumentId,
+          hashLock,
+          unlockTime: params.unlockTime.toISOString()
+        }
+      }
+    }
+  };
 }
 
 /** STEP 2 — wrap the Allocation in our HtlcLock (records hashLock + timelock).
@@ -417,37 +520,56 @@ export async function createHtlcLock(params: {
   lockerParty?: string;
   /** Defaults to CBTC on this network. */
   instrumentId?: InstrumentId;
-}): Promise<{ htlcCid: string; htlcBlob: string }> {
+  /** Optional CC network fee in same submit (managed reverse lock). */
+  networkFeeCc?: string;
+  commandId?: string;
+}): Promise<{
+  updateId: string;
+  htlcCid: string;
+  htlcBlob: string;
+  networkFeeCollected?: boolean;
+}> {
   const locker = params.lockerParty ?? params.solverParty;
   const instrumentId = params.instrumentId ?? NETWORK.instrumentId;
   const jwt = await getLedgerJwt();
-  const { created } = await submit(
+  const { command, actAs } = buildCreateHtlcLockCommand({
+    solverParty: params.solverParty,
+    receiverParty: params.receiverParty,
+    allocationCid: params.allocationCid,
+    amountBtc: params.amountBtc,
+    hashLock: params.hashLock,
+    unlockTime: params.unlockTime,
+    lockerParty: params.lockerParty,
+    instrumentId
+  });
+  let commands: unknown[] = [command];
+  let disclosed: DisclosedContract[] = [];
+  let networkFeeCollected = false;
+  if (params.networkFeeCc && Number.parseFloat(params.networkFeeCc) > 0) {
+    const feeLeg = await buildCcFeeTransferLeg({
+      senderParty: locker,
+      amountCc: params.networkFeeCc
+    });
+    commands = [command, feeLeg.command];
+    disclosed = [...feeLeg.disclosedContracts];
+    networkFeeCollected = true;
+  }
+  const { updateId, created } = await submit(
     jwt,
-    [locker],
-    [
-      {
-        CreateCommand: {
-          templateId: htlcTemplateId(),
-          createArguments: {
-            locker,
-            receiver: params.receiverParty,
-            executor: params.solverParty,
-            allocationCid: params.allocationCid,
-            amount: params.amountBtc,
-            instrumentId,
-            hashLock: params.hashLock.startsWith("0x")
-              ? params.hashLock.slice(2)
-              : params.hashLock,
-            unlockTime: params.unlockTime.toISOString()
-          }
-        }
-      }
-    ]
+    actAs,
+    commands,
+    disclosed,
+    params.commandId
   );
   const htlc = created.find((c) => c.templateId.includes("HtlcLock"));
   if (!htlc) throw new Error("createHtlcLock: no HtlcLock created");
   console.log(`${TAG} HtlcLock created ${htlc.contractId.slice(0, 20)}…`);
-  return { htlcCid: htlc.contractId, htlcBlob: htlc.createdEventBlob };
+  return {
+    updateId,
+    htlcCid: htlc.contractId,
+    htlcBlob: htlc.createdEventBlob,
+    networkFeeCollected: networkFeeCollected || undefined
+  };
 }
 
 /**
@@ -526,6 +648,101 @@ export async function prepareClaimCommand(params: {
   return { command, disclosedContracts: disclosed, synchronizerId: syncId };
 }
 
+/** True when the registry still serves execute-transfer for this allocation. */
+export async function allocationExecuteContextReachable(
+  allocationCid: string,
+  instrumentId?: InstrumentId
+): Promise<boolean> {
+  const r = await fetchAllocationChoiceContext(
+    allocationCid,
+    "execute-transfer",
+    instrumentId
+  );
+  return r.ok;
+}
+
+/** Live HtlcLock on ledger for prepare-based network fee probes (quote time). */
+export async function findProbeHtlcLock(
+  solverParty: string
+): Promise<{
+  htlcCid: string;
+  allocationCid: string;
+  htlcBlob: string;
+} | null> {
+  const jwt = await getLedgerJwt();
+  const endRes = await fetch(`${NETWORK.ledgerHost}/v2/state/ledger-end`, {
+    headers: { Authorization: `Bearer ${jwt}` }
+  });
+  if (!endRes.ok) return null;
+  const offset = ((await endRes.json()) as { offset: number }).offset;
+  const wildcard = {
+    cumulative: [
+      {
+        identifierFilter: {
+          WildcardFilter: { value: { includeCreatedEventBlob: true } }
+        }
+      }
+    ]
+  };
+  const r = await fetch(`${NETWORK.ledgerHost}/v2/state/active-contracts`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${jwt}`
+    },
+    body: JSON.stringify({
+      filter: { filtersByParty: { [solverParty]: wildcard } },
+      verbose: false,
+      activeAtOffset: offset
+    })
+  });
+  if (!r.ok) return null;
+  const entries = (await r.json()) as any[];
+  const candidates: {
+    htlcCid: string;
+    allocationCid: string;
+    htlcBlob: string;
+    offset: number;
+    unlockTimeMs: number | null;
+  }[] = [];
+  for (const e of entries) {
+    const ac = e?.contractEntry?.JsActiveContract;
+    const c = ac?.createdEvent;
+    const tpl = c?.templateId ?? "";
+    if (!c?.contractId || !tpl.includes("HtlcLock")) continue;
+    const args = (c.createArgument ?? {}) as { allocationCid?: string };
+    const allocationCid = args.allocationCid;
+    if (!allocationCid) continue;
+    candidates.push({
+      htlcCid: c.contractId,
+      allocationCid,
+      htlcBlob: c.createdEventBlob ?? "",
+      offset: Number(c.offset ?? 0),
+      unlockTimeMs: parseUnlockTimeMs(c.createArgument)
+    });
+  }
+  candidates.sort((a, b) => b.offset - a.offset);
+  const nowMs = Date.now();
+  for (const c of candidates) {
+    if (c.unlockTimeMs != null && c.unlockTimeMs <= nowMs) continue;
+    if (await allocationExecuteContextReachable(c.allocationCid)) {
+      return {
+        htlcCid: c.htlcCid,
+        allocationCid: c.allocationCid,
+        htlcBlob: c.htlcBlob
+      };
+    }
+  }
+  return null;
+}
+
+function parseUnlockTimeMs(createArgument: unknown): number | null {
+  const unlockTime = (createArgument as { unlockTime?: string })?.unlockTime;
+  if (!unlockTime) return null;
+  const ms = Date.parse(unlockTime);
+  return Number.isFinite(ms) ? ms : null;
+}
+
 /** Fetch a contract's createdEventBlob + templateId from the solver's ACS (for disclosure). */
 async function fetchContractBlob(
   contractId: string,
@@ -593,7 +810,11 @@ export async function claimAsReceiver(params: {
   allocationCid: string;
   preimageHex: string;
   instrumentId?: InstrumentId;
-}): Promise<{ updateId: string }> {
+  /** Optional CC network fee collected atomically with claim (managed users). */
+  networkFeeCc?: string;
+  /** Deterministic id for idempotent retries (e.g. htlc-claim-managed-{orderId}). */
+  commandId?: string;
+}): Promise<{ updateId: string; networkFeeCollected?: boolean }> {
   const jwt = await getLedgerJwt();
   const { command, disclosedContracts } = await prepareClaimCommand({
     htlcCid: params.htlcCid,
@@ -603,16 +824,38 @@ export async function claimAsReceiver(params: {
     preimageHex: params.preimageHex,
     instrumentId: params.instrumentId
   });
+  let commands: unknown[] = [command as unknown];
+  let disclosed = disclosedContracts;
+  let networkFeeCollected = false;
+
+  if (params.networkFeeCc && Number.parseFloat(params.networkFeeCc) > 0) {
+    const feeLeg = await buildCcFeeTransferLeg({
+      senderParty: params.receiverParty,
+      amountCc: params.networkFeeCc
+    });
+    const syncHint =
+      disclosedContracts.find((d) => d.synchronizerId)?.synchronizerId ??
+      feeLeg.synchronizerId;
+    assertSameSynchronizer(
+      [{ synchronizerId: syncHint }, feeLeg],
+      "claim with network fee"
+    );
+    commands = [command as unknown, feeLeg.command];
+    disclosed = [...disclosedContracts, ...feeLeg.disclosedContracts];
+    networkFeeCollected = true;
+  }
+
   const { updateId } = await submit(
     jwt,
     [params.receiverParty],
-    [command as unknown],
-    disclosedContracts
+    commands,
+    disclosed,
+    params.commandId
   );
   console.log(
     `${TAG} HtlcLock.Claim by receiver — on-ledger keccak check passed, CBTC released. update ${updateId.slice(0, 16)}…`
   );
-  return { updateId };
+  return { updateId, networkFeeCollected: networkFeeCollected || undefined };
 }
 
 // ===================== LOOP SELLERS (canton-to-evm, external wallet) =====================

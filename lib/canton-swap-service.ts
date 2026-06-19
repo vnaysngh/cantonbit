@@ -5,13 +5,25 @@ import { getSwapAsset } from "./canton-assets";
 import {
   assertOrderNotExpired,
   isLoopFillPendingCounterAccept,
+  isLoopFillInFlight,
   isOrderExpired,
   isRetriableLoopFillError,
   counterReissueCooldownElapsed,
   LOOP_USER_LEG_OFFER_TTL_SECONDS,
-  resolveCreateCantonSwapOrder
+  QUOTE_GRACE_SECONDS,
+  resolveCreateCantonSwapOrder,
+  shouldExpireForVaultMigration
 } from "./canton-swap-order-logic";
+import { QUOTE_TTL_SECONDS } from "./htlc-quote";
 import { assertSettlementQuoteFresh, assertMvpOrderAmounts, quoteMvpCantonSwap } from "./canton-swap-quote";
+import {
+  computeC2cSwapNotionalUsd,
+  estimateManagedC2cSettleFee,
+  isNetworkFeeEnabled,
+  networkFeeReceiverParty,
+  revalidateOrderNetworkFee
+} from "./canton-network-fee";
+import { recordNetworkFeeCollected } from "./network-fee-ledger";
 import {
   holdingsForSwapAsset
 } from "./canton-swap-holdings";
@@ -38,6 +50,7 @@ import type {
   CantonSwapStatus,
   CantonSwapWalletMode
 } from "./canton-swap-types";
+import { isCantonSwapActive } from "./canton-swap-types";
 import { expectedCantonSwapParty } from "./htlc-auth";
 import { swapParty } from "./canton-swap-types";
 import { NETWORK } from "./constants";
@@ -92,7 +105,7 @@ export class CantonSwapService {
       );
     }
 
-    const incoming = {
+    const baseIncoming: Omit<CantonSwapOrder, "status" | "createdAt"> = {
       id: params.orderId ?? randomUUID(),
       fromAsset: params.fromAsset,
       toAsset: params.toAsset,
@@ -105,21 +118,69 @@ export class CantonSwapService {
       settlementParty: vaultParty,
       walletMode: params.walletMode
     };
+    let incoming: Omit<CantonSwapOrder, "status" | "createdAt"> = baseIncoming;
+    if (isNetworkFeeEnabled() && params.walletMode === "managed") {
+      const notionalUsd = await computeC2cSwapNotionalUsd({
+        fromAsset: params.fromAsset,
+        inAmount: params.inAmount
+      });
+      const nf = await estimateManagedC2cSettleFee({
+        userParty: params.userParty,
+        vaultParty,
+        fromAsset: params.fromAsset,
+        toAsset: params.toAsset,
+        inAmount: params.inAmount,
+        outAmount: params.outAmount,
+        notionalUsd
+      });
+      incoming = {
+        ...baseIncoming,
+        networkFeeCc: nf.feeCc,
+        networkFeeExpiresAt: q.expiresAt
+      };
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    if (params.walletMode === "managed") {
+      // Quote/fee work happens before persist — anchor expiry from write time, not RFQ start.
+      incoming = {
+        ...incoming,
+        quoteExpiresAt: now + QUOTE_TTL_SECONDS + QUOTE_GRACE_SECONDS
+      };
+    }
+
     const existing = await this.store.get(incoming.id);
     const { order, isNew } = resolveCreateCantonSwapOrder(
       existing,
       incoming,
-      Math.floor(Date.now() / 1000)
+      now
     );
-    if (isNew) {
-      await this.assertSwapFloat(
-        incoming.solverParty,
-        incoming.toAsset,
-        incoming.outAmount
-      );
-      await this.store.put(order);
+    if (!isNew) {
+      if (!isCantonSwapActive(order)) {
+        throw new Error("order no longer active — start a new swap");
+      }
+      return order;
     }
+    await this.assertSwapFloat(
+      incoming.solverParty,
+      incoming.toAsset,
+      incoming.outAmount
+    );
+    await this.store.put(order);
     return order;
+  }
+
+  /** Managed only: create intent + vault settle in one server request (no client race window). */
+  async submitManaged(params: {
+    fromAsset: CantonSwapMvpAssetId;
+    toAsset: CantonSwapMvpAssetId;
+    inAmount: string;
+    outAmount: string;
+    userParty: string;
+    orderId?: string;
+  }): Promise<CantonSwapOrder> {
+    const order = await this.createOrder({ ...params, walletMode: "managed" });
+    return this.settleManaged(order.id);
   }
 
   private async assertSwapFloat(
@@ -204,13 +265,43 @@ export class CantonSwapService {
   }
 
   private async completeSettling(o: CantonSwapOrder): Promise<CantonSwapOrder> {
+    let feeEstimate:
+      | Awaited<ReturnType<typeof revalidateOrderNetworkFee>>
+      | undefined;
     try {
       await this.enforceSettlementQuote(o);
+      if (
+        isNetworkFeeEnabled() &&
+        o.networkFeeCc != null &&
+        o.networkFeeCc !== ""
+      ) {
+        feeEstimate = await revalidateOrderNetworkFee(o);
+        o.networkFeeCc = feeEstimate.feeCc;
+        o.networkFeeExpiresAt = o.quoteExpiresAt;
+        await this.store.put(o);
+      }
       const result = await settleManagedSwap(o);
+      if (result.networkFeeCollected && feeEstimate) {
+        await recordNetworkFeeCollected({
+          orderId: o.id,
+          orderKind: "c2c",
+          userParty: o.userParty,
+          feeCc: result.networkFeeCollected.feeCc,
+          feeUsd: feeEstimate.feeUsd,
+          trafficBytes: feeEstimate.trafficBytes,
+          networkFeeSource: feeEstimate.networkFeeSource,
+          receiverParty: networkFeeReceiverParty(),
+          settlementUpdateId: result.updateId
+        });
+      }
       this.applyManagedFillResult(o, result);
       if (!(await this.transition(o, "settling"))) {
         const fresh = await this.must(o.id);
         if (fresh.status === "filled") return fresh;
+        if (o.status === "filled") {
+          await this.store.put(o);
+          return o;
+        }
       }
       return o;
     } catch (e) {
@@ -646,11 +737,7 @@ export class CantonSwapService {
     for (const status of ["open", "user_locked", "settling", "filling"] as const) {
       const orders = await this.store.byStatus(status);
       for (const o of orders) {
-        if (
-          vaultParty &&
-          swapParty(o) !== vaultParty &&
-          o.status !== "filled"
-        ) {
+        if (shouldExpireForVaultMigration(o, vaultParty, now)) {
           try {
             if (
               o.walletMode === "loop" &&
@@ -674,9 +761,25 @@ export class CantonSwapService {
           continue;
         }
         if (isLoopFillPendingCounterAccept(o)) continue;
+        if (isLoopFillInFlight(o)) continue;
         if (!isOrderExpired(o, now)) continue;
 
         const priorStatus = o.status;
+
+        if (
+          o.walletMode === "managed" &&
+          (priorStatus === "open" || priorStatus === "settling")
+        ) {
+          try {
+            const repaired = await this.repairManagedFromLedger(o);
+            if (repaired?.status === "filled") {
+              n++;
+              continue;
+            }
+          } catch {
+            // fall through to expire
+          }
+        }
 
         if (
           priorStatus === "filling" &&
@@ -742,11 +845,35 @@ export class CantonSwapService {
     return o;
   }
 
+  /** Repair managed rows when ledger fill committed but DB stuck (expired/settling/failed/open). */
+  async reconcileExpiredManaged(): Promise<number> {
+    let n = 0;
+    for (const status of ["expired", "open", "settling", "failed"] as const) {
+      const orders = await this.store.byStatus(status);
+      for (const o of orders) {
+        if (o.walletMode !== "managed") continue;
+        try {
+          const repaired = await this.repairManagedFromLedger(o);
+          if (repaired?.status === "filled") n++;
+        } catch {
+          // leave for next tick
+        }
+      }
+    }
+    return n;
+  }
+
   async history(party: string, limit = 50): Promise<CantonSwapOrder[]> {
     const orders = await this.store.byParty(party, limit);
     const out: CantonSwapOrder[] = [];
     for (const o of orders) {
-      if (o.walletMode === "managed" && o.status === "failed") {
+      if (
+        o.walletMode === "managed" &&
+        (o.status === "failed" ||
+          o.status === "expired" ||
+          o.status === "settling" ||
+          o.status === "open")
+      ) {
         const repaired = await this.repairManagedFromLedger(o);
         out.push(repaired ?? o);
       } else {

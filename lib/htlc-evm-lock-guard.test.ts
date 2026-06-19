@@ -9,12 +9,17 @@ import {
 const SOLVER = "0x0b95ec21579aee6ef7b712976bd86689d68b5a08";
 const NOW = 1_700_000_000;
 
-const req = { wbtcAmount: "100000", solverEvmAddress: SOLVER };
+const req = {
+  wbtcAmount: "100000",
+  solverEvmAddress: SOLVER,
+  expectedWbtcAddress: "0x8d587e55236d1d4898e85711f709e53e657413ee",
+};
 
-function safeLock(over: Partial<{ unlockTime: number; amount: bigint; receiver: string }> = {}) {
+function safeLock(over: Partial<{ unlockTime: number; amount: bigint; tokenAddress: string; receiver: string }> = {}) {
   return {
     unlockTime: NOW + EVM_CLAIM_MARGIN_SECONDS + 60,
     amount: 100_000n,
+    tokenAddress: "0x8d587e55236d1d4898e85711f709e53e657413ee",
     receiver: SOLVER,
     ...over,
   };
@@ -63,5 +68,17 @@ test("assertEvmLockSafeForReveal rejects wrong receiver", () => {
         NOW,
       ),
     /receiver is not the solver/,
+  );
+});
+
+test("assertEvmLockSafeForReveal rejects non-WBTC token", () => {
+  assert.throws(
+    () =>
+      assertEvmLockSafeForReveal(
+        safeLock({ tokenAddress: "0x0000000000000000000000000000000000000001" }),
+        req,
+        NOW,
+      ),
+    /not canonical WBTC/,
   );
 });

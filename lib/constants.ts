@@ -168,3 +168,9 @@ export const MIN_CC_TO_ENABLE = 2;
 /** Platform swap fee in basis points (100 = 1% on quoted output). Override server-side
  *  with PLATFORM_FEE_BPS; UI estimate with NEXT_PUBLIC_FEE_BPS. Legacy solver: SOLVER_FEE_BPS. */
 export const DEFAULT_PLATFORM_FEE_BPS = 100;
+
+/** Client-side mirror of NETWORK_FEE_ENABLED (display-only UI gate). */
+export function isNetworkFeeUiEnabled(): boolean {
+  const raw = process.env.NEXT_PUBLIC_NETWORK_FEE_ENABLED?.trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "yes";
+}

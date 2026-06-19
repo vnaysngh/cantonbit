@@ -99,6 +99,11 @@ async function fetchBtcUsdLive(): Promise<number> {
   throw new Error(errors.join("; "));
 }
 
+/** BTC/USD reference for notional guards (network fee, optional sanity). */
+export async function fetchBtcUsdReference(): Promise<number> {
+  return fetchBtcUsd();
+}
+
 async function fetchBtcUsd(): Promise<number> {
   const now = Date.now();
   if (btcUsdCache && now - btcUsdCache.at < BTC_CACHE_FRESH_MS) {

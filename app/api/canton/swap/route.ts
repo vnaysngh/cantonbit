@@ -6,7 +6,7 @@ import { NextResponse } from "next/server";
 import { cantonSwapService } from "@/lib/canton-swap-service";
 import type { CantonSwapMvpAssetId, CantonSwapWalletMode } from "@/lib/canton-swap-types";
 import {
-  expectedSolverCanton,
+  expectedCantonSwapParty,
   isParticipantManagedParty,
   requirePartyOwner
 } from "@/lib/htlc-auth";
@@ -65,7 +65,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json({
       order,
-      solverParty: expectedSolverCanton()
+      solverParty: expectedCantonSwapParty()
     });
   } catch (e) {
     if (e instanceof CantonQuoteUnavailableError) {

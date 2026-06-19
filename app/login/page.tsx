@@ -125,7 +125,8 @@ function LoginPageContent() {
     setGoogleBusy(true);
     setGoogleError(null);
 
-    const redirectTo = `${window.location.origin}/auth/callback?next=${encodeURIComponent("/swap")}`;
+    // Must match Supabase Redirect URLs exactly — no query string (callback defaults next=/swap).
+    const redirectTo = `${window.location.origin}/auth/callback`;
     const { error } = await createSupabaseBrowserClient().auth.signInWithOAuth({
       provider: "google",
       options: { redirectTo }
