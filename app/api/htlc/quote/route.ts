@@ -2,7 +2,11 @@
  * POST /api/htlc/quote — RFQ-style quote for cross-chain WBTC↔CBTC swaps.
  */
 import { NextResponse } from "next/server";
-import { requirePartyOwner } from "@/lib/htlc-auth";
+import {
+  authorizeQuoteParty,
+  expectedSettlementParty,
+  isParticipantManagedParty
+} from "@/lib/htlc-auth";
 import {
   quoteWbtcToCbtc,
   quoteCbtcToWbtc,
@@ -13,13 +17,14 @@ import {
 import { NETWORK } from "@/lib/constants";
 import {
   computeHtlcSwapNotionalUsd,
+  estimateHtlcLoopFee,
   estimateHtlcManagedFee,
   estimateToQuoteFields,
   logNetworkFeeEstimate,
   measureAndLogSolverCounterLockTraffic,
+  NetworkFeePrepareError,
   shouldQuoteNetworkFee
 } from "@/lib/canton-network-fee";
-import { expectedSettlementParty } from "@/lib/htlc-auth";
 
 export async function POST(req: Request) {
   try {
@@ -34,7 +39,7 @@ export async function POST(req: Request) {
         { status: 400 }
       );
     }
-    const partyAuth = await requirePartyOwner(String(cantonParty));
+    const partyAuth = await authorizeQuoteParty(String(cantonParty));
     if (partyAuth.error) return partyAuth.error;
     const inUnits = BigInt(inRaw);
     if (inUnits <= 0n) {
@@ -53,36 +58,58 @@ export async function POST(req: Request) {
       networkFeeSource: "disabled"
     });
     const managedQuote = body.counterMode === "managed";
-    if (shouldQuoteNetworkFee() && managedQuote) {
+    const cbtcDec = (Number(reverse ? q.inUnits : q.outUnits) / 1e8).toFixed(8);
+
+    if (shouldQuoteNetworkFee()) {
       try {
-        const action = reverse ? "htlc-lock" : "htlc-claim";
-        const cbtcUnits = reverse ? q.inUnits : q.outUnits;
-        const cbtcDec = (Number(cbtcUnits) / 1e8).toFixed(8);
-        const notionalUsd = await computeHtlcSwapNotionalUsd(cbtcDec);
-        const vaultParty = expectedSettlementParty();
-        if (!vaultParty) {
-          throw new Error("CANTON_SWAP_SETTLEMENT_PARTY not configured");
-        }
-        const nf = await estimateHtlcManagedFee({
-          action,
-          userParty: String(cantonParty),
-          solverParty: vaultParty,
-          cbtcAmount: cbtcDec,
-          notionalUsd
-        });
-        logNetworkFeeEstimate(`htlc-quote ${action}`, nf);
-        networkFeeFields = estimateToQuoteFields(nf);
-        if (!reverse) {
-          void measureAndLogSolverCounterLockTraffic({
-            context: "htlc-quote-projection",
-            solverParty: vaultParty,
+        if (managedQuote) {
+          const action = reverse ? "htlc-lock" : "htlc-claim";
+          const notionalUsd = await computeHtlcSwapNotionalUsd(cbtcDec);
+          const vaultParty = expectedSettlementParty();
+          if (!vaultParty) {
+            throw new Error("CANTON_SWAP_SETTLEMENT_PARTY not configured");
+          }
+          const nf = await estimateHtlcManagedFee({
+            action,
             userParty: String(cantonParty),
-            cbtcAmount: cbtcDec
+            solverParty: vaultParty,
+            cbtcAmount: cbtcDec,
+            notionalUsd
           });
+          logNetworkFeeEstimate(`htlc-quote ${action}`, nf);
+          networkFeeFields = estimateToQuoteFields(nf);
+          if (!reverse) {
+            void measureAndLogSolverCounterLockTraffic({
+              context: "htlc-quote-projection",
+              solverParty: vaultParty,
+              userParty: String(cantonParty),
+              cbtcAmount: cbtcDec
+            });
+          }
+        } else if (!(await isParticipantManagedParty(String(cantonParty)))) {
+          if (!reverse) {
+            const notionalUsd = await computeHtlcSwapNotionalUsd(cbtcDec);
+            const nf = await estimateHtlcLoopFee({
+              action: "htlc-loop-claim",
+              userParty: String(cantonParty),
+              cbtcAmount: cbtcDec,
+              notionalUsd
+            });
+            logNetworkFeeEstimate("htlc-quote htlc-loop-claim", nf);
+            networkFeeFields = estimateToQuoteFields(nf);
+          }
         }
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        console.warn("[htlc-quote] network fee prepare failed — quote still returned:", msg);
+        if (shouldQuoteNetworkFee()) {
+          if (e instanceof NetworkFeePrepareError) {
+            return NextResponse.json({ error: e.userMessage }, { status: 400 });
+          }
+          throw e;
+        }
+        console.warn(
+          "[htlc-quote] network fee estimate failed — quote still returned:",
+          e instanceof Error ? e.message : e
+        );
       }
     }
 
@@ -104,7 +131,8 @@ export async function POST(req: Request) {
       bridgeFeeBps: q.feeBps,
       instrument: NETWORK.instrumentId,
       networkFeeExpiresAt:
-        shouldQuoteNetworkFee() && managedQuote
+        shouldQuoteNetworkFee() &&
+        networkFeeFields.networkFeeSource !== "disabled"
           ? Math.floor(Date.now() / 1000) + QUOTE_TTL_SECONDS
           : undefined,
       ...networkFeeFields

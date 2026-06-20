@@ -66,17 +66,30 @@ export async function readLoopCbtcBalance(
   return readLoopInstrumentBalance(provider, NETWORK.instrumentId);
 }
 
-/** CC (Amulet) total from the Loop wallet aggregate — 10 dp CC precision. */
+/** CC (Amulet) spendable balance — unlocked only (matches Loop dashboard). */
 export async function readLoopCcBalance(provider: ProviderLike): Promise<string> {
   const all = (await provider.getHolding()) as unknown as LoopHolding[];
   const amulets = all.filter((h) => h.instrument_id?.id === "Amulet");
   if (amulets.length === 0) return fromBaseUnits(0n, CC_ASSET.decimals);
-  let total = 0n;
+  let unlocked = 0n;
   for (const h of amulets) {
-    total += toBaseUnitsFloor(h.total_unlocked_coin ?? "0", CC_ASSET.decimals);
-    total += toBaseUnitsFloor(h.total_locked_coin ?? "0", CC_ASSET.decimals);
+    unlocked += toBaseUnitsFloor(h.total_unlocked_coin ?? "0", CC_ASSET.decimals);
   }
-  return fromBaseUnits(total, CC_ASSET.decimals);
+  return fromBaseUnits(unlocked, CC_ASSET.decimals);
+}
+
+/** Locked CC (pending offers / in-flight transfers) — informational only. */
+export async function readLoopCcLockedBalance(
+  provider: ProviderLike
+): Promise<string> {
+  const all = (await provider.getHolding()) as unknown as LoopHolding[];
+  const amulets = all.filter((h) => h.instrument_id?.id === "Amulet");
+  if (amulets.length === 0) return fromBaseUnits(0n, CC_ASSET.decimals);
+  let locked = 0n;
+  for (const h of amulets) {
+    locked += toBaseUnitsFloor(h.total_locked_coin ?? "0", CC_ASSET.decimals);
+  }
+  return fromBaseUnits(locked, CC_ASSET.decimals);
 }
 
 /** LOOP SELLER: the user's individual UNLOCKED CBTC holding contract-ids, read
@@ -168,6 +181,14 @@ export async function listLoopCbtcHoldingCids(
   provider: Pick<ProviderLike, "getActiveContracts">
 ): Promise<string[]> {
   return listLoopInstrumentHoldingCids(provider, NETWORK.instrumentId);
+}
+
+/** CC (Amulet) holding cids from the Loop wallet — for network-fee submits. */
+export async function listLoopCcHoldingCids(
+  provider: Pick<ProviderLike, "getActiveContracts">
+): Promise<string[]> {
+  // Amulet matches on id only — DSO admin is not needed for Loop wallet ACS reads.
+  return listLoopInstrumentHoldingCids(provider, CC_ASSET.instrumentId);
 }
 
 /** Sum decimal BTC strings via integer sats (no float drift, 8dp). */

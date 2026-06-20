@@ -27,21 +27,10 @@ export interface SwapOrder {
   cbtcAmount?: string;
   solverTimelock: number;
   mainLockTx?: string;
-  /** canton-to-evm: solver WBTC lock on EVM. */
+  /** canton-to-evm: the SOLVER's EVM WBTC lock tx (the counter leg). */
   counterLockTx?: string;
-  /**
-   * Canton claim update id.
-   * - evm-to-canton: user's CBTC claim (claim-managed / Loop).
-   * - canton-to-evm: solver CBTC claim (claim-main) after user reveals on EVM.
-   */
   counterClaimUpdateId?: string;
   revealedPreimage?: `0x${string}`;
-  /**
-   * EVM WBTC claim tx hash.
-   * - evm-to-canton: solver claims WBTC after user reveals (main-claim).
-   * - canton-to-evm: user claims WBTC in MetaMask (claim-record); may be
-   *   "already-claimed" on forward solver path only.
-   */
   mainClaimTx?: string;
   createdAt: number;
   counterMode?: "managed" | "loop";

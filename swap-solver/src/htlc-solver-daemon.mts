@@ -99,8 +99,30 @@ interface Order {
   revealedPreimage?: Hex;
   mainClaimTx?: string;
   direction?: string;
+  counterMode?: string;
   solverTimelock?: number;
   counterLockTx?: string;
+}
+
+/** Forward fills and EVM claims first — reverse watchtower log scans are slow. */
+function daemonPriority(o: Order): number {
+  if (o.direction === "evm-to-canton") {
+    if (o.status === "main_locked") return 0;
+    if (o.status === "counter_claimed") return 1;
+    return 8;
+  }
+  if (o.direction === "canton-to-evm") {
+    if (o.status === "main_locked") return 2;
+    if (o.status === "counter_locked" || o.status === "counter_claimed")
+      return 6;
+  }
+  return 9;
+}
+
+function sortDaemonOrders(orders: Order[]): Order[] {
+  return [...orders].sort(
+    (a, b) => daemonPriority(a) - daemonPriority(b) || a.id.localeCompare(b.id)
+  );
 }
 
 const ERC20_ABI = [
@@ -207,38 +229,38 @@ async function main() {
   // Track which orders we've acted on (avoid double-submits).
   const lockedCounter = new Set<string>();
   const claimedMain = new Set<string>();
+  const watchtowerLastScan = new Map<string, number>();
+  const WATCHTOWER_MIN_MS = Number(process.env.HTLC_WATCHTOWER_MIN_MS ?? 30_000);
   let lastSweep = 0;
 
   for (;;) {
     try {
-      // AUTO-REFUND sweep (Cancore parity) — periodically refund counter-locked
-      // swaps past their Canton timelock, freeing the solver's CBTC. Every ~60s.
+      // AUTO-REFUND sweep — fire-and-forget so a slow expire sweep never blocks fills.
       const nowMs = Date.now();
       if (nowMs - lastSweep > 60_000) {
         lastSweep = nowMs;
-        try {
-          const r = (await jpost("/api/htlc/auto-refund")) as {
-            due?: number;
-            refunded?: number;
-          };
-          if (r.due && r.due > 0)
-            console.log(
-              `[solver] auto-refund swept ${r.refunded}/${r.due} expired swaps`
+        void jpost("/api/htlc/auto-refund")
+          .then((r) => {
+            const body = r as { due?: number; refunded?: number };
+            if (body.due && body.due > 0)
+              console.log(
+                `[solver] auto-refund swept ${body.refunded}/${body.due} expired swaps`
+              );
+          })
+          .catch((e) => {
+            console.error(
+              "[solver] auto-refund error:",
+              e instanceof Error ? e.message : e
             );
-        } catch (e) {
-          console.error(
-            "[solver] auto-refund error:",
-            e instanceof Error ? e.message : e
-          );
-        }
+          });
       }
       // The API has no list endpoint yet; the daemon learns order ids from a
       // shared ids feed. We poll the known-active set via /api/htlc/active.
-      const { orders } = (await jget("/api/htlc/active")) as {
+      const { orders: rawOrders } = (await jget("/api/htlc/active")) as {
         orders: Order[];
       };
-
-      for (const o of orders ?? []) {
+      const orders = sortDaemonOrders(rawOrders ?? []);
+      for (const o of orders) {
         try {
         // ================= REVERSE (canton-to-evm) =================
         // Main leg = user's CBTC (locked by our backend, LONG timelock); counter
@@ -396,6 +418,9 @@ async function main() {
                 }
                 continue;
               }
+              const lastScan = watchtowerLastScan.get(o.id) ?? 0;
+              if (Date.now() - lastScan < WATCHTOWER_MIN_MS) continue;
+              watchtowerLastScan.set(o.id, Date.now());
               // Lock is gone → the user claimed. Find the Claimed event → preimage.
               // Public RPC caps eth_getLogs at 2000 blocks → scan in chunks from the
               // counter-lock tx's block (the claim can only be after the lock).

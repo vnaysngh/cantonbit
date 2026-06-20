@@ -4,6 +4,13 @@ import { createSupabaseServiceClient } from "./supabase/server";
 
 const TABLE = "network_fee_ledger";
 
+export class NetworkFeeLedgerLookupError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NetworkFeeLedgerLookupError";
+  }
+}
+
 export interface NetworkFeeLedgerEntry {
   orderId: string;
   orderKind: "c2c" | "htlc";
@@ -36,6 +43,24 @@ export async function recordNetworkFeeCollected(
     { onConflict: "order_id,order_kind", ignoreDuplicates: false }
   );
   if (error && !error.message.includes("duplicate")) {
-    console.warn(`[network-fee-ledger] upsert failed: ${error.message}`);
+    throw new Error(`network fee ledger upsert failed: ${error.message}`);
   }
+}
+
+export async function hasNetworkFeeLedgerEntry(
+  orderId: string,
+  orderKind: "c2c" | "htlc"
+): Promise<boolean> {
+  const sb = await createSupabaseServiceClient();
+  const { data, error } = await sb
+    .from(TABLE)
+    .select("order_id")
+    .eq("order_id", orderId)
+    .eq("order_kind", orderKind)
+    .maybeSingle();
+  if (error) {
+    console.warn(`[network-fee-ledger] lookup failed: ${error.message}`);
+    throw new NetworkFeeLedgerLookupError(error.message);
+  }
+  return !!data;
 }

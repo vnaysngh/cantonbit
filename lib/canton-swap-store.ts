@@ -88,6 +88,9 @@ function orderToRow(o: CantonSwapOrder): Record<string, unknown> {
     network_fee_expires_at: o.networkFeeExpiresAt
       ? new Date(o.networkFeeExpiresAt * 1000).toISOString()
       : null,
+    ...(o.createdAt > 0
+      ? { created_at: new Date(o.createdAt * 1000).toISOString() }
+      : {}),
     updated_at: new Date().toISOString()
   };
 }

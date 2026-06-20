@@ -11,6 +11,7 @@ import {
   encodeClaim,
   encodeRetake
 } from "./htlc-evm-encode";
+import { payLoopHtlcNetworkFeeIfNeeded } from "./loop-htlc-fee-client";
 
 export interface HtlcOrderInput {
   id: string;
@@ -74,19 +75,6 @@ async function jget(url: string) {
   return j;
 }
 
-/** Coalesce concurrent GETs to the same URL (poll loops + claim UI). */
-const inflightGet = new Map<string, Promise<unknown>>();
-function jgetDeduped(url: string): Promise<unknown> {
-  let pending = inflightGet.get(url);
-  if (!pending) {
-    pending = jget(url).finally(() => {
-      inflightGet.delete(url);
-    });
-    inflightGet.set(url, pending);
-  }
-  return pending;
-}
-
 /** Merge swap history when session party and Loop party differ (dual-login users). */
 export async function fetchMergedSwapHistory(opts: {
   sessionAuthed: boolean;
@@ -143,8 +131,7 @@ export const htlcApi = {
       cantonParty,
       direction: "canton-to-evm"
     }),
-  getOrder: (id: string) =>
-    jgetDeduped(`/api/htlc/${id}`) as Promise<{ order: unknown }>,
+  getOrder: (id: string) => jget(`/api/htlc/${id}`),
   accept: (id: string) => jpost(`/api/htlc/${id}/accept`),
   recordMainLock: (id: string, mainLockTx: string) =>
     jpost(`/api/htlc/${id}/main-lock`, { mainLockTx }),
@@ -161,6 +148,26 @@ export const htlcApi = {
     disclosedContracts: unknown[];
     synchronizerId: string;
   }> => jpost(`/api/htlc/${id}/prepare-lock-loop`, { holdingCids }),
+  /** Loop forward — fee-only CC submit before claim-counter. */
+  prepareNetworkFee: (
+    id: string,
+    ccHoldingCids: string[]
+  ): Promise<{
+    command: unknown;
+    disclosedContracts: unknown[];
+    synchronizerId: string;
+  }> => jpost(`/api/htlc/${id}/prepare-network-fee`, { ccHoldingCids }),
+  /** Loop reverse — fee-only CC submit before user→venue CBTC lock. */
+  prepareSellerNetworkFee: (
+    id: string,
+    ccHoldingCids: string[]
+  ): Promise<{
+    command: unknown;
+    disclosedContracts: unknown[];
+    synchronizerId: string;
+  }> => jpost(`/api/htlc/${id}/prepare-seller-network-fee`, { ccHoldingCids }),
+  recordNetworkFee: (id: string, settlementUpdateId: string) =>
+    jpost(`/api/htlc/${id}/record-network-fee`, { settlementUpdateId }),
   confirmLockLoop: (id: string) => jpost(`/api/htlc/${id}/confirm-lock-loop`),
   prepareWithdrawLoop: (
     id: string
@@ -342,7 +349,18 @@ export async function claimSwap(opts: {
     await htlcApi.claimManaged(order.id, preimage);
     return {};
   }
-  // loop buyer: reveal-first → deliver (auto-accept) or sign a standard accept.
+  // loop buyer: fee → reveal-first → deliver (auto-accept) or sign a standard accept.
+  const loop = opts.loop;
+  if (!loop) throw new Error("Connect your Loop wallet to accept your CBTC.");
+  const { order: feeOrder } = await htlcApi.getOrder(order.id);
+  await payLoopHtlcNetworkFeeIfNeeded({
+    orderId: order.id,
+    direction: "evm-to-canton",
+    provider: loop,
+    networkFeeCollected: (
+      feeOrder as { networkFeeCollected?: boolean } | undefined
+    )?.networkFeeCollected
+  });
   const reveal = await htlcApi.claimCounter(order.id, preimage);
   if (reveal.delivered) {
     await htlcApi
@@ -350,8 +368,6 @@ export async function claimSwap(opts: {
       .catch(() => {});
     return {};
   }
-  const loop = opts.loop;
-  if (!loop) throw new Error("Connect your Loop wallet to accept your CBTC.");
   const { command, disclosedContracts, synchronizerId } =
     await htlcApi.prepareAccept(order.id);
   const userParty = loop.party_id ?? "";

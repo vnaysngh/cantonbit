@@ -22,7 +22,19 @@ test("swapWaitPrimaryLabel escalates after extended threshold", () => {
   );
   assert.equal(
     swapWaitPrimaryLabel({ elapsedSec: 10, mode: "locking" }),
-    "Locking CBTC…"
+    "Sign in Loop wallet…"
+  );
+  assert.equal(
+    swapWaitPrimaryLabel({ elapsedSec: 10, mode: "solver", reverse: true }),
+    "Locking WBTC on chain…"
+  );
+  assert.equal(
+    swapWaitPrimaryLabel({
+      elapsedSec: 10,
+      mode: "solver",
+      forwardManaged: true
+    }),
+    "Locking CBTC on Canton…"
   );
 });
 

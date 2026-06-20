@@ -56,14 +56,13 @@ const POLL_INTERVAL_MS = 30_000;
  *    to show 0.
  */
 export function useBalance(): BalanceState {
-  const { isManaged, isLoop, party: identityParty, ready: identityReady } =
+  const { isManaged, party: identityParty, ready: identityReady } =
     useCantonIdentity();
   const { provider, connected, party: loopParty } = useLoopWallet();
 
-  // Match /swap: email (participant-managed) always uses the session party via
-  // server-side ledger reads — even if Loop auto-reconnected in the background.
-  const useLoopPath =
-    !isManaged && isLoop && connected && !!provider;
+  // Match /swap: use Loop SDK when the wallet is connected; only fall back to the
+  // server ledger read for participant-managed (email) users with no Loop provider.
+  const useLoopPath = connected && !!provider && !isManaged;
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: balanceQueryKey(

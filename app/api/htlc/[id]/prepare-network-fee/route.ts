@@ -1,7 +1,6 @@
 /**
- * POST /api/htlc/{id}/prepare-accept — build the LOOP user's standard
- * TransferInstruction_Accept command, optionally batched with CC network fee.
- * Body: { ccHoldingCids? } for network fee leg when NETWORK_FEE_ENABLED.
+ * POST /api/htlc/{id}/prepare-network-fee — Loop forward fee-only CC submit.
+ * Call BEFORE claim-counter (fee-before-deliver gate). Body: { ccHoldingCids }.
  */
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
@@ -19,7 +18,13 @@ export async function POST(
     const ccHoldingCids = Array.isArray(body.ccHoldingCids)
       ? (body.ccHoldingCids as string[])
       : undefined;
-    const out = await htlcService().prepareLoopAcceptWithFee(id, ccHoldingCids);
+    if (!ccHoldingCids?.length) {
+      return NextResponse.json(
+        { error: "missing ccHoldingCids — read CC holdings from Loop wallet" },
+        { status: 400 }
+      );
+    }
+    const out = await htlcService().prepareLoopNetworkFee(id, ccHoldingCids);
     return NextResponse.json(out);
   } catch (e) {
     return NextResponse.json(

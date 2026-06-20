@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
-import { isSwapClaimable, filterHistoryOrders, isAbandonedSwapDraft, resolveCreateOrder, isEvmTxHash, htlcUserWbtcClaimTx, htlcSolverWbtcClaimTx, htlcCantonClaimUpdateId } from "./htlc-order-logic";
+import { isSwapClaimable, filterHistoryOrders, isAbandonedSwapDraft, resolveCreateOrder, shouldPollOrderOnOrdersPage, htlcUserWbtcClaimTx } from "./htlc-order-logic";
 import type { SwapOrder } from "./htlc-types";
 
 const base = {
@@ -57,6 +57,57 @@ test("filterHistoryOrders: drops abandoned drafts and foreign EVM wallets", () =
   assert.equal(filterHistoryOrders(orders, { userEvmAddress: "0xaaa" }).length, 1);
 });
 
+test("filterHistoryOrders: drops smoke automation orders", () => {
+  const orders = [
+    {
+      id: "smoke-loop-rev-abc",
+      direction: "canton-to-evm" as const,
+      status: "main_locked" as const,
+      mainLockTx: "0xlock",
+      userEvmAddress: "0xaaa",
+    },
+    {
+      id: "0x" + "ab".repeat(32),
+      direction: "canton-to-evm" as const,
+      status: "main_locked" as const,
+      mainLockTx: "0xlock",
+      userEvmAddress: "0xaaa",
+    },
+  ];
+  assert.equal(filterHistoryOrders(orders).length, 1);
+  assert.equal(filterHistoryOrders(orders)[0]?.id, orders[1]?.id);
+});
+
+test("shouldPollOrderOnOrdersPage skips canton-swap open intents", () => {
+  assert.equal(
+    shouldPollOrderOnOrdersPage({
+      id: "abc",
+      direction: "canton-swap",
+      status: "open"
+    }),
+    false
+  );
+  assert.equal(
+    shouldPollOrderOnOrdersPage({
+      id: "abc",
+      direction: "canton-swap",
+      status: "user_locked"
+    }),
+    true
+  );
+});
+
+test("shouldPollOrderOnOrdersPage skips abandoned HTLC drafts", () => {
+  assert.equal(
+    shouldPollOrderOnOrdersPage({
+      id: "0xabc",
+      direction: "evm-to-canton",
+      status: "accepted"
+    }),
+    false
+  );
+});
+
 test("filterHistoryOrders: hides other EVM wallets when filter is set", () => {
   const orders = [
     {
@@ -78,12 +129,36 @@ test("filterHistoryOrders: hides other EVM wallets when filter is set", () => {
   );
 });
 
+test("htlcUserWbtcClaimTx: reverse prefers mainClaimTx", () => {
+  const tx = "0x" + "ab".repeat(32);
+  assert.equal(
+    htlcUserWbtcClaimTx({
+      direction: "canton-to-evm",
+      mainClaimTx: tx,
+      counterClaimUpdateId: "0x" + "cd".repeat(32)
+    }),
+    tx
+  );
+});
+
+test("htlcUserWbtcClaimTx: reverse legacy counterClaimUpdateId", () => {
+  const tx = "0x" + "cd".repeat(32);
+  assert.equal(
+    htlcUserWbtcClaimTx({
+      direction: "canton-to-evm",
+      mainClaimTx: undefined,
+      counterClaimUpdateId: tx
+    }),
+    tx
+  );
+});
+
 test("resolveCreateOrder rejects id owned by another party", () => {
   const existing: SwapOrder = {
     id: "0xhash",
     direction: "evm-to-canton",
     status: "open",
-    hashLock: ("0x" + "ab".repeat(32)) as `0x${string}`,
+    hashLock: "0x" + "ab".repeat(32),
     userTimelock: 9999,
     userCantonParty: "user::1",
     solverCantonParty: "solver::1",
@@ -97,69 +172,5 @@ test("resolveCreateOrder rejects id owned by another party", () => {
   assert.throws(
     () => resolveCreateOrder(existing, incoming, 200),
     /another party/
-  );
-});
-
-const evmTx = ("0x" + "cd".repeat(32)) as `0x${string}`;
-const cantonUpdate = "1220deadbeef";
-
-test("isEvmTxHash accepts 32-byte hex", () => {
-  assert.equal(isEvmTxHash(evmTx), true);
-  assert.equal(isEvmTxHash(cantonUpdate), false);
-});
-
-test("htlcUserWbtcClaimTx: reverse reads mainClaimTx or legacy counter field", () => {
-  assert.equal(
-    htlcUserWbtcClaimTx({
-      direction: "canton-to-evm",
-      mainClaimTx: evmTx
-    }),
-    evmTx
-  );
-  assert.equal(
-    htlcUserWbtcClaimTx({
-      direction: "canton-to-evm",
-      counterClaimUpdateId: evmTx
-    }),
-    evmTx
-  );
-  assert.equal(
-    htlcUserWbtcClaimTx({ direction: "evm-to-canton", mainClaimTx: evmTx }),
-    undefined
-  );
-});
-
-test("htlcSolverWbtcClaimTx: forward only", () => {
-  assert.equal(
-    htlcSolverWbtcClaimTx({ direction: "evm-to-canton", mainClaimTx: evmTx }),
-    evmTx
-  );
-  assert.equal(
-    htlcSolverWbtcClaimTx({ direction: "canton-to-evm", mainClaimTx: evmTx }),
-    undefined
-  );
-});
-
-test("htlcCantonClaimUpdateId: filters mis-filed EVM hash on reverse", () => {
-  assert.equal(
-    htlcCantonClaimUpdateId({
-      direction: "canton-to-evm",
-      counterClaimUpdateId: evmTx
-    }),
-    undefined
-  );
-  assert.equal(
-    htlcCantonClaimUpdateId({
-      direction: "canton-to-evm",
-      counterClaimUpdateId: cantonUpdate
-    }),
-    cantonUpdate
-  );
-  assert.equal(
-    htlcCantonClaimUpdateId({
-      direction: "evm-to-canton",
-      counterClaimUpdateId: cantonUpdate
-    }),
-    cantonUpdate
   );
 });

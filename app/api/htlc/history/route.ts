@@ -8,6 +8,7 @@
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
 import { filterHistoryOrders } from "@/lib/htlc-order-logic";
+import { hasNetworkFeeLedgerEntry, NetworkFeeLedgerLookupError } from "@/lib/network-fee-ledger";
 import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
 import { requirePartyOwner } from "@/lib/htlc-auth";
 
@@ -31,9 +32,27 @@ export async function GET(req: Request) {
       }
     }
     if (!party) return NextResponse.json({ orders: [] });
-    const orders = filterHistoryOrders(await htlcService().historyForParty(party), {
+    const raw = filterHistoryOrders(await htlcService().historyForParty(party), {
       userEvmAddress: userEvm,
     });
+    const orders = await Promise.all(
+      raw.map(async (o) => {
+        if (!o.networkFeeCc || Number.parseFloat(o.networkFeeCc) <= 0) {
+          return o;
+        }
+        let networkFeeCollected: boolean | undefined;
+        try {
+          networkFeeCollected = await hasNetworkFeeLedgerEntry(o.id, "htlc");
+        } catch (e) {
+          if (!(e instanceof NetworkFeeLedgerLookupError)) throw e;
+          networkFeeCollected = undefined;
+        }
+        return {
+          ...o,
+          ...(networkFeeCollected !== undefined ? { networkFeeCollected } : {})
+        };
+      })
+    );
     return NextResponse.json({ orders });
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 });

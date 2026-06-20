@@ -23,12 +23,13 @@ export async function POST(
 ) {
   try {
     const { id } = await ctx.params;
-    const order = await cantonSwapService().must(id);
+    let order = await cantonSwapService().must(id);
     const auth = await requireOrderOwner(req, order);
     if (auth.error) return auth.error;
     if (order.walletMode !== "loop") {
       return NextResponse.json({ error: "loop only" }, { status: 400 });
     }
+    order = await cantonSwapService().reopenFalseVaultMigrationIfNeeded(id);
     if (order.status !== "open") {
       return NextResponse.json(
         { error: `invalid status ${order.status}` },

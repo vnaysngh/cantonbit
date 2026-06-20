@@ -12,6 +12,7 @@ import {
   LOOP_USER_LEG_OFFER_TTL_SECONDS,
   QUOTE_GRACE_SECONDS,
   resolveCreateCantonSwapOrder,
+  isFalseVaultMigrationExpire,
   shouldExpireForVaultMigration
 } from "./canton-swap-order-logic";
 import { QUOTE_TTL_SECONDS } from "./htlc-quote";
@@ -30,6 +31,7 @@ import {
 import {
   fillLoopSwap,
   prepareLoopUserLeg,
+  prepareLoopUserLegWithCids,
   rejectUserLegOffer,
   reissueLoopCounterLeg,
   repairLoopFillFromLedger,
@@ -40,6 +42,7 @@ import {
   userReceivedCounterLeg,
   verifyCounterLegReceipt
 } from "./canton-swap-settle";
+import { formatSettlementError } from "./swap-settlement-messages";
 import {
   SupabaseCantonSwapStore,
   type CantonSwapStore
@@ -228,7 +231,14 @@ export class CantonSwapService {
   }
 
   async get(id: string): Promise<CantonSwapOrder | undefined> {
-    return this.store.get(id);
+    const o = await this.store.get(id);
+    if (!o) return undefined;
+    if (o.status !== "expired") return o;
+    try {
+      return await this.reopenFalseVaultMigrationIfNeeded(id);
+    } catch {
+      return o;
+    }
   }
 
   async must(id: string): Promise<CantonSwapOrder> {
@@ -339,17 +349,46 @@ export class CantonSwapService {
     return o;
   }
 
-  async prepareUserLeg(id: string): Promise<{
+  /** Re-open loop orders falsely expired by vault-migration daemon (stale env / createdAt race). */
+  async reopenFalseVaultMigrationIfNeeded(id: string): Promise<CantonSwapOrder> {
+    const vaultParty = expectedCantonSwapParty();
+    let o = await this.must(id);
+    const afterUserLeg = isFalseVaultMigrationExpire(o, vaultParty, {
+      afterUserLeg: true
+    });
+    const beforeUserLeg = isFalseVaultMigrationExpire(o, vaultParty);
+    if (!afterUserLeg && !beforeUserLeg) return o;
+
+    const targetStatus = afterUserLeg ? "user_locked" : "open";
+    o.status = targetStatus;
+    o.failureReason = undefined;
+    if (!(await this.transition(o, "expired"))) {
+      o = await this.must(id);
+      if (o.status !== targetStatus) {
+        throw new Error(`cannot reopen order from status ${o.status}`);
+      }
+    }
+    return o;
+  }
+
+  async prepareUserLeg(
+    id: string,
+    opts?: { inputHoldingCids?: string[] }
+  ): Promise<{
     command: unknown;
     disclosedContracts: unknown[];
     synchronizerId: string;
     transferKind: string;
     counterRequiresAccept: boolean;
   }> {
-    const o = await this.must(id);
+    let o = await this.reopenFalseVaultMigrationIfNeeded(id);
     if (o.walletMode !== "loop") throw new Error("prepare-user-leg is loop only");
     if (o.status !== "open") throw new Error(`invalid status ${o.status}`);
     assertOrderNotExpired(o);
+    const cids = opts?.inputHoldingCids?.filter(Boolean) ?? [];
+    if (cids.length > 0) {
+      return prepareLoopUserLegWithCids(o, cids);
+    }
     return prepareLoopUserLeg(o);
   }
 
@@ -357,11 +396,21 @@ export class CantonSwapService {
     id: string,
     params?: { offerCid?: string; submitUpdateId?: string }
   ): Promise<CantonSwapOrder> {
-    const o = await this.must(id);
+    let o = await this.must(id);
     if (o.walletMode !== "loop") throw new Error("confirm-user-leg is loop only");
     if (o.status === "user_locked") return o;
-    if (o.status !== "open") throw new Error(`invalid status ${o.status}`);
-    assertOrderNotExpired(o);
+
+    const vaultParty = expectedCantonSwapParty();
+    const falseVaultMigrationExpire = isFalseVaultMigrationExpire(o, vaultParty);
+
+    if (o.status !== "open" && !falseVaultMigrationExpire) {
+      throw new Error(`invalid status ${o.status}`);
+    }
+    if (!falseVaultMigrationExpire) {
+      assertOrderNotExpired(o);
+    }
+
+    const fromStatus = falseVaultMigrationExpire ? "expired" : "open";
     const reservedCids = await this.reservedUserLegCids(id);
     const resolved = await resolveUserLegEvidence(o, {
       maxAttempts: 10,
@@ -374,8 +423,9 @@ export class CantonSwapService {
     o.userLegOfferCid = resolved.userLegOfferCid;
     o.userLegSubmitUpdateId = resolved.userLegSubmitUpdateId ?? params?.submitUpdateId;
     o.status = "user_locked";
+    o.failureReason = undefined;
     try {
-      if (!(await this.transition(o, "open"))) {
+      if (!(await this.transition(o, fromStatus))) {
         const fresh = await this.must(id);
         if (fresh.status === "user_locked") {
           return fresh;
@@ -404,7 +454,7 @@ export class CantonSwapService {
   }
 
   async fillLoop(id: string): Promise<CantonSwapOrder> {
-    let o = await this.must(id);
+    let o = await this.reopenFalseVaultMigrationIfNeeded(id);
     if (o.walletMode !== "loop") throw new Error("fill is loop only");
     if (o.status === "filled") return o;
     if (o.status === "filling") {
@@ -412,6 +462,29 @@ export class CantonSwapService {
       if (o.status === "filled") return o;
       if (isLoopFillPendingCounterAccept(o)) return o;
     }
+
+    if (o.status === "expired") {
+      throw new Error(`cannot fill from status ${o.status}`);
+    }
+
+    const vaultParty = expectedCantonSwapParty();
+    const falseVaultMigrationExpire = isFalseVaultMigrationExpire(o, vaultParty, {
+      afterUserLeg: true
+    });
+
+    if (falseVaultMigrationExpire) {
+      o.status = "user_locked";
+      o.failureReason = undefined;
+      if (!(await this.transition(o, "expired"))) {
+        o = await this.must(id);
+        if (o.status === "filled") return o;
+        if (isLoopFillPendingCounterAccept(o)) return o;
+        if (o.status !== "user_locked" && o.status !== "filling") {
+          throw new Error(`cannot fill from status ${o.status}`);
+        }
+      }
+    }
+
     if (o.status !== "user_locked" && o.status !== "filling") {
       throw new Error(`cannot fill from status ${o.status}`);
     }
@@ -470,12 +543,26 @@ export class CantonSwapService {
       }
       if (isRetriableLoopFillError(msg)) {
         o.status = "user_locked";
-        o.failureReason = msg;
+        o.failureReason = formatSettlementError(msg);
         await this.transition(o, "filling");
         return this.must(id);
       }
+      if (
+        o.walletMode === "loop" &&
+        o.userLegOfferCid &&
+        !o.settlementUpdateId
+      ) {
+        try {
+          await rejectUserLegOffer(o);
+        } catch (rejectErr) {
+          console.warn(
+            `[canton-swap] reject on fill failed ${o.id.slice(0, 12)}:`,
+            rejectErr instanceof Error ? rejectErr.message : rejectErr
+          );
+        }
+      }
       o.status = "failed";
-      o.failureReason = msg;
+      o.failureReason = formatSettlementError(msg);
       await this.transition(o, "filling");
       throw e;
     }
@@ -734,7 +821,7 @@ export class CantonSwapService {
     const now = Math.floor(Date.now() / 1000);
     const vaultParty = expectedCantonSwapParty();
     let n = 0;
-    for (const status of ["open", "user_locked", "settling", "filling"] as const) {
+    for (const status of ["open", "user_locked", "settling", "filling", "failed"] as const) {
       const orders = await this.store.byStatus(status);
       for (const o of orders) {
         if (shouldExpireForVaultMigration(o, vaultParty, now)) {
@@ -762,6 +849,23 @@ export class CantonSwapService {
         }
         if (isLoopFillPendingCounterAccept(o)) continue;
         if (isLoopFillInFlight(o)) continue;
+        if (o.status === "failed") {
+          if (
+            o.walletMode === "loop" &&
+            o.userLegOfferCid &&
+            !o.settlementUpdateId
+          ) {
+            try {
+              await rejectUserLegOffer(o);
+            } catch (e) {
+              console.warn(
+                `[canton-swap] reject on failed expire ${o.id.slice(0, 12)}:`,
+                e instanceof Error ? e.message : e
+              );
+            }
+          }
+          if (!isOrderExpired(o, now)) continue;
+        }
         if (!isOrderExpired(o, now)) continue;
 
         const priorStatus = o.status;

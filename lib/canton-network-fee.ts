@@ -49,7 +49,9 @@ import {
   buildAcceptExercise,
   buildTransferExercise,
   listOutgoingOffers,
-  prepareLedgerCommands
+  pickSynchronizerId,
+  prepareLedgerCommands,
+  prepareTransferCommand
 } from "./transfer";
 
 export {
@@ -391,11 +393,38 @@ export async function buildCcFeeTransferLeg(params: {
   memo?: string;
   /** CC UTXOs already used in the same atomic submit (e.g. CC sell offer). */
   excludeHoldingCids?: string[];
+  /** Loop wallet: CC holding cids from browser (server cannot read Loop party ACS). */
+  ccHoldingCids?: string[];
 }) {
   await assertFeeReceiverCcPreapproval();
   const receiver = networkFeeReceiverParty();
   const dso = await getDsoPartyId();
   const instrumentId = { admin: dso, id: "Amulet" as const };
+
+  if (params.ccHoldingCids?.length) {
+    const exclude = new Set(params.excludeHoldingCids ?? []);
+    const cids = params.ccHoldingCids.filter((c) => !exclude.has(c));
+    if (!cids.length) {
+      throw new Error("no CC holdings available for network fee after exclusions");
+    }
+    const built = await prepareTransferCommand({
+      senderParty: params.senderParty,
+      receiverParty: receiver,
+      amountBtc: params.amountCc,
+      inputHoldingCids: cids,
+      instrumentId,
+      registrarAdmin: dso,
+      registryKind: "cc",
+      expirationSeconds: 600
+    });
+    if (!isDirectTransferKind(built.transferKind)) {
+      throw new Error(
+        "network fee requires direct CC transfer — fee receiver must have TransferPreapproval"
+      );
+    }
+    return built;
+  }
+
   let holdings = await holdingsForSwapAsset(params.senderParty, "CC");
   if (params.excludeHoldingCids?.length) {
     const exclude = new Set(params.excludeHoldingCids);
@@ -458,6 +487,11 @@ const C2C_ACCEPT_FALLBACK_BYTES: Record<CantonSwapMvpAssetId, number> = {
 const HTLC_CLAIM_FALLBACK_BYTES = 8545;
 const HTLC_LOCK_ALLOCATE_FALLBACK_BYTES = 8910;
 const HTLC_LOCK_CREATE_FALLBACK_BYTES = 3010;
+/** Loop HTLC user-signed legs (devnet prepare, June 2026). */
+const LOOP_HTLC_FORWARD_ACCEPT_FALLBACK_BYTES = 8090;
+const LOOP_HTLC_REVERSE_LOCK_FALLBACK_BYTES = C2C_OFFER_FALLBACK_BYTES.CBTC;
+
+export type HtlcLoopFeeAction = "htlc-loop-claim" | "htlc-loop-lock";
 
 function offerMatchesInstrument(
   offerInst: InstrumentId | undefined,
@@ -812,6 +846,66 @@ function disabledEstimate(): NetworkFeeEstimate {
     minCcRequired: "0",
     networkFeeSource: "disabled",
     transactions: []
+  };
+}
+
+/** Loop C2C — user pays offer submit + CC fee collection (vault accept/deliver = platform). */
+export async function estimateLoopC2cSettleFee(params: {
+  userParty: string;
+  fromAsset: CantonSwapMvpAssetId;
+  inAmount: string;
+}): Promise<NetworkFeeEstimate> {
+  void params.userParty;
+  void params.inAmount;
+  if (!shouldQuoteNetworkFee()) {
+    return disabledEstimate();
+  }
+  if (isNetworkFeeEnabled() && !networkFeeReceiverParty()) {
+    throw new Error("NETWORK_FEE_RECEIVER_PARTY not configured");
+  }
+
+  const [extraTrafficPriceUsdPerMb, amuletPriceUsd] = await Promise.all([
+    fetchExtraTrafficPriceUsdPerMb(),
+    fetchAmuletPriceUsd()
+  ]);
+
+  const offerBytes = C2C_OFFER_FALLBACK_BYTES[params.fromAsset];
+  const priced = trafficBytesToFeeCc({
+    trafficBytes: offerBytes,
+    extraTrafficPriceUsdPerMb,
+    amuletPriceUsd,
+    bufferBps: networkFeeBufferBps()
+  });
+
+  return {
+    feeCc: priced.feeCc,
+    feeUsd: priced.feeUsd,
+    trafficBytes: offerBytes,
+    minCcRequired: minCcRequiredForNetworkFee(priced.feeCc),
+    networkFeeSource: "fallback",
+    extraTrafficPriceUsdPerMb,
+    amuletPriceUsd,
+    transactions: [
+      {
+        id: "c2c-loop-offer",
+        label: "Send offer (Loop)",
+        trafficBytes: offerBytes,
+        charged: true
+      },
+      {
+        id: "c2c-vault-accept",
+        label: "Vault accept your offer (platform)",
+        trafficBytes: 0,
+        charged: false
+      },
+      {
+        id: "c2c-vault-deliver",
+        label: "Vault deliver counter (platform)",
+        trafficBytes: 0,
+        charged: false
+      },
+      ABSORBED_FEE_COLLECTION_LEG
+    ]
   };
 }
 
@@ -1175,6 +1269,55 @@ export async function revalidateHtlcNetworkFee(params: {
     );
   }
 
+  // Claim execution: fee was bound at order creation — skip a second ledger prepare
+  // round-trip (prepareClaimCommand + prepareTrafficBytes) before the real submit.
+  if (action === "htlc-claim") {
+    const feeCc = order.networkFeeCc;
+    const [extraTrafficPriceUsdPerMb, amuletPriceUsd] = await Promise.all([
+      fetchExtraTrafficPriceUsdPerMb(),
+      fetchAmuletPriceUsd()
+    ]);
+    const capped: NetworkFeeEstimate = {
+      feeCc,
+      feeUsd: Number.parseFloat(feeCc) * amuletPriceUsd,
+      trafficBytes: HTLC_CLAIM_FALLBACK_BYTES,
+      minCcRequired: minCcRequiredForNetworkFee(feeCc),
+      networkFeeSource: "prepare",
+      extraTrafficPriceUsdPerMb,
+      amuletPriceUsd
+    };
+    await assertUserNetworkFeeReady({
+      userParty: order.userCantonParty,
+      estimate: capped
+    });
+    return capped;
+  }
+
+  // Lock execution (reverse managed): same — order.networkFeeCc is the user's cap.
+  if (action === "htlc-lock") {
+    const feeCc = order.networkFeeCc;
+    const [extraTrafficPriceUsdPerMb, amuletPriceUsd] = await Promise.all([
+      fetchExtraTrafficPriceUsdPerMb(),
+      fetchAmuletPriceUsd()
+    ]);
+    const lockBytes =
+      HTLC_LOCK_ALLOCATE_FALLBACK_BYTES + HTLC_LOCK_CREATE_FALLBACK_BYTES;
+    const capped: NetworkFeeEstimate = {
+      feeCc,
+      feeUsd: Number.parseFloat(feeCc) * amuletPriceUsd,
+      trafficBytes: lockBytes,
+      minCcRequired: minCcRequiredForNetworkFee(feeCc),
+      networkFeeSource: "prepare",
+      extraTrafficPriceUsdPerMb,
+      amuletPriceUsd
+    };
+    await assertUserNetworkFeeReady({
+      userParty: order.userCantonParty,
+      estimate: capped
+    });
+    return capped;
+  }
+
   const fresh = await estimateHtlcManagedFee({
     action,
     userParty: order.userCantonParty,
@@ -1197,6 +1340,174 @@ export async function revalidateHtlcNetworkFee(params: {
     estimate: capped
   });
   return capped;
+}
+
+/** Loop HTLC user-charged submit — prepare-based bytes (no managed CanActAs). */
+export async function estimateHtlcLoopFee(params: {
+  action: HtlcLoopFeeAction;
+  userParty: string;
+  cbtcAmount?: string;
+  notionalUsd?: number;
+}): Promise<NetworkFeeEstimate> {
+  if (!shouldQuoteNetworkFee()) return disabledEstimate();
+  if (isNetworkFeeEnabled() && !networkFeeReceiverParty()) {
+    throw new Error("NETWORK_FEE_RECEIVER_PARTY not configured");
+  }
+
+  const [extraTrafficPriceUsdPerMb, amuletPriceUsd] = await Promise.all([
+    fetchExtraTrafficPriceUsdPerMb(),
+    fetchAmuletPriceUsd()
+  ]);
+
+  const primaryBytes =
+    params.action === "htlc-loop-lock"
+      ? LOOP_HTLC_REVERSE_LOCK_FALLBACK_BYTES
+      : LOOP_HTLC_FORWARD_ACCEPT_FALLBACK_BYTES;
+
+  const trafficBytes = primaryBytes;
+  const priced = trafficBytesToFeeCc({
+    trafficBytes,
+    extraTrafficPriceUsdPerMb,
+    amuletPriceUsd,
+    bufferBps: networkFeeBufferBps()
+  });
+
+  return {
+    feeCc: priced.feeCc,
+    feeUsd: priced.feeUsd,
+    trafficBytes,
+    minCcRequired: minCcRequiredForNetworkFee(priced.feeCc),
+    networkFeeSource: "fallback",
+    extraTrafficPriceUsdPerMb,
+    amuletPriceUsd,
+    transactions: [
+      {
+        id: params.action,
+        label:
+          params.action === "htlc-loop-lock"
+            ? "Loop CBTC lock to venue"
+            : "Loop CBTC accept / claim",
+        trafficBytes: primaryBytes,
+        charged: true
+      },
+      ABSORBED_FEE_COLLECTION_LEG
+    ]
+  };
+}
+
+/** Re-estimate Loop HTLC fee; cap at order-bound fee; no warpx CC balance gate. */
+export async function revalidateHtlcLoopNetworkFee(params: {
+  order: SwapOrder;
+  action: HtlcLoopFeeAction;
+}): Promise<NetworkFeeEstimate> {
+  if (!isNetworkFeeEnabled()) return disabledEstimate();
+
+  const now = Math.floor(Date.now() / 1000);
+  if (
+    params.order.networkFeeExpiresAt != null &&
+    now > params.order.networkFeeExpiresAt + QUOTE_GRACE_SECONDS
+  ) {
+    throw new Error("network fee quote expired — get a fresh quote");
+  }
+
+  const notionalUsd = params.order.cbtcAmount
+    ? await computeHtlcSwapNotionalUsd(params.order.cbtcAmount)
+    : undefined;
+  const fresh = await estimateHtlcLoopFee({
+    action: params.action,
+    userParty: params.order.userCantonParty,
+    cbtcAmount: params.order.cbtcAmount,
+    notionalUsd
+  });
+  const cappedFeeCc = capNetworkFeeAtOrder(
+    params.order.networkFeeCc,
+    fresh.feeCc
+  );
+  return {
+    ...fresh,
+    feeCc: cappedFeeCc,
+    minCcRequired: minCcRequiredForNetworkFee(cappedFeeCc)
+  };
+}
+
+/** Fee-only Loop submit (forward auto-deliver path). */
+export async function prepareLoopNetworkFeeOnly(params: {
+  userParty: string;
+  networkFeeCc: string;
+  ccHoldingCids: string[];
+}): Promise<{
+  command: unknown;
+  commands: unknown[];
+  disclosedContracts: unknown[];
+  synchronizerId: string;
+  actAs: string[];
+}> {
+  const feeLeg = await buildCcFeeTransferLeg({
+    senderParty: params.userParty,
+    amountCc: params.networkFeeCc,
+    ccHoldingCids: params.ccHoldingCids
+  });
+  return {
+    command: feeLeg.command,
+    commands: [feeLeg.command],
+    disclosedContracts: feeLeg.disclosedContracts,
+    synchronizerId: feeLeg.synchronizerId,
+    actAs: [params.userParty]
+  };
+}
+
+/** Append CC network-fee transfer to a Loop wallet submit (accept, lock, or fee-only). */
+export async function appendNetworkFeeToLoopWalletCommands(params: {
+  userParty: string;
+  networkFeeCc: string;
+  ccHoldingCids?: string[];
+  primary: {
+    command: unknown;
+    disclosedContracts: unknown[];
+    synchronizerId: string;
+  };
+}): Promise<{
+  command: unknown;
+  commands: unknown[];
+  disclosedContracts: unknown[];
+  synchronizerId: string;
+  actAs: string[];
+}> {
+  const fee = Number.parseFloat(params.networkFeeCc);
+  if (!isNetworkFeeEnabled() || !Number.isFinite(fee) || fee <= 0) {
+    return {
+      command: params.primary.command,
+      commands: [params.primary.command],
+      disclosedContracts: params.primary.disclosedContracts,
+      synchronizerId: params.primary.synchronizerId,
+      actAs: [params.userParty]
+    };
+  }
+  const feeLeg = await buildCcFeeTransferLeg({
+    senderParty: params.userParty,
+    amountCc: params.networkFeeCc,
+    ccHoldingCids: params.ccHoldingCids
+  });
+  assertSameSynchronizer(
+    [
+      { synchronizerId: params.primary.synchronizerId },
+      feeLeg
+    ],
+    "loop wallet batch with network fee"
+  );
+  const disclosedContracts = [
+    ...params.primary.disclosedContracts,
+    ...feeLeg.disclosedContracts
+  ];
+  return {
+    command: params.primary.command,
+    commands: [params.primary.command, feeLeg.command],
+    disclosedContracts,
+    synchronizerId:
+      params.primary.synchronizerId ||
+      pickSynchronizerId([disclosedContracts as never[]]),
+    actAs: [params.userParty]
+  };
 }
 
 export async function appendNetworkFeeToFill(params: {

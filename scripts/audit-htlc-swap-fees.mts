@@ -36,32 +36,6 @@ const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 type OrderRow = Record<string, unknown>;
 
-function isEvmTxHash(s: string | undefined): s is string {
-  return !!s && /^0x[0-9a-fA-F]{64}$/.test(s);
-}
-
-/** Canton claim update id (snake_case row). */
-function cantonClaimUpdateId(order: OrderRow): string | undefined {
-  const c = order.counter_claim_update_id as string | undefined;
-  if (!c) return undefined;
-  if (order.direction === "canton-to-evm" && isEvmTxHash(c)) return undefined;
-  return c;
-}
-
-function userWbtcClaimTx(order: OrderRow): string | undefined {
-  if (order.direction !== "canton-to-evm") return undefined;
-  const main = order.main_claim_tx as string | undefined;
-  const counter = order.counter_claim_update_id as string | undefined;
-  if (isEvmTxHash(main)) return main;
-  if (isEvmTxHash(counter)) return counter;
-  return undefined;
-}
-
-function solverWbtcClaimTx(order: OrderRow): string | undefined {
-  if (order.direction !== "evm-to-canton") return undefined;
-  return order.main_claim_tx as string | undefined;
-}
-
 async function getJwt(): Promise<string> {
   const tokenUrl = process.env.KEYCLOAK_TOKEN_URL;
   const isDevnet = network === "devnet";
@@ -201,13 +175,11 @@ function classifyTx(
   }
   const allocCid = order.allocation_cid as string | undefined;
   const htlcCid = order.htlc_cid as string | undefined;
-  const claimId = cantonClaimUpdateId(order);
+  const claimId = order.counter_claim_update_id as string | undefined;
 
   let leg = "unknown";
-  const claimLeg =
-    order.direction === "canton-to-evm" ? "solver-claim-main" : "user-claim-managed";
-  if (tree.updateId && claimId && tree.updateId === claimId) leg = claimLeg;
-  else if (choices.some((c) => c.includes("Claim"))) leg = claimLeg;
+  if (tree.updateId && claimId && tree.updateId === claimId) leg = "user-claim-managed";
+  else if (choices.some((c) => c.includes("Claim"))) leg = "user-claim-managed";
   else if (
     allocCid &&
     events.some((ev) => {
@@ -307,7 +279,7 @@ async function main() {
 
   const allocCid = order.allocation_cid as string | undefined;
   const htlcCid = order.htlc_cid as string | undefined;
-  const claimUpdateId = cantonClaimUpdateId(order);
+  const claimUpdateId = order.counter_claim_update_id as string | undefined;
 
   const matched = new Map<string, TreeTx>();
   for (const tree of trees) {
@@ -318,14 +290,7 @@ async function main() {
   }
   if (claimUpdateId) {
     const hit = trees.find((t) => t.updateId === claimUpdateId);
-    if (hit) {
-      matched.set(
-        order.direction === "canton-to-evm"
-          ? "solver-claim-main"
-          : "user-claim-managed",
-        hit
-      );
-    }
+    if (hit) matched.set("user-claim-managed", hit);
   }
 
   const cantonLegs: Record<string, unknown>[] = [];
@@ -348,18 +313,11 @@ async function main() {
 
   const evmLegs: Record<string, unknown>[] = [];
   let totalEvmEth = 0;
-  const direction = order.direction as string | undefined;
-  const evmTxCandidates: [string, string | undefined][] =
-    direction === "canton-to-evm"
-      ? [
-          ["solver-wbtc-lock", order.counter_lock_tx as string | undefined],
-          ["user-wbtc-claim", userWbtcClaimTx(order)]
-        ]
-      : [
-          ["user-wbtc-lock", order.main_lock_tx as string | undefined],
-          ["solver-wbtc-claim", solverWbtcClaimTx(order)]
-        ];
-  for (const [label, tx] of evmTxCandidates) {
+  for (const [label, key] of [
+    ["user-wbtc-lock", "main_lock_tx"],
+    ["solver-wbtc-claim", "main_claim_tx"]
+  ] as const) {
+    const tx = order[key] as string | undefined;
     if (!tx || tx === "already-claimed") continue;
     try {
       const rec = await ethReceipt(tx);
@@ -427,15 +385,10 @@ async function main() {
     },
     canton: {
       legs: cantonLegs,
-      expectedLegs:
-        direction === "canton-to-evm"
-          ? ["solver-allocate", "solver-create-htlc", "solver-claim-main"]
-          : ["solver-allocate", "solver-create-htlc", "user-claim-managed"],
-      missingLegs: (
-        direction === "canton-to-evm"
-          ? ["solver-allocate", "solver-create-htlc", "solver-claim-main"]
-          : ["solver-allocate", "solver-create-htlc", "user-claim-managed"]
-      ).filter((l) => !matched.has(l)),
+      expectedLegs: ["solver-allocate", "solver-create-htlc", "user-claim-managed"],
+      missingLegs: ["solver-allocate", "solver-create-htlc", "user-claim-managed"].filter(
+        (l) => !matched.has(l)
+      ),
       contractIds: { allocationCid: allocCid, htlcCid, claimUpdateId },
       networkFeeQuotedCc: order.network_fee_cc ?? null,
       networkFeeCollectionEnabled: process.env.NETWORK_FEE_ENABLED === "1",

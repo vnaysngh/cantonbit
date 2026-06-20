@@ -4,6 +4,12 @@
  */
 import type { SwapOrder } from "./htlc-types";
 
+/** Dev/smoke automation order ids — exclude from user history and UI polling. */
+export function isSmokeTestOrderId(id: string | undefined): boolean {
+  if (!id) return false;
+  return id.startsWith("smoke-");
+}
+
 /** True when the user can reveal the secret and claim (matches /swap live flow). */
 export function isSwapClaimable(
   o: Pick<SwapOrder, "status" | "direction" | "counterMode" | "revealedPreimage">,
@@ -32,16 +38,56 @@ export function isAbandonedSwapDraft(
  * User-facing history filter — drop never-started drafts and (optionally) other
  * wallets' orders on the same Canton party (dev/testing shared-party edge case).
  */
-export function filterHistoryOrders<T extends Pick<SwapOrder, "direction" | "status" | "mainLockTx" | "userEvmAddress">>(
-  orders: T[],
-  opts?: { userEvmAddress?: string | null },
-): T[] {
+export function filterHistoryOrders<
+  T extends Pick<SwapOrder, "direction" | "status" | "mainLockTx" | "userEvmAddress"> & {
+    id?: string;
+  }
+>(orders: T[], opts?: { userEvmAddress?: string | null }): T[] {
   const evm = opts?.userEvmAddress?.trim().toLowerCase();
   return orders.filter((o) => {
+    if (isSmokeTestOrderId(o.id)) return false;
     if (isAbandonedSwapDraft(o)) return false;
     if (evm && o.userEvmAddress?.toLowerCase() !== evm) return false;
     return true;
   });
+}
+
+/** Terminal statuses — no background refresh on /orders. */
+export const ORDERS_PAGE_TERMINAL_STATUSES = new Set([
+  "main_claimed",
+  "both_claimed",
+  "refunded",
+  "cancelled",
+  "failed",
+  "filled",
+  "expired"
+]);
+
+/** Cap parallel GET /orders polling (newest in-flight orders only). */
+export const ORDERS_LIVE_POLL_MAX = 8;
+
+export const ORDERS_LIVE_POLL_MS = 6_000;
+
+/** True when /orders should poll this row (skip abandoned drafts and stale C2C open). */
+export function shouldPollOrderOnOrdersPage(o: {
+  id?: string;
+  direction?: string;
+  status: string;
+  mainLockTx?: string;
+}): boolean {
+  if (isSmokeTestOrderId(o.id)) return false;
+  if (ORDERS_PAGE_TERMINAL_STATUSES.has(o.status)) return false;
+  if (o.direction === "canton-swap") {
+    return ["user_locked", "filling", "settling"].includes(o.status);
+  }
+  if (
+    isAbandonedSwapDraft(
+      o as Pick<SwapOrder, "direction" | "status" | "mainLockTx">
+    )
+  ) {
+    return false;
+  }
+  return true;
 }
 
 /**

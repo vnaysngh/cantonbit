@@ -1,8 +1,7 @@
 /**
  * POST /api/htlc/{id}/prepare-lock-loop — LOOP SELLER step 2a: build the STANDARD
- * AllocationFactory_Allocate command for the user's wallet. Body: { holdingCids }
- * (the user's CBTC holding cids, read in the browser via provider.getActiveContracts
- * — we cannot see a Loop party's holdings cross-participant).
+ * transfer (user → venue) for the user's wallet. Pay network fee via
+ * prepare-seller-network-fee first (separate Loop submit).
  */
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
@@ -16,10 +15,11 @@ export async function POST(
   try {
     const auth = await requireOrderOwner(id);
     if (auth.error) return auth.error;
-    const { holdingCids } = await req.json();
-    const out = await htlcService().prepareLoopSellerLock(
+    const { holdingCids, ccHoldingCids } = await req.json();
+    const out = await htlcService().prepareLoopSellerLockWithFee(
       id,
-      holdingCids ?? []
+      holdingCids ?? [],
+      Array.isArray(ccHoldingCids) ? ccHoldingCids : undefined
     );
     return NextResponse.json(out);
   } catch (e) {

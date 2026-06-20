@@ -8,7 +8,10 @@ import {
   clientIpFromRequest
 } from "@/lib/canton-swap-rate-limit";
 import {
+  computeHtlcSwapNotionalUsd,
+  estimateHtlcLoopFee,
   estimateHtlcManagedFee,
+  estimateLoopC2cSettleFee,
   estimateManagedC2cSettleFee,
   estimateToQuoteFields,
   logNetworkFeeEstimate,
@@ -16,14 +19,22 @@ import {
   shouldQuoteNetworkFee
 } from "@/lib/canton-network-fee";
 import type { CantonSwapMvpAssetId } from "@/lib/canton-swap-types";
-import { expectedCantonSwapParty, expectedSettlementParty, requirePartyOwner } from "@/lib/htlc-auth";
+import {
+  authorizeQuoteParty,
+  expectedCantonSwapParty,
+  expectedSettlementParty,
+  requirePartyOwner
+} from "@/lib/htlc-auth";
 
 export const dynamic = "force-dynamic";
 
 type EstimateAction =
   | "c2c-managed-settle"
+  | "c2c-loop-settle"
   | "htlc-claim"
-  | "htlc-lock";
+  | "htlc-lock"
+  | "htlc-loop-claim"
+  | "htlc-loop-lock";
 
 function parseAsset(raw: unknown): CantonSwapMvpAssetId | null {
   if (raw === "CBTC" || raw === "CC") return raw;
@@ -91,6 +102,31 @@ export async function POST(req: Request) {
       });
     }
 
+    if (action === "c2c-loop-settle") {
+      const fromAsset = parseAsset(body.fromAsset);
+      const userParty = String(body.userParty ?? "");
+      const inAmount = String(body.inAmount ?? body.amount ?? "");
+      if (!fromAsset || !userParty || !inAmount) {
+        return NextResponse.json(
+          { error: "missing fromAsset/userParty/inAmount" },
+          { status: 400 }
+        );
+      }
+      const auth = await authorizeQuoteParty(userParty);
+      if (auth.error) return auth.error;
+
+      const estimate = await estimateLoopC2cSettleFee({
+        userParty,
+        fromAsset,
+        inAmount
+      });
+      logNetworkFeeEstimate("estimate c2c-loop-settle", estimate);
+      return NextResponse.json({
+        ...estimate,
+        ...estimateToQuoteFields(estimate)
+      });
+    }
+
     if (action === "htlc-claim" || action === "htlc-lock") {
       const userParty = String(body.userParty ?? body.cantonParty ?? "");
       if (!userParty) {
@@ -111,6 +147,36 @@ export async function POST(req: Request) {
         htlcBlob: body.htlcBlob != null ? String(body.htlcBlob) : undefined,
         notionalUsd:
           body.notionalUsd != null ? Number(body.notionalUsd) : undefined
+      });
+      logNetworkFeeEstimate(`estimate ${action}`, estimate);
+      return NextResponse.json({
+        ...estimate,
+        ...estimateToQuoteFields(estimate)
+      });
+    }
+
+    if (action === "htlc-loop-claim" || action === "htlc-loop-lock") {
+      const userParty = String(body.userParty ?? body.cantonParty ?? "");
+      const cbtcAmount =
+        body.cbtcAmount != null ? String(body.cbtcAmount) : undefined;
+      if (!userParty || !cbtcAmount) {
+        return NextResponse.json(
+          { error: "missing userParty / cbtcAmount" },
+          { status: 400 }
+        );
+      }
+      const auth = await authorizeQuoteParty(userParty);
+      if (auth.error) return auth.error;
+
+      const notionalUsd =
+        body.notionalUsd != null
+          ? Number(body.notionalUsd)
+          : await computeHtlcSwapNotionalUsd(cbtcAmount);
+      const estimate = await estimateHtlcLoopFee({
+        action,
+        userParty,
+        cbtcAmount,
+        notionalUsd
       });
       logNetworkFeeEstimate(`estimate ${action}`, estimate);
       return NextResponse.json({

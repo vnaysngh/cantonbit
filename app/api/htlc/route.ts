@@ -5,10 +5,10 @@
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
 import {
+  authorizeQuoteParty,
   expectedSettlementParty,
   expectedSolverEvm,
-  isParticipantManagedParty,
-  requirePartyOwner
+  isParticipantManagedParty
 } from "@/lib/htlc-auth";
 import {
   assertOrderAmounts,
@@ -18,6 +18,7 @@ import {
 import { assertValidTimelocks, MIN_GAP } from "@/lib/htlc-timelock";
 import {
   computeHtlcSwapNotionalUsd,
+  estimateHtlcLoopFee,
   estimateHtlcManagedFee,
   isNetworkFeeEnabled,
   NetworkFeePrepareError
@@ -41,7 +42,7 @@ export async function POST(req: Request) {
       }
     }
 
-    const partyAuth = await requirePartyOwner(String(body.userCantonParty));
+    const partyAuth = await authorizeQuoteParty(String(body.userCantonParty));
     if (partyAuth.error) return partyAuth.error;
 
     const vaultParty = expectedSettlementParty();
@@ -92,6 +93,20 @@ export async function POST(req: Request) {
       });
       body.networkFeeCc = nf.feeCc;
       // Fee bound lasts for the order window (claim/lock), not the 60s RFQ preview TTL.
+      body.networkFeeExpiresAt = Number(body.userTimelock);
+    }
+
+    if (isNetworkFeeEnabled() && body.counterMode === "loop" && direction === "evm-to-canton") {
+      const notionalUsd = await computeHtlcSwapNotionalUsd(
+        String(body.cbtcAmount)
+      );
+      const nf = await estimateHtlcLoopFee({
+        action: "htlc-loop-claim",
+        userParty: String(body.userCantonParty),
+        cbtcAmount: String(body.cbtcAmount),
+        notionalUsd
+      });
+      body.networkFeeCc = nf.feeCc;
       body.networkFeeExpiresAt = Number(body.userTimelock);
     }
 

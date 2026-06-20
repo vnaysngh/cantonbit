@@ -14,8 +14,8 @@ import { alert } from "@/lib/alert";
 import { requireDaemon } from "@/lib/htlc-auth";
 
 function cronAuthorized(req: NextRequest): boolean {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return process.env.NODE_ENV !== "production"; // not configured → allow only in dev
+  const secret = process.env.CRON_SECRET?.trim();
+  if (!secret) return false;
   const header = req.headers.get("authorization") ?? "";
   return header === `Bearer ${secret}`;
 }

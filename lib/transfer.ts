@@ -945,7 +945,9 @@ async function listPendingOffersAs(partyId: string): Promise<PendingOffer[]> {
         .JsActiveContract?.createdEvent ??
       (entry as { createdEvent?: { contractId?: string } }).createdEvent;
     if (!ev?.contractId) continue;
-    const t = readTransferInstructionFields(ev);
+    const t = readTransferInstructionFields(
+      ev as Parameters<typeof readTransferInstructionFields>[0]
+    );
     if (!t?.receiver) continue;
     out.push({
       contractId: ev.contractId,

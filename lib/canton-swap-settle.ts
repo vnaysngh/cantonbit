@@ -46,6 +46,7 @@ import {
   listPendingOffers,
   mergeDisclosed,
   pickSynchronizerId,
+  prepareTransferCommand,
   rejectTransferOffer,
   submitLedgerCommands
 } from "./transfer";
@@ -824,6 +825,67 @@ export async function prepareLoopUserLeg(order: CantonSwapOrder): Promise<{
       built.synchronizerId ||
       pickSynchronizerId([built.disclosedContracts]),
     transferKind: built.transferKind,
+    counterRequiresAccept: counterPreview.counterRequiresAccept
+  };
+}
+
+/** Loop user leg when holding cids come from the Loop wallet (server cannot read Loop ACS). */
+export async function prepareLoopUserLegWithCids(
+  order: CantonSwapOrder,
+  inputHoldingCids: string[]
+): Promise<{
+  command: unknown;
+  disclosedContracts: ReturnType<typeof mergeDisclosed>;
+  synchronizerId: string;
+  transferKind: string;
+  counterRequiresAccept: boolean;
+}> {
+  if (!inputHoldingCids.length) {
+    throw new Error("inputHoldingCids required for Loop user leg");
+  }
+  const receiver = userLegReceiverParty(order);
+  const instrumentId = await resolveSwapInstrumentId(order.fromAsset);
+  const registrarAdmin = await registrarAdminForAsset(order.fromAsset);
+  const prepared = await prepareTransferCommand({
+    senderParty: order.userParty,
+    receiverParty: receiver,
+    amountBtc: order.inAmount,
+    inputHoldingCids,
+    instrumentId,
+    registrarAdmin,
+    registryKind: registryKindForAsset(order.fromAsset),
+    expirationSeconds: LOOP_USER_LEG_OFFER_TTL_SECONDS
+  });
+
+  if (isDirectTransferKind(prepared.transferKind)) {
+    const preview = await previewLoopSwapReadiness({
+      userParty: order.userParty,
+      settlementParty: order.settlementParty,
+      fromAsset: order.fromAsset,
+      toAsset: order.toAsset,
+      inAmount: order.inAmount,
+      outAmount: order.outAmount
+    });
+    throw new Error(
+      preview.issues[0] ??
+        "Swap requires pending transfer offer — settlement receiver must not have TransferPreapproval"
+    );
+  }
+
+  const counterPreview = await previewLoopSwapReadiness({
+    userParty: order.userParty,
+    settlementParty: order.settlementParty,
+    fromAsset: order.fromAsset,
+    toAsset: order.toAsset,
+    inAmount: order.inAmount,
+    outAmount: order.outAmount
+  });
+
+  return {
+    command: prepared.command,
+    disclosedContracts: prepared.disclosedContracts,
+    synchronizerId: prepared.synchronizerId,
+    transferKind: prepared.transferKind,
     counterRequiresAccept: counterPreview.counterRequiresAccept
   };
 }

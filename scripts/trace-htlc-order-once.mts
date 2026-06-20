@@ -14,32 +14,6 @@ if (!orderId) {
   process.exit(1);
 }
 
-function isEvmTxHash(s: string | undefined): s is string {
-  return !!s && /^0x[0-9a-fA-F]{64}$/.test(s);
-}
-
-function cantonClaimUpdateId(order: {
-  direction?: string;
-  counter_claim_update_id?: string;
-}): string | undefined {
-  const c = order.counter_claim_update_id;
-  if (!c) return undefined;
-  if (order.direction === "canton-to-evm" && isEvmTxHash(c)) return undefined;
-  return c;
-}
-
-function userWbtcClaimTx(order: {
-  direction?: string;
-  main_claim_tx?: string;
-  counter_claim_update_id?: string;
-}): string | undefined {
-  if (order.direction !== "canton-to-evm") return undefined;
-  if (isEvmTxHash(order.main_claim_tx)) return order.main_claim_tx;
-  if (isEvmTxHash(order.counter_claim_update_id))
-    return order.counter_claim_update_id;
-  return undefined;
-}
-
 async function main() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
   const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
@@ -63,42 +37,24 @@ async function main() {
 
   const user = String(o.user_canton_party);
   const vault = String(o.solver_canton_party);
-  const direction = o.direction as string | undefined;
-  const claimUpdate = cantonClaimUpdateId({
-    direction,
-    counter_claim_update_id: o.counter_claim_update_id as string | undefined
-  });
-  const userWbtc = userWbtcClaimTx({
-    direction,
-    main_claim_tx: o.main_claim_tx as string | undefined,
-    counter_claim_update_id: o.counter_claim_update_id as string | undefined
-  });
+  const claimUpdate = o.counter_claim_update_id as string | undefined;
 
   console.log("\n=== Order ===");
-  console.log(
-    JSON.stringify(
-      {
-        id: o.id,
-        status: o.status,
-        direction: o.direction,
-        counter_mode: o.counter_mode,
-        solver: vault.slice(0, 28) + "…",
-        user: user.slice(0, 28) + "…",
-        cbtc: o.cbtc_amount,
-        wbtc_sats: o.wbtc_amount,
-        network_fee_cc: o.network_fee_cc,
-        canton_claim_update: claimUpdate?.slice(0, 20) + "…",
-        user_wbtc_claim: userWbtc?.slice(0, 20) + "…"
-      },
-      null,
-      2
-    )
-  );
+  console.log(JSON.stringify({
+    id: o.id,
+    status: o.status,
+    direction: o.direction,
+    counter_mode: o.counter_mode,
+    solver: vault.slice(0, 28) + "…",
+    user: user.slice(0, 28) + "…",
+    cbtc: o.cbtc_amount,
+    wbtc_sats: o.wbtc_amount,
+    network_fee_cc: o.network_fee_cc,
+    claim_update: claimUpdate?.slice(0, 20) + "…"
+  }, null, 2));
 
   if (!claimUpdate) {
-    console.log(
-      "\nNo Canton claim update on order — claim not recorded yet (or legacy EVM tx only in counter_claim_update_id)."
-    );
+    console.log("\nNo counter_claim_update_id — claim not recorded yet.");
     return;
   }
 
@@ -118,18 +74,11 @@ async function main() {
     updateId?: string;
   };
   if (!raw.eventsById || Object.keys(raw.eventsById).length === 0) {
-    console.log(
-      "\nTree found but eventsById empty — dumping keys:",
-      Object.keys(tree)
-    );
+    console.log("\nTree found but eventsById empty — dumping keys:", Object.keys(tree));
     console.log(JSON.stringify(tree).slice(0, 1200));
   }
 
-  const claimLabel =
-    direction === "canton-to-evm"
-      ? "Solver CBTC claim (claim-main)"
-      : "User CBTC claim (claim-managed)";
-  console.log(`\n=== ${claimLabel} ===`);
+  console.log("\n=== User claim tx (claim-managed) ===");
   console.log("commandId:", raw.commandId ?? "?");
 
   const events = Object.values(raw.eventsById ?? {});
@@ -140,9 +89,7 @@ async function main() {
   function walkEvent(node: unknown) {
     if (!node || typeof node !== "object") return;
     const n = node as Record<string, unknown>;
-    const treeEx = n.ExercisedTreeEvent as
-      | { value?: { choice?: string; templateId?: string } }
-      | undefined;
+    const treeEx = n.ExercisedTreeEvent as { value?: { choice?: string; templateId?: string } } | undefined;
     const treeCr = n.CreatedTreeEvent as {
       value?: {
         templateId?: string;
@@ -152,20 +99,20 @@ async function main() {
     const ex =
       treeEx?.value ??
       (n.ExercisedEvent as { choice?: string; templateId?: string } | undefined) ??
-      (n.event as { ExercisedEvent?: { choice?: string; templateId?: string } })
-        ?.ExercisedEvent;
+      ((n.event as { ExercisedEvent?: { choice?: string; templateId?: string } })
+        ?.ExercisedEvent);
     const cr =
       treeCr?.value ??
       (n.CreatedEvent as {
         templateId?: string;
         createArgument?: { owner?: string; amount?: unknown };
       } | undefined) ??
-      (n.event as {
+      ((n.event as {
         CreatedEvent?: {
           templateId?: string;
           createArgument?: { owner?: string; amount?: unknown };
         };
-      })?.CreatedEvent;
+      })?.CreatedEvent);
     if (ex?.choice) {
       const tpl = (ex.templateId ?? "").split(":").pop() ?? "?";
       exercised.push(`${tpl}.${ex.choice}`);
@@ -192,10 +139,7 @@ async function main() {
     "TransferInstruction_Accept on claim tx:",
     exercised.some((x) => x.endsWith(".TransferInstruction_Accept"))
   );
-  console.log(
-    "HtlcLock.Claim on claim tx:",
-    exercised.some((x) => x.endsWith(".Claim"))
-  );
+  console.log("HtlcLock.Claim on claim tx:", exercised.some((x) => x.endsWith(".Claim")));
   console.log(
     "Allocation_ExecuteTransfer on claim tx:",
     exercised.some((x) => x.includes("Allocation_ExecuteTransfer"))

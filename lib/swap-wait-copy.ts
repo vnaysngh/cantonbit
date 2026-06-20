@@ -10,12 +10,26 @@ export type SwapWaitMode = "solver" | "locking" | "settling";
 export function swapWaitPrimaryLabel(params: {
   elapsedSec: number;
   mode: SwapWaitMode;
+  /** Reverse HTLC: solver locks WBTC, not CBTC counter. */
+  reverse?: boolean;
+  /** Forward managed (email wallet): solver locks CBTC on Canton, not C2C fill. */
+  forwardManaged?: boolean;
 }): string {
-  const { elapsedSec, mode } = params;
+  const { elapsedSec, mode, reverse, forwardManaged } = params;
   const extended = elapsedSec >= SWAP_WAIT_EXTENDED_AFTER_SECONDS;
-  if (mode === "locking" && !extended) return "Locking CBTC…";
+  if (mode === "locking") {
+    return extended ? "Still signing in Loop…" : "Sign in Loop wallet…";
+  }
   if (mode === "settling") {
     return extended ? "Still finishing your swap…" : "Finishing your swap…";
+  }
+  if (reverse) {
+    return extended ? "Still locking WBTC…" : "Locking WBTC on chain…";
+  }
+  if (forwardManaged) {
+    return extended
+      ? "Still locking CBTC on Canton…"
+      : "Locking CBTC on Canton…";
   }
   return extended ? "Still finding a solver…" : "Waiting for solver…";
 }

@@ -33,13 +33,17 @@ export function loopCounterReissueCommandId(orderId: string, attempt: number): s
 
 /** Transient fill errors — retry via daemon reconcile, not terminal failed. */
 export function isRetriableLoopFillError(msg: string): boolean {
+  const m = msg.toLowerCase();
   return (
     msg.includes("offer not visible") ||
     msg.includes("pending offer not found") ||
     msg.includes("cannot fill atomically") ||
     msg.includes("Retry shortly") ||
     msg.includes("still in flight") ||
-    msg.includes("duplicate command committed but fill transaction not found")
+    msg.includes("duplicate command committed but fill transaction not found") ||
+    m.includes("transferfactory registry call failed") ||
+    m.includes("failed to reach consensus") ||
+    m.includes("scan nodes")
   );
 }
 
@@ -78,12 +82,33 @@ export function shouldExpireForVaultMigration(
   now = Math.floor(Date.now() / 1000)
 ): boolean {
   if (o.walletMode !== "loop") return false;
+  // Never vault-migrate after the user signed or fill is in flight — even if a
+  // remote daemon has a stale CANTON_SWAP_SETTLEMENT_PARTY env.
+  if (o.status !== "open") return false;
+  if (o.userLegOfferCid || o.userLegSubmitUpdateId) return false;
   if (!trimParty(vaultParty)) return false;
+  // Vault-backed orders (all new C2C since settlement_party) — never auto-expire.
+  if (trimParty(o.settlementParty)) return false;
   if (orderUsesCurrentVault(o, vaultParty)) return false;
-  if (o.status === "open" && now - o.createdAt < VAULT_MIGRATION_GRACE_SECONDS) {
+  if (o.createdAt <= 0) return false;
+  if (now - o.createdAt < VAULT_MIGRATION_GRACE_SECONDS) {
     return false;
   }
   return true;
+}
+
+/** Daemon mis-expired an order that already targets the current vault (e.g. stale env). */
+export function isFalseVaultMigrationExpire(
+  o: CantonSwapOrder,
+  vaultParty: string,
+  opts?: { afterUserLeg?: boolean }
+): boolean {
+  const base =
+    o.status === "expired" &&
+    (o.failureReason?.includes("settlement vault migration") ?? false) &&
+    orderUsesCurrentVault(o, vaultParty);
+  if (opts?.afterUserLeg) return base && !!o.userLegOfferCid;
+  return base && !o.userLegOfferCid;
 }
 
 export function loopOrderDeadline(o: CantonSwapOrder): number {

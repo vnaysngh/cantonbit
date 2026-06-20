@@ -13,6 +13,8 @@ export interface FeeBreakdownProps {
   networkFeeTransactions?: NetworkFeeTxLeg[];
   /** Kept for API compatibility; not shown in user UI. */
   networkFeePreview?: boolean;
+  /** Loop wallet paths where Canton traffic is Loop-billed, not an Oranj CC line item. */
+  hideCantonNetworkFee?: boolean;
   loopNetworkFeeCc?: string;
   loading?: boolean;
   evmGasLabel?: string;
@@ -39,6 +41,7 @@ export function FeeBreakdown({
   networkFeeUsd,
   networkFeeSource,
   networkFeePreview,
+  hideCantonNetworkFee,
   loopNetworkFeeCc,
   loading,
   evmGasLabel
@@ -46,11 +49,12 @@ export function FeeBreakdown({
   const serverQuotedFee =
     !!networkFeeSource && networkFeeSource !== "disabled";
   const showCantonNetworkFee =
-    isNetworkFeeUiEnabled() ||
-    serverQuotedFee ||
-    networkFeePreview === true ||
-    (!!loopNetworkFeeCc && Number.parseFloat(loopNetworkFeeCc) > 0) ||
-    loading;
+    !hideCantonNetworkFee &&
+    (isNetworkFeeUiEnabled() ||
+      serverQuotedFee ||
+      networkFeePreview === true ||
+      (!!loopNetworkFeeCc && Number.parseFloat(loopNetworkFeeCc) > 0) ||
+      loading);
 
   if (!showCantonNetworkFee) {
     return (

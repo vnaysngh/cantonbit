@@ -16,7 +16,11 @@ import {
   NetworkFeePrepareError,
   shouldQuoteNetworkFee
 } from "@/lib/canton-network-fee";
-import { expectedCantonSwapParty, requirePartyOwner } from "@/lib/htlc-auth";
+import {
+  authorizeQuoteParty,
+  expectedCantonSwapParty,
+  isParticipantManagedParty
+} from "@/lib/htlc-auth";
 import {
   CantonQuoteSanityError,
   CantonQuoteUnavailableError
@@ -58,42 +62,46 @@ export async function POST(req: Request) {
       networkFeeSource: "disabled"
     });
     if (shouldQuoteNetworkFee() && userParty) {
-      const auth = await requirePartyOwner(userParty);
+      const auth = await authorizeQuoteParty(userParty);
       if (auth.error) return auth.error;
 
-      const vault = expectedCantonSwapParty();
-      if (!vault) {
-        return NextResponse.json(
-          { error: "CANTON_SWAP_SETTLEMENT_PARTY not configured" },
-          { status: 503 }
-        );
-      }
-
-      try {
-        const notionalUsd = await computeC2cSwapNotionalUsd({
-          fromAsset,
-          inAmount: q.inAmount
-        });
-        const nf = await estimateManagedC2cSettleFee({
-          userParty,
-          vaultParty: vault,
-          fromAsset,
-          toAsset,
-          inAmount: q.inAmount,
-          outAmount: q.outAmount,
-          notionalUsd
-        });
-        logNetworkFeeEstimate("c2c-quote", nf);
-        networkFeeFields = estimateToQuoteFields(nf);
-      } catch (e) {
-        if (shouldQuoteNetworkFee()) {
-          throw e;
+      const managed = await isParticipantManagedParty(userParty);
+      if (managed) {
+        const vault = expectedCantonSwapParty();
+        if (!vault) {
+          return NextResponse.json(
+            { error: "CANTON_SWAP_SETTLEMENT_PARTY not configured" },
+            { status: 503 }
+          );
         }
-        console.warn(
-          "[c2c-quote] network fee estimate failed — swap quote still returned:",
-          e instanceof Error ? e.message : e
-        );
+
+        try {
+          const notionalUsd = await computeC2cSwapNotionalUsd({
+            fromAsset,
+            inAmount: q.inAmount
+          });
+          const nf = await estimateManagedC2cSettleFee({
+            userParty,
+            vaultParty: vault,
+            fromAsset,
+            toAsset,
+            inAmount: q.inAmount,
+            outAmount: q.outAmount,
+            notionalUsd
+          });
+          logNetworkFeeEstimate("c2c-quote managed", nf);
+          networkFeeFields = estimateToQuoteFields(nf);
+        } catch (e) {
+          if (shouldQuoteNetworkFee()) {
+            throw e;
+          }
+          console.warn(
+            "[c2c-quote] managed network fee estimate failed — swap quote still returned:",
+            e instanceof Error ? e.message : e
+          );
+        }
       }
+      // Loop C2C: Canton traffic is billed by Loop wallet on sign — not an Oranj CC line item.
     }
 
     return NextResponse.json({

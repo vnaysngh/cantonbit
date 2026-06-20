@@ -12,13 +12,17 @@ type SwapWaitBannerProps = {
   orderId: string;
   ordersHref: string;
   onStartNewSwap?: () => void;
+  reverse?: boolean;
+  forwardManaged?: boolean;
 };
 
 export function swapWaitButtonLabel(
   elapsedSec: number,
-  mode: SwapWaitMode
+  mode: SwapWaitMode,
+  reverse?: boolean,
+  forwardManaged?: boolean
 ): string {
-  return swapWaitPrimaryLabel({ elapsedSec, mode });
+  return swapWaitPrimaryLabel({ elapsedSec, mode, reverse, forwardManaged });
 }
 
 export function SwapWaitBanner({
@@ -26,7 +30,9 @@ export function SwapWaitBanner({
   mode,
   orderId,
   ordersHref,
-  onStartNewSwap
+  onStartNewSwap,
+  reverse,
+  forwardManaged
 }: SwapWaitBannerProps) {
   const hint = swapWaitHint(elapsedSec);
   return (

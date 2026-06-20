@@ -27,12 +27,18 @@ create index if not exists network_fee_ledger_user_party_idx
 revoke all on table public.network_fee_ledger from anon, authenticated;
 alter table public.network_fee_ledger enable row level security;
 
-create unique index if not exists network_fee_ledger_order_kind_uidx
-  on network_fee_ledger (order_id, order_kind);
-
-alter table public.network_fee_ledger
-  drop constraint if exists network_fee_ledger_order_kind_key;
-
-alter table public.network_fee_ledger
-  add constraint network_fee_ledger_order_kind_key
-  unique using index network_fee_ledger_order_kind_uidx;
+-- One audit row per (order_id, order_kind). Add the unique constraint only if
+-- absent (bare ADD CONSTRAINT has no IF NOT EXISTS; building it directly as a
+-- constraint avoids the index-rename foot-gun where a leftover _uidx lingers).
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'network_fee_ledger_order_kind_key'
+      and conrelid = 'public.network_fee_ledger'::regclass
+  ) then
+    alter table public.network_fee_ledger
+      add constraint network_fee_ledger_order_kind_key
+      unique (order_id, order_kind);
+  end if;
+end $$;

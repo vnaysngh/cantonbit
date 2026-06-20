@@ -116,6 +116,12 @@ test("loop fill and counter reissue command ids are deterministic", () => {
 test("isRetriableLoopFillError detects transient fill failures", () => {
   assert.equal(isRetriableLoopFillError("user leg offer not visible on settlement receiver yet"), true);
   assert.equal(isRetriableLoopFillError("insufficient solver float"), false);
+  assert.equal(
+    isRetriableLoopFillError(
+      "TransferFactory registry call failed (502): Failed to reach consensus from 9 Scan nodes"
+    ),
+    true
+  );
 });
 
 test("resolveCreateCantonSwapOrder: same id does not overwrite", () => {
@@ -195,6 +201,41 @@ test("shouldExpireForVaultMigration skips fresh loop open orders", () => {
     shouldExpireForVaultMigration(o, vault, 1_000 + VAULT_MIGRATION_GRACE_SECONDS),
     true
   );
+});
+
+test("shouldExpireForVaultMigration skips orders with explicit settlementParty", () => {
+  const vault = "oranj-settle::1220abc";
+  const o = baseOrder({
+    walletMode: "loop",
+    status: "open",
+    solverParty: "warpx::1220abc",
+    settlementParty: vault,
+    createdAt: 1_000
+  });
+  assert.equal(shouldExpireForVaultMigration(o, vault, 1_000 + 999_999), false);
+});
+
+test("shouldExpireForVaultMigration skips when createdAt missing", () => {
+  const vault = "oranj-settle::1220abc";
+  const o = baseOrder({
+    walletMode: "loop",
+    status: "open",
+    solverParty: "warpx::1220abc",
+    createdAt: 0
+  });
+  assert.equal(shouldExpireForVaultMigration(o, vault, 9_999_999), false);
+});
+
+test("shouldExpireForVaultMigration never touches user_locked", () => {
+  const vault = "oranj-settle::1220abc";
+  const o = baseOrder({
+    walletMode: "loop",
+    status: "user_locked",
+    solverParty: "warpx::1220abc",
+    userLegOfferCid: "offer-cid",
+    createdAt: 1_000
+  });
+  assert.equal(shouldExpireForVaultMigration(o, vault, 9_999_999), false);
 });
 
 test("isLoopFillInFlight protects filling and in-flight user_locked", () => {

@@ -26,12 +26,17 @@ import {
 } from "./transfer";
 import { NETWORK } from "./constants";
 import {
+  computeHtlcSwapNotionalUsd,
   isNetworkFeeEnabled,
   measureAndLogSolverCounterLockTraffic,
   networkFeeReceiverParty,
+  prepareLoopNetworkFeeOnly,
+  revalidateHtlcLoopNetworkFee,
   revalidateHtlcNetworkFee
 } from "./canton-network-fee";
-import { recordNetworkFeeCollected } from "./network-fee-ledger";
+import { hasNetworkFeeLedgerEntry, NetworkFeeLedgerLookupError, recordNetworkFeeCollected } from "./network-fee-ledger";
+import { loopHtlcCollectsOranjNetworkFee } from "./loop-htlc-fee-policy";
+import { isEvmTxHash } from "./htlc-order-logic";
 import {
   allocate,
   createHtlcLock,
@@ -172,15 +177,12 @@ async function verifyEvmLock(o: SwapOrder): Promise<void> {
   );
 }
 
-/** Reverse refund guard: refuse only if user actually claimed WBTC on EVM. */
+/** Reverse refund guard: refuse if user claimed WBTC on EVM (even when counterLockTx missing). */
 async function assertEvmCounterNotClaimed(o: SwapOrder): Promise<void> {
   if (o.direction !== "canton-to-evm") return;
   if (o.status === "counter_claimed" || o.status === "main_claimed") {
     throw new Error("counter already claimed — swap must settle, not refund");
   }
-  const counterWasLocked =
-    o.status === "counter_locked" || !!o.counterLockTx;
-  if (!counterWasLocked) return;
   try {
     const lock = await readEvmLock(o.hashLock);
     if (lock.amount > 0n) return;
@@ -248,7 +250,15 @@ class HtlcService {
   /** Orders the solver should act on (not terminal). No on-chain reconcile here —
    *  the daemon polls every few seconds; reconcile runs on getOrder() for UI reads. */
   async activeOrders(): Promise<SwapOrder[]> {
-    return this.store.active();
+    const all = await this.store.active();
+    const actionable = new Set([
+      "main_locked",
+      "counter_locked",
+      "counter_claimed"
+    ]);
+    return all.filter(
+      (o) => actionable.has(o.status) && !o.id.startsWith("smoke-")
+    );
   }
 
   /** Sync reverse order state with Base Sepolia — fix phantom locks AND recover after user claim. */
@@ -263,26 +273,32 @@ class HtlcService {
       return o;
     }
 
-    const fromBlock = o.counterLockTx
-      ? await evmTxBlockHex(o.counterLockTx).catch(() => undefined)
-      : undefined;
-    const evmClaimed = await hasEvmClaimedForHashLock(o.hashLock, {
-      fromBlockHex: fromBlock
-    }).catch(() => false);
-    // User claimed WBTC on EVM — lock amount is 0; must NOT downgrade to main_locked.
-    if (evmClaimed) {
-      if (o.status !== "counter_claimed" && o.status !== "main_claimed") {
-        console.log(
-          `[htlc] reverse ${o.id.slice(0, 12)} EVM Claimed event found — advancing to counter_claimed`
-        );
-        o.status = "counter_claimed";
-        await this.store.put(o);
-      }
+    // Waiting for solver WBTC lock — no EVM reconcile yet (keep getOrder fast for polls).
+    if (
+      o.status === "main_locked" ||
+      o.status === "accepted" ||
+      o.status === "open"
+    ) {
       return o;
     }
 
+    if (o.status === "counter_claimed") return o;
+
     if (o.status !== "counter_locked") return o;
     if (!o.wbtcAmount || !o.userEvmAddress) return o;
+
+    // Fast path: user claimed WBTC (locks cleared) — advance without scanning event logs.
+    try {
+      const lock = await readEvmLockMapping(o.hashLock);
+      if (lock.amount === 0n) {
+        o.status = "counter_claimed";
+        await this.store.put(o);
+        return o;
+      }
+    } catch {
+      /* fall through */
+    }
+
     const probe = await isReverseEvmCounterLockReady({
       hashLock: o.hashLock,
       wbtcAmount: o.wbtcAmount,
@@ -292,7 +308,7 @@ class HtlcService {
     console.warn(
       `[htlc] phantom counter_locked ${o.id.slice(0, 12)} — ${probe.reason} (tx ${o.counterLockTx?.slice(0, 12) ?? "none"})`
     );
-    void alert("HTLC phantom EVM counter-lock cleared", {
+    void alert("warn", "HTLC phantom EVM counter-lock cleared", {
       order: o.id.slice(0, 18),
       counterLockTx: o.counterLockTx?.slice(0, 18) ?? "",
       reason: probe.reason
@@ -505,6 +521,30 @@ class HtlcService {
     if (!preimageMatches(preimageHex, o.hashLock))
       throw new Error("invalid preimage");
 
+    if (
+      isNetworkFeeEnabled() &&
+      o.direction === "evm-to-canton" &&
+      o.networkFeeCc &&
+      Number.parseFloat(o.networkFeeCc) > 0
+    ) {
+      let paid: boolean;
+      try {
+        paid = await hasNetworkFeeLedgerEntry(id, "htlc");
+      } catch (e) {
+        if (e instanceof NetworkFeeLedgerLookupError) {
+          throw new Error(
+            "Could not verify network fee payment — retry shortly"
+          );
+        }
+        throw e;
+      }
+      if (!paid) {
+        throw new Error(
+          "network fee not collected — pay CC network fee in Loop wallet first"
+        );
+      }
+    }
+
     // 0. EVM LOCK CHECK — the WBTC must REALLY be locked for our solver with time to
     // spare. Guards against a faked recordMainLock collecting CBTC for nothing.
     await verifyEvmLock(o);
@@ -606,6 +646,136 @@ class HtlcService {
     return prepareAcceptCommand({ offerContractId: o.counterTransferOfferCid });
   }
 
+  /** Loop forward accept + optional CC network fee metadata (submit primary only; fee is separate). */
+  async prepareLoopAcceptWithFee(
+    id: string,
+    ccHoldingCids?: string[]
+  ): Promise<{
+    command: unknown;
+    commands: unknown[];
+    disclosedContracts: unknown[];
+    synchronizerId: string;
+    actAs: string[];
+    networkFeeCc?: string;
+  }> {
+    const o = await this.must(id);
+    const primary = await this.prepareLoopAccept(id);
+    void ccHoldingCids;
+    let networkFeeCc: string | undefined;
+    if (isNetworkFeeEnabled()) {
+      const feeEstimate = await revalidateHtlcLoopNetworkFee({
+        order: o,
+        action: "htlc-loop-claim"
+      });
+      networkFeeCc = feeEstimate.feeCc;
+    }
+    return {
+      ...primary,
+      commands: [primary.command],
+      actAs: [o.userCantonParty],
+      networkFeeCc
+    };
+  }
+
+  /** Loop forward when CBTC auto-delivered — fee-only Loop submit before reveal. */
+  async prepareLoopNetworkFee(
+    id: string,
+    ccHoldingCids: string[]
+  ): Promise<{
+    command: unknown;
+    commands: unknown[];
+    disclosedContracts: unknown[];
+    synchronizerId: string;
+    actAs: string[];
+    networkFeeCc: string;
+  }> {
+    const o = await this.must(id);
+    if (o.counterMode !== "loop") {
+      throw new Error("prepare-network-fee is loop only");
+    }
+    if (o.direction !== "evm-to-canton") {
+      throw new Error("network fee applies to forward Loop HTLC only");
+    }
+    if (!loopHtlcCollectsOranjNetworkFee(o.direction)) {
+      throw new Error("network fee not enabled for this flow");
+    }
+    const feeEstimate = await revalidateHtlcLoopNetworkFee({
+      order: o,
+      action: "htlc-loop-claim"
+    });
+    const prep = await prepareLoopNetworkFeeOnly({
+      userParty: o.userCantonParty,
+      networkFeeCc: feeEstimate.feeCc,
+      ccHoldingCids
+    });
+    return { ...prep, networkFeeCc: feeEstimate.feeCc };
+  }
+
+  /** Loop reverse seller lock — fee-only CC submit before user→venue transfer. */
+  async prepareLoopSellerNetworkFee(
+    id: string,
+    ccHoldingCids: string[]
+  ): Promise<{
+    command: unknown;
+    commands: unknown[];
+    disclosedContracts: unknown[];
+    synchronizerId: string;
+    actAs: string[];
+    networkFeeCc: string;
+  }> {
+    const o = await this.must(id);
+    if (o.direction !== "canton-to-evm" || o.counterMode !== "loop") {
+      throw new Error("prepare-seller-network-fee is loop canton-to-evm only");
+    }
+    if (!loopHtlcCollectsOranjNetworkFee(o.direction)) {
+      throw new Error("network fee not applicable to reverse Loop HTLC");
+    }
+    const feeEstimate = await revalidateHtlcLoopNetworkFee({
+      order: o,
+      action: "htlc-loop-lock"
+    });
+    const prep = await prepareLoopNetworkFeeOnly({
+      userParty: o.userCantonParty,
+      networkFeeCc: feeEstimate.feeCc,
+      ccHoldingCids
+    });
+    return { ...prep, networkFeeCc: feeEstimate.feeCc };
+  }
+
+  /** Record Loop HTLC network fee after a successful Loop wallet submit. */
+  async recordLoopNetworkFeeCollected(
+    id: string,
+    settlementUpdateId: string
+  ): Promise<SwapOrder> {
+    const o = await this.must(id);
+    if (o.counterMode !== "loop") {
+      throw new Error("record-network-fee is loop only");
+    }
+    if (o.direction !== "evm-to-canton") {
+      throw new Error("network fee applies to forward Loop HTLC only");
+    }
+    const updateId = settlementUpdateId.trim();
+    if (!updateId || updateId.startsWith("loop-fee-recovery")) {
+      throw new Error("valid settlementUpdateId required");
+    }
+    const feeEstimate = await revalidateHtlcLoopNetworkFee({
+      order: o,
+      action: "htlc-loop-claim"
+    });
+    await recordNetworkFeeCollected({
+      orderId: o.id,
+      orderKind: "htlc",
+      userParty: o.userCantonParty,
+      feeCc: feeEstimate.feeCc,
+      feeUsd: feeEstimate.feeUsd,
+      trafficBytes: feeEstimate.trafficBytes,
+      networkFeeSource: feeEstimate.networkFeeSource,
+      receiverParty: networkFeeReceiverParty(),
+      settlementUpdateId: updateId
+    });
+    return o;
+  }
+
   /** STEP 6 (PARTICIPANT-MANAGED) — the BACKEND claims the CBTC AS the hosted
    *  receiver (it has CanActAs over the party). The user supplies the preimage at
    *  claim time (secret stays client-side until then). Exercises HtlcLock.Claim on
@@ -678,7 +848,6 @@ class HtlcService {
         receiverParty: networkFeeReceiverParty(),
         settlementUpdateId: updateId
       });
-      o.networkFeeCc = networkFeeCc;
     }
 
     o.revealedPreimage = ("0x" +
@@ -754,7 +923,6 @@ class HtlcService {
           receiverParty: networkFeeReceiverParty(),
           settlementUpdateId: createUpdateId
         });
-        o.networkFeeCc = networkFeeCc;
       }
       o.htlcCid = htlcCid;
       o.htlcBlob = htlcBlob;
@@ -824,7 +992,6 @@ class HtlcService {
         receiverParty: networkFeeReceiverParty(),
         settlementUpdateId: createUpdateId
       });
-      o.networkFeeCc = networkFeeCc;
     }
     o.htlcCid = htlcCid;
     o.htlcBlob = htlcBlob;
@@ -914,7 +1081,6 @@ class HtlcService {
       (preimage.startsWith("0x")
         ? preimage.slice(2)
         : preimage)) as `0x${string}`;
-    o.counterClaimUpdateId = updateId;
     o.status = "main_claimed";
     await this.store.put(o);
     return { order: o, updateId };
@@ -959,6 +1125,38 @@ class HtlcService {
       amountBtc: o.cbtcAmount!,
       inputHoldingCids: holdingCids
     });
+  }
+
+  /** Loop reverse lock + network fee metadata (Loop SDK: one command per submit — pay fee via prepareLoopSellerNetworkFee first). */
+  async prepareLoopSellerLockWithFee(
+    id: string,
+    holdingCids: string[],
+    ccHoldingCids?: string[]
+  ): Promise<{
+    command: unknown;
+    commands: unknown[];
+    disclosedContracts: unknown[];
+    synchronizerId: string;
+    actAs: string[];
+    networkFeeCc?: string;
+  }> {
+    const o = await this.must(id);
+    const primary = await this.prepareLoopSellerLock(id, holdingCids);
+    void ccHoldingCids;
+    let networkFeeCc: string | undefined;
+    if (isNetworkFeeEnabled() && o.direction === "evm-to-canton") {
+      const feeEstimate = await revalidateHtlcLoopNetworkFee({
+        order: o,
+        action: "htlc-loop-claim"
+      });
+      networkFeeCc = feeEstimate.feeCc;
+    }
+    return {
+      ...primary,
+      commands: [primary.command],
+      actAs: [o.userCantonParty],
+      networkFeeCc
+    };
   }
 
   /** STEP 2b (LOOP SELLER) — find the user's transfer offer in OUR view and ACCEPT
@@ -1149,13 +1347,11 @@ class HtlcService {
       (preimageHex.startsWith("0x")
         ? preimageHex.slice(2)
         : preimageHex)) as `0x${string}`;
-    if (o.direction === "canton-to-evm") {
-      if (!/^0x[0-9a-fA-F]{64}$/.test(updateId)) {
-        throw new Error("reverse claim-record expects EVM claim tx hash");
-      }
-      o.mainClaimTx = updateId;
+    const claimRef = updateId.trim();
+    if (o.direction === "canton-to-evm" && isEvmTxHash(claimRef)) {
+      o.mainClaimTx = claimRef;
     } else {
-      o.counterClaimUpdateId = updateId;
+      o.counterClaimUpdateId = claimRef;
     }
     o.status = "counter_claimed";
     await this.store.put(o);
