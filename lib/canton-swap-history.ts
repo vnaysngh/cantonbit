@@ -16,14 +16,22 @@ export interface CantonSwapHistoryRow {
   counterLeg: { asset: string; amount: string };
   counterTransferOfferCid?: string;
   settlementUpdateId?: string;
+  networkFeeCc?: string;
+  networkFeeExpiresAt?: number;
+  /** M-05: whether a network_fee_ledger row exists for this order (fee actually
+   *  collected), populated by the history route from the ledger. undefined = unknown. */
+  networkFeeCollected?: boolean;
   failureReason?: string;
   walletMode?: string;
 }
 
 export function mapCantonSwapToHistoryRow(
-  o: CantonSwapOrder
+  o: CantonSwapOrder & { networkFeeCollected?: boolean }
 ): CantonSwapHistoryRow {
   return {
+    ...(o.networkFeeCollected !== undefined
+      ? { networkFeeCollected: o.networkFeeCollected }
+      : {}),
     id: o.id,
     direction: "canton-swap",
     status: o.status,
@@ -38,6 +46,8 @@ export function mapCantonSwapToHistoryRow(
     counterLeg: { asset: o.toAsset, amount: o.outAmount },
     counterTransferOfferCid: o.counterLegOfferCid,
     settlementUpdateId: o.settlementUpdateId,
+    networkFeeCc: o.networkFeeCc,
+    networkFeeExpiresAt: o.networkFeeExpiresAt,
     failureReason: o.failureReason
   };
 }

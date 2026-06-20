@@ -96,7 +96,13 @@ async function resolveProposalTemplateId(
     })
   });
   if (r.ok) {
-    const entries = (await r.json()) as any[];
+    const entries = (await r.json()) as Array<{
+      contractEntry?: {
+        JsActiveContract?: {
+          createdEvent?: { contractId?: string; templateId?: string };
+        };
+      };
+    }>;
     for (const e of entries) {
       const ev = e?.contractEntry?.JsActiveContract?.createdEvent;
       if (ev?.contractId === proposalCid && ev?.templateId) {

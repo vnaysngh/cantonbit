@@ -5,6 +5,12 @@ import {
   type ReactNode,
 } from "react";
 
+import {
+  getBrowserEvmProvider,
+  waitForEvmReceipt,
+  type Eip1193Like,
+} from "@/lib/evm-wait-receipt";
+
 /**
  * EVM (MetaMask / EIP-1193) wallet — dependency-free, app-wide via context.
  *
@@ -21,9 +27,7 @@ type Eip1193Provider = {
 };
 
 function getProvider(): Eip1193Provider | null {
-  if (typeof window === "undefined") return null;
-  const eth = (window as unknown as { ethereum?: Eip1193Provider }).ethereum;
-  return eth ?? null;
+  return getBrowserEvmProvider() as Eip1193Provider | null;
 }
 
 export interface EvmWallet {
@@ -39,6 +43,8 @@ export interface EvmWallet {
   connect: () => Promise<void>;
   signTypedData: (typedData: object) => Promise<string>;
   sendTransaction: (tx: { to: string; data: string; value?: string }) => Promise<string>;
+  /** Wait for a tx hash to be mined (and succeed) before treating it as done. */
+  waitForReceipt: (hash: string, opts?: { timeoutMs?: number; pollMs?: number }) => Promise<void>;
   call: (to: string, data: string) => Promise<string>;
   switchChain: (chainId: number, params?: AddChainParams) => Promise<void>;
   /** Forget the connection in-app and revoke wallet permissions when supported. */
@@ -203,6 +209,24 @@ function useEvmWalletState(): EvmWallet {
     return hash as string;
   }, [account]);
 
+  /**
+   * Wait for a tx to be MINED and succeed before treating it as done.
+   * eth_sendTransaction returns the hash immediately (pre-mining), so recording a
+   * claim/retake right away can race the chain — the API would verify a receipt that
+   * doesn't exist yet. Polls eth_getTransactionReceipt; throws on revert or timeout.
+   */
+  const waitForReceipt = useCallback(
+    async (
+      hash: string,
+      opts?: { timeoutMs?: number; pollMs?: number }
+    ): Promise<void> => {
+      const p = getProvider();
+      if (!p) throw new Error("no provider");
+      await waitForEvmReceipt(p as Eip1193Like, hash, opts);
+    },
+    []
+  );
+
   const call = useCallback(async (to: string, data: string): Promise<string> => {
     const p = getProvider();
     if (!p) throw new Error("no provider");
@@ -266,6 +290,7 @@ function useEvmWalletState(): EvmWallet {
     connect,
     signTypedData,
     sendTransaction,
+    waitForReceipt,
     call,
     switchChain,
     disconnect

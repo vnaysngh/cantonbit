@@ -36,6 +36,28 @@ import type { Holding } from "./types";
 
 const TAG = "[htlc-onledger]";
 
+/** Minimal created-event shape we read from Ledger API responses (defensive —
+ *  fields are optional; we narrow before use). */
+interface LedgerCreated {
+  contractId?: string;
+  templateId?: string;
+  createdEventBlob?: string;
+  createArgument?: unknown;
+  offset?: number;
+  synchronizerId?: string;
+}
+/** A tree event node from submit-and-wait-for-transaction-tree. */
+type LedgerTreeEvent = { CreatedTreeEvent?: { value?: LedgerCreated } };
+/** An active-contract entry from the JSON Ledger API ACS list. */
+type LedgerAcsEntry = {
+  contractEntry?: {
+    JsActiveContract?: {
+      createdEvent?: LedgerCreated;
+      synchronizerId?: string;
+    };
+  };
+};
+
 // Uploaded hardened cbtc-htlc DAR. This package MUST contain the amount and
 // instrumentId fields added to HtlcLock; the older v0.1.4 package does not.
 function htlcTemplateId(): string {
@@ -130,7 +152,7 @@ async function submit(
     templateId: string;
     createdEventBlob: string;
   }[];
-  tree: any;
+  tree: unknown;
 }> {
   const cid =
     commandId ??
@@ -170,7 +192,7 @@ async function submit(
     templateId: string;
     createdEventBlob: string;
   }[] = [];
-  for (const ev of Object.values(events) as any[]) {
+  for (const ev of Object.values(events) as LedgerTreeEvent[]) {
     const c = ev?.CreatedTreeEvent?.value;
     if (!c?.contractId) continue;
     const tpl = c.templateId ?? "";
@@ -257,7 +279,7 @@ export async function listSolverAllocations(
     })
   });
   if (!r.ok) return [];
-  const entries = (await r.json()) as any[];
+  const entries = (await r.json()) as LedgerAcsEntry[];
   const out: string[] = [];
   for (const e of entries) {
     const c = e?.contractEntry?.JsActiveContract?.createdEvent;
@@ -697,7 +719,7 @@ export async function findProbeHtlcLock(
     })
   });
   if (!r.ok) return null;
-  const entries = (await r.json()) as any[];
+  const entries = (await r.json()) as LedgerAcsEntry[];
   const candidates: {
     htlcCid: string;
     allocationCid: string;
@@ -775,7 +797,7 @@ async function fetchContractBlob(
     })
   });
   if (!r.ok) return null;
-  const entries = (await r.json()) as any[];
+  const entries = (await r.json()) as LedgerAcsEntry[];
   for (const e of entries) {
     const ac = e?.contractEntry?.JsActiveContract;
     const c = ac?.createdEvent;
@@ -783,7 +805,7 @@ async function fetchContractBlob(
       // Capture the REAL synchronizerId — the Loop SDK needs it to route the submission.
       const synchronizerId = ac?.synchronizerId ?? c?.synchronizerId ?? "";
       return {
-        templateId: c.templateId,
+        templateId: c.templateId ?? "",
         contractId,
         createdEventBlob: c.createdEventBlob ?? "",
         synchronizerId
@@ -998,12 +1020,22 @@ export async function findAllocationBySettlement(params: {
     })
   });
   if (!r.ok) return { cid: null, reason: `ACS read failed (${r.status})` };
-  const entries = (await r.json()) as any[];
+  const entries = (await r.json()) as LedgerAcsEntry[];
   for (const e of entries) {
     const c = e?.contractEntry?.JsActiveContract?.createdEvent;
     const tpl = c?.templateId ?? "";
     if (!c?.contractId || !isAllocationContract(tpl)) continue;
-    const a = c.createArgument ?? {};
+    type AllocSettlement = {
+      settlementRef?: { id?: string };
+      executor?: string;
+      settleBefore?: string;
+    };
+    type AllocLeg = { sender?: string; receiver?: string; amount?: string };
+    const a = (c.createArgument ?? {}) as {
+      settlement?: AllocSettlement;
+      transferLeg?: AllocLeg;
+      allocation?: { settlement?: AllocSettlement; transferLeg?: AllocLeg };
+    };
     const settlement = a.settlement ?? a.allocation?.settlement;
     const leg = a.transferLeg ?? a.allocation?.transferLeg;
     if (settlement?.settlementRef?.id !== params.settlementId) continue;

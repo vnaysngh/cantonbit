@@ -128,13 +128,23 @@ export async function listLoopInstrumentHoldingCids(
   if (raw.length === 0) return [];
 
   const out: string[] = [];
-  for (const item of raw as Array<Record<string, any>>) {
-    // eslint-disable-line @typescript-eslint/no-explicit-any
+  // Loose ACS-entry shape: fields are optional and narrowed via optional chaining.
+  type AcsItem = {
+    contractEntry?: { JsActiveContract?: { createdEvent?: AcsLeaf } };
+  } & AcsLeaf;
+  type AcsLeaf = {
+    contractId?: string;
+    contract_id?: string;
+    templateId?: string;
+    template_id?: string;
+  };
+  for (const item of raw as AcsItem[]) {
     // REAL shape (observed live, contradicts the SDK typings): a raw JSON Ledger
     // API ACS entry — { contractEntry: { JsActiveContract: { createdEvent: {
     // contractId, templateId, ... } } } }. Tolerate the flat shape too.
-    const ev = item?.contractEntry?.JsActiveContract?.createdEvent ?? item;
-    const cid = (ev?.contractId ?? ev?.contract_id) as string | undefined;
+    const ev: AcsLeaf =
+      item?.contractEntry?.JsActiveContract?.createdEvent ?? item;
+    const cid = ev?.contractId ?? ev?.contract_id;
     const tpl = String(ev?.templateId ?? ev?.template_id ?? "");
     if (!cid) continue;
 

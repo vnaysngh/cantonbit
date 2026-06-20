@@ -1,15 +1,13 @@
 /**
- * Truncate a Canton party ID for display: first 8 + … + last 8 chars
- * around the `::` separator. Falls back gracefully for short inputs.
+ * Truncate a Canton party ID for display: first 8 + … + last 8 chars.
+ * L-01: single source of truth — re-exported from party-display so every caller
+ * renders the same 8…8 format (this used to default to 8…6, contradicting both the
+ * project convention and the docstring above it).
  *
  * Example:
- *   warpx-devnet-1::1220231c1885f28...a949203ff
- *     → "warpx-de…203ff"
+ *   warpx-devnet-1::1220231c1885f28...a949203ff → "warpx-de…a949203ff"
  */
-export function truncatePartyId(partyId: string, head = 8, tail = 6): string {
-  if (partyId.length <= head + tail + 1) return partyId;
-  return `${partyId.slice(0, head)}…${partyId.slice(-tail)}`;
-}
+export { truncatePartyId, truncateEvmAddress } from "./party-display";
 
 /**
  * Sum a list of decimal-string amounts. Uses a simple integer-cents trick

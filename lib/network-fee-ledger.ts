@@ -23,11 +23,25 @@ export interface NetworkFeeLedgerEntry {
   settlementUpdateId?: string;
 }
 
-/** Idempotent — one row per (order_id, order_kind). */
+export class NetworkFeeSettlementReusedError extends Error {
+  constructor(updateId: string) {
+    super(
+      `settlement update ${updateId.slice(0, 16)}… already recorded for another order — replay rejected`
+    );
+    this.name = "NetworkFeeSettlementReusedError";
+  }
+}
+
+/** Idempotent per (order_id, order_kind). H-01: a settlement_update_id is also
+ *  globally unique (migration 027), so reusing one valid fee update across orders
+ *  is rejected as a replay rather than silently double-counted. */
 export async function recordNetworkFeeCollected(
   entry: NetworkFeeLedgerEntry
 ): Promise<void> {
   const sb = await createSupabaseServiceClient();
+  // Coerce empty/whitespace settlement ids to NULL: "" is NOT a real update id and
+  // would collide under the partial unique index (which only excludes NULL).
+  const settlementUpdateId = entry.settlementUpdateId?.trim() || null;
   const { error } = await sb.from(TABLE).upsert(
     {
       order_id: entry.orderId,
@@ -38,12 +52,34 @@ export async function recordNetworkFeeCollected(
       traffic_bytes: entry.trafficBytes ?? null,
       network_fee_source: entry.networkFeeSource,
       receiver_party: entry.receiverParty,
-      settlement_update_id: entry.settlementUpdateId ?? null
+      settlement_update_id: settlementUpdateId
     },
     { onConflict: "order_id,order_kind", ignoreDuplicates: false }
   );
-  if (error && !error.message.includes("duplicate")) {
+  if (!error) return;
+  // The settlement-update unique index fired → this update was already used by a
+  // different order. Surface it as a replay, not a swallowed "duplicate".
+  if (
+    error.message.includes("network_fee_ledger_settlement_update_uidx") ||
+    error.message.includes("settlement_update_id")
+  ) {
+    throw new NetworkFeeSettlementReusedError(entry.settlementUpdateId ?? "");
+  }
+  // The (order_id, order_kind) idempotency conflict is expected on retries.
+  if (!error.message.includes("duplicate")) {
     throw new Error(`network fee ledger upsert failed: ${error.message}`);
+  }
+}
+
+/** Post-commit accounting — never wedge swap state if Supabase is down. */
+export async function bestEffortRecordNetworkFeeCollected(
+  entry: NetworkFeeLedgerEntry
+): Promise<void> {
+  try {
+    await recordNetworkFeeCollected(entry);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn(`[network-fee-ledger] deferred write: ${msg.slice(0, 120)}`);
   }
 }
 

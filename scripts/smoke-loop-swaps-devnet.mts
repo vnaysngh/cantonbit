@@ -504,23 +504,6 @@ async function smokeHtlcReverse(_loop: Awaited<ReturnType<typeof loopCtx>>, solv
   });
   await htlcService().accept(orderId);
 
-  if (
-    isNetworkFeeEnabled() &&
-    !(await hasNetworkFeeLedgerEntry(orderId, "htlc"))
-  ) {
-    const feePrep = await htlcService().prepareLoopSellerNetworkFee(
-      orderId,
-      await loop.ccCids()
-    );
-    const { updateId: feeUpdateId } = await loop.submit({
-      commands: feePrep.commands,
-      disclosedContracts: feePrep.disclosedContracts,
-      synchronizerId: feePrep.synchronizerId,
-      actAs: feePrep.actAs
-    });
-    await htlcService().recordLoopNetworkFeeCollected(orderId, feeUpdateId);
-  }
-
   const cbtcCids = await loop.cbtcCids();
   if (!cbtcCids.length) throw new Error("No Loop CBTC holdings for lock");
   const prep = await htlcService().prepareLoopSellerLock(orderId, cbtcCids);

@@ -1339,6 +1339,7 @@ export default function SwapPage() {
             receiver: SOLVER_EVM
           }
         );
+        await evm.waitForReceipt(lockTx);
         await htlcApi.recordMainLock(id, lockTx);
       } catch (e) {
         retry(
@@ -1680,6 +1681,9 @@ export default function SwapPage() {
         }
         const preimage = secretToPreimage(secret);
         const tx = await evmClaim(evm.sendTransaction, HTLC_ESCROW, preimage);
+        // Wait for the claim to be MINED before recording — the API verifies the
+        // on-chain receipt, which won't exist if we record the pending hash.
+        await evm.waitForReceipt(tx);
         await htlcApi.recordClaim(swapId, preimage, tx);
         forgetSecret(swapId);
         setStage({
@@ -1734,7 +1738,7 @@ export default function SwapPage() {
         });
       }
     },
-    [evm.account, evm.sendTransaction]
+    [evm]
   );
 
   // RETAKE (EVM refund) — if a swap is stuck, the user reclaims their locked WBTC
@@ -1744,6 +1748,9 @@ export default function SwapPage() {
     async (swapId: string) => {
       try {
         const tx = await evmRetake(evm.sendTransaction, HTLC_ESCROW, swapId);
+        // Wait for the retake to be MINED before recording (the API verifies the
+        // on-chain Retaken receipt).
+        await evm.waitForReceipt(tx);
         await htlcApi.recordRetake(swapId, tx);
         forgetSecret(swapId);
         setStage({ kind: "htlc-refunded", swapId, retakeTx: tx });
@@ -3723,6 +3730,23 @@ function ReviewModal({
     loopProvider
   ]);
 
+  // M-06 (rules-of-hooks): this effect MUST run before the `if (!quote) return null`
+  // early return below, or the hook order differs between renders. It derives its
+  // own guards from props (quote/managedSetup), all available here.
+  const isC2cForSetup = quote?.direction === "canton-to-canton";
+  const setupBusyForEffect =
+    !!managedSetup && (managedSetup.enabling || managedSetup.enablingCbtc);
+  useEffect(() => {
+    if (!managedSetup || !isC2cForSetup || managedSetup.loading || busy) return;
+    if (managedSetup.needsCcDeposit) return;
+    if (
+      (managedSetup.needsEnableCc || managedSetup.needsEnableCbtc) &&
+      !setupBusyForEffect
+    ) {
+      void managedSetup.onEnableAll().catch(() => {});
+    }
+  }, [managedSetup, isC2cForSetup, busy, setupBusyForEffect]);
+
   if (!quote) return null;
 
   const isC2c = quote.direction === "canton-to-canton";
@@ -3819,16 +3843,8 @@ function ReviewModal({
   const setupBusy =
     !!managedSetup && (managedSetup.enabling || managedSetup.enablingCbtc);
 
-  useEffect(() => {
-    if (!managedSetup || !isC2c || managedSetup.loading || busy) return;
-    if (managedSetup.needsCcDeposit) return;
-    if (
-      (managedSetup.needsEnableCc || managedSetup.needsEnableCbtc) &&
-      !setupBusy
-    ) {
-      void managedSetup.onEnableAll().catch(() => {});
-    }
-  }, [managedSetup, isC2c, busy, setupBusy]);
+  // (auto-enable effect moved above the `if (!quote) return null` early return — see
+  // M-06 rules-of-hooks fix.)
 
   let setupError: string | null = null;
   if (managedSetup && isC2c && !busy) {
@@ -3854,7 +3870,7 @@ function ReviewModal({
 
   let actionLabel = "Confirm swap";
   let actionDisabled = !!busy;
-  let actionOnClick: () => void = onConfirm;
+  const actionOnClick: () => void = onConfirm;
 
   if (!busy && reviewPayLimit && !reviewPayLimit.ok) {
     actionLabel = reviewPayLimit.message;

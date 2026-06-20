@@ -5,10 +5,10 @@
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
 import {
-  authorizeQuoteParty,
   expectedSettlementParty,
   expectedSolverEvm,
-  isParticipantManagedParty
+  isParticipantManagedParty,
+  requirePartyOwner
 } from "@/lib/htlc-auth";
 import {
   assertOrderAmounts,
@@ -42,7 +42,7 @@ export async function POST(req: Request) {
       }
     }
 
-    const partyAuth = await authorizeQuoteParty(String(body.userCantonParty));
+    const partyAuth = await requirePartyOwner(String(body.userCantonParty));
     if (partyAuth.error) return partyAuth.error;
 
     const vaultParty = expectedSettlementParty();

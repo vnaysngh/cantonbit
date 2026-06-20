@@ -12,6 +12,7 @@
     "build:prod": "next build",
     "start": "next start",
     "lint": "eslint",
+    "typecheck": "tsc --noEmit",
     "test": "tsx --test lib/**/*.test.ts",
     "transfer:check:devnet": "bash scripts/with-env.sh devnet npx tsx scripts/transfer-devnet-check.mts",
     "enable-cc:devnet": "bash scripts/with-env.sh devnet npx tsx scripts/enable-cc-party.mts",

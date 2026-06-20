@@ -1220,8 +1220,11 @@ export async function revalidateOrderNetworkFee(
 ): Promise<NetworkFeeEstimate> {
   if (!isNetworkFeeEnabled()) return disabledEstimate();
 
+  const feeBound =
+    order.networkFeeCc != null && order.networkFeeCc !== "";
   const now = Math.floor(Date.now() / 1000);
   if (
+    !feeBound &&
     order.networkFeeExpiresAt != null &&
     now > order.networkFeeExpiresAt + QUOTE_GRACE_SECONDS
   ) {
@@ -1402,8 +1405,11 @@ export async function revalidateHtlcLoopNetworkFee(params: {
 }): Promise<NetworkFeeEstimate> {
   if (!isNetworkFeeEnabled()) return disabledEstimate();
 
+  const feeBound =
+    params.order.networkFeeCc != null && params.order.networkFeeCc !== "";
   const now = Math.floor(Date.now() / 1000);
   if (
+    !feeBound &&
     params.order.networkFeeExpiresAt != null &&
     now > params.order.networkFeeExpiresAt + QUOTE_GRACE_SECONDS
   ) {

@@ -31,7 +31,6 @@ import { getSwapAsset } from "./canton-assets";
 import { findUserLegOfferForOrder } from "./canton-swap-offer-verify";
 import { extractCreatedOfferCid } from "./mint-processor-logic";
 import {
-  isLoopFillPendingCounterAccept,
   isLoopUserLegPreapprovalSettled,
   isPendingCounterAccept,
   loopCounterReissueCommandId,
@@ -184,8 +183,8 @@ async function submitManagedUserLegOffer(order: CantonSwapOrder): Promise<{
     );
   }
 
-  let commands: unknown[] = [userLeg.command];
-  let disclosed = userLeg.disclosedContracts;
+  const commands: unknown[] = [userLeg.command];
+  const disclosed = userLeg.disclosedContracts;
 
   const commandId = `canton-swap-offer-${order.id}`;
   try {

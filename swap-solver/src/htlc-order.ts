@@ -226,8 +226,7 @@ export async function signHtlcOrder(params: {
 
 function defaultRandom(n: number): Uint8Array {
   const a = new Uint8Array(n);
-  // Web Crypto (browser + Node 19+).
-  (globalThis.crypto as Crypto).getRandomValues(a);
+  globalThis.crypto.getRandomValues(a);
   return a;
 }
 

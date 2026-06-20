@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
-import { isSwapClaimable, filterHistoryOrders, isAbandonedSwapDraft, resolveCreateOrder, shouldPollOrderOnOrdersPage, htlcUserWbtcClaimTx } from "./htlc-order-logic";
+import { isSwapClaimable, filterHistoryOrders, isAbandonedSwapDraft, resolveCreateOrder, shouldPollOrderOnOrdersPage, htlcUserWbtcClaimTx, reverseZeroLockReconcileOutcome } from "./htlc-order-logic";
 import type { SwapOrder } from "./htlc-types";
 
 const base = {
@@ -9,6 +9,14 @@ const base = {
   counterMode: "managed" as const,
   revealedPreimage: undefined,
 };
+
+test("reverseZeroLockReconcileOutcome: C-02 solver retake must not advance", () => {
+  assert.equal(reverseZeroLockReconcileOutcome(false), "continue");
+});
+
+test("reverseZeroLockReconcileOutcome: user Claimed advances to counter_claimed", () => {
+  assert.equal(reverseZeroLockReconcileOutcome(true), "counter_claimed");
+});
 
 test("isSwapClaimable: counter_locked managed forward", () => {
   assert.equal(isSwapClaimable({ ...base, status: "counter_locked" }), true);
@@ -158,7 +166,7 @@ test("resolveCreateOrder rejects id owned by another party", () => {
     id: "0xhash",
     direction: "evm-to-canton",
     status: "open",
-    hashLock: "0x" + "ab".repeat(32),
+    hashLock: ("0x" + "ab".repeat(32)) as `0x${string}`,
     userTimelock: 9999,
     userCantonParty: "user::1",
     solverCantonParty: "solver::1",

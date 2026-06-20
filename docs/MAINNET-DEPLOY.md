@@ -1,6 +1,6 @@
 # Mainnet / Devnet deployment guide
 
-How to run OranjSwap HTLC swaps on **WarpX devnet + Base Sepolia** vs **WarpX mainnet + Arbitrum**, either as **one stack at a time** (toggle) or **two stacks in parallel**.
+How to run OranjSwap HTLC swaps on **WarpX devnet + Base Sepolia** vs **WarpX mainnet + Base**, either as **one stack at a time** (toggle) or **two stacks in parallel**.
 
 Env templates (no secrets):
 
@@ -18,7 +18,7 @@ Env templates (no secrets):
 These must all match on a single stack:
 
 - `NEXT_PUBLIC_NETWORK` / Loop wallet network (`devnet` vs `mainnet`)
-- `NEXT_PUBLIC_SWAP_CHAIN` / solver `EVM_CHAIN` (`base-sepolia` vs `arbitrum`)
+- `NEXT_PUBLIC_SWAP_CHAIN` / solver `EVM_CHAIN` (`base-sepolia` vs `base`)
 - Solver Canton party + CBTC float on that ledger
 - `API_BASE` on the solver → the web app built for the **same** network
 
@@ -45,8 +45,8 @@ Four Railway services (or two Environments × web + solver):
 |---------|-------------|------------------------|-----|
 | web-devnet | `dev.example.com` | `devnet` | Base Sepolia |
 | solver-devnet | internal | — | Base Sepolia RPC |
-| web-mainnet | `app.example.com` | `mainnet` | Arbitrum |
-| solver-mainnet | internal | — | Arbitrum RPC |
+| web-mainnet | `app.example.com` | `mainnet` | Base |
+| solver-mainnet | internal | — | Base RPC |
 
 - **Separate Supabase project** per network (recommended)
 - **Separate solver EVM hot keys** and CBTC float
@@ -63,7 +63,7 @@ Four Railway services (or two Environments × web + solver):
 |----------|--------|---------|
 | `NEXT_PUBLIC_NETWORK` | `devnet` | `mainnet` |
 | `NEXT_PUBLIC_LOOP_NETWORK` | `devnet` | `mainnet` |
-| `NEXT_PUBLIC_SWAP_CHAIN` | `base-sepolia` | `arbitrum` |
+| `NEXT_PUBLIC_SWAP_CHAIN` | `base-sepolia` | `base` |
 
 ### Web — Canton + auth
 
@@ -79,8 +79,8 @@ Four Railway services (or two Environments × web + solver):
 
 | Variable | Devnet | Mainnet |
 |----------|--------|---------|
-| `NEXT_PUBLIC_HTLC_ESCROW` | `0x1b19a764…` (Sepolia) | Arbitrum deploy address |
-| `NEXT_PUBLIC_WBTC_ADDRESS` | mock `0x8d587e55…` | `0x2f2a2543…` (Arbitrum WBTC) |
+| `NEXT_PUBLIC_HTLC_ESCROW` | `0x1b19a764…` (Sepolia) | Base deploy address |
+| `NEXT_PUBLIC_WBTC_ADDRESS` | mock `0x8d587e55…` | Base WBTC |
 | `NEXT_PUBLIC_SOLVER_EVM` | dev solver address | mainnet solver address |
 | `NEXT_PUBLIC_SOLVER_CANTON` | `warpx-devnet-1::…` | `warpx-mainnet-1::…` |
 | `SOLVER_EVM` / `SOLVER_CANTON_PARTY` | same (server validation) | mainnet values |
@@ -91,10 +91,10 @@ Four Railway services (or two Environments × web + solver):
 |----------|--------|---------|
 | `SWAP_NETWORK` | `devnet` | `mainnet` |
 | `ALLOW_MAINNET` | unset | `true` |
-| `EVM_CHAIN` | `base-sepolia` | `arbitrum` |
+| `EVM_CHAIN` | `base-sepolia` | `base` |
 | `API_BASE` | dev web URL | mainnet web URL |
-| `ORIGIN_RPC_URL` | `https://sepolia.base.org` | `https://arb1.arbitrum.io/rpc` |
-| `HTLC_ESCROW_ADDRESS` | Sepolia escrow | Arbitrum escrow |
+| `ORIGIN_RPC_URL` | `https://sepolia.base.org` | `https://mainnet.base.org` |
+| `HTLC_ESCROW_ADDRESS` | Sepolia escrow | Base escrow |
 | `NEXT_PUBLIC_HTLC_ESCROW` | same (if service runs `npm run build`) | same |
 | `SOLVER_EVM_PK` | dev hot key | **new** mainnet hot key |
 | `HTLC_DAEMON_SECRET` | shared with web stack | unique if parallel |
@@ -105,13 +105,13 @@ Four Railway services (or two Environments × web + solver):
 
 Complete before pointing production env at mainnet:
 
-### 1. Deploy HTLCEscrow on Arbitrum
+### 1. Deploy HTLCEscrow on Base
 
 ```bash
 cd contracts && forge build
 cd ../swap-solver
 
-# Copy and fill secrets (deployer needs Arbitrum ETH)
+# Copy and fill secrets (deployer needs Base ETH)
 cp .env.htlc-mainnet.example .env.htlc-mainnet
 cp ../.env.mainnet.example ../.env.mainnet
 # Set PRIVATE_KEY or SOLVER_EVM_PK, ALLOW_MAINNET=true, ORIGIN_RPC_URL
@@ -132,13 +132,13 @@ Record output address → `HTLC_ESCROW_ADDRESS` and `NEXT_PUBLIC_HTLC_ESCROW`.
 | Asset | Party / wallet | Notes |
 |-------|----------------|-------|
 | CBTC float | `warpx-mainnet-1::1220517b…` | On-ledger transfers + HtlcLock |
-| ETH | Solver EVM hot key | Arbitrum gas for lock/claim |
+| ETH | Solver EVM hot key | Base gas for lock/claim |
 | CC (Amulet) | Solver Canton party | Ledger write fees |
 
 ### 4. Supabase
 
 - Create **mainnet** Supabase project (if parallel)
-- Run all migrations through `010_htlc_orders_rls_lockdown.sql` in SQL Editor
+- Run all migrations through `027_network_fee_settlement_unique.sql` in SQL Editor
 - Set web env Supabase keys to mainnet project
 
 ### 5. Keycloak
@@ -207,7 +207,7 @@ Do **not** point a solver service at repo root — it would pick up the Next.js 
 
 1. Duplicate web + solver services (or use Railway Environments)
 2. Attach devnet env set to dev pair; mainnet env set to main pair
-3. Separate Supabase per network; apply migration 010 on each
+3. Separate Supabase per network; apply migrations through 027 on each
 4. Point each solver `API_BASE` at its web URL
 5. Deploy devnet first; validate; then mainnet
 
@@ -219,7 +219,7 @@ Per network after deploy:
 
 - [ ] Web build succeeds with network-specific `NEXT_PUBLIC_*` at build time
 - [ ] `/api/parties/balance` returns CBTC + CC for a Loop party on that network
-- [ ] MetaMask prompts for correct chain (84532 Sepolia vs 42161 Arbitrum)
+- [ ] MetaMask prompts for correct chain (84532 Base Sepolia vs 8453 Base mainnet)
 - [ ] HTLC swap: create → accept → lock → claim → daemon settles
 - [ ] Supabase anon REST returns 401 on `htlc_orders`
 - [ ] Loop wallet on matching network (`devnet.cantonloop.com` vs `cantonloop.com`)
@@ -231,7 +231,7 @@ Per network after deploy:
 
 | Item | Value |
 |------|-------|
-| Arbitrum HTLCEscrow | `0x…` |
+| Base HTLCEscrow | `0x…` |
 | `CBTC_HTLC_PKG_ID` | `…` |
 | Solver EVM address | `0x…` |
 | Solver Canton party | `warpx-mainnet-1::…` |

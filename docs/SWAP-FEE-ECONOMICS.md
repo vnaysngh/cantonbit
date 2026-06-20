@@ -16,7 +16,7 @@ Companion to [SWAP-RUNBOOK.md](SWAP-RUNBOOK.md).
 | **Network fee** | CC | Pass-through for Canton traffic on **user-charged** submits | `NETWORK_FEE_RECEIVER_PARTY` (WarpX node party) |
 
 - Platform fee default: **1%** output-side (`PLATFORM_FEE_BPS=100`).
-- Network fee: prepare-measured traffic bytes → USD → CC, plus quote buffer (`NETWORK_FEE_BUFFER_BPS`, default **1000** = +10%).
+- Network fee: prepare-measured traffic bytes → USD → CC, plus quote buffer (`NETWORK_FEE_BUFFER_BPS`, default **1500** = +15%).
 - **Quote vs order (critical):** the **60s RFQ TTL** applies only to **pre-order** price previews (`/api/htlc/quote`, review modal). Once the user creates an order, **`networkFeeCc` is bound on the order** and execution re-estimates bytes but **never charges above that cap** — there is **no separate fee expiry mid-swap**. If the swap is still valid (legs locked, before timelock), claim/settle must not fail with “quote expired.”
 - Settlement vault (`CANTON_SWAP_SETTLEMENT_PARTY` = `oranj-settle-*`) handles swap float. **Only** network fees go to the node party — not the vault.
 
@@ -30,7 +30,7 @@ One rule everywhere:
 > **Never include the CC fee-transfer command in the byte meter.**  
 > **Platform absorbs:** fee-collection traffic, vault/solver legs not listed below, and EVM solver gas.
 
-| Flow | User-charged bytes (quoted) | Typical quoted fee (+10% buffer) | Fee collected on (atomic) |
+| Flow | User-charged bytes (quoted) | Typical quoted fee (+15% buffer) | Fee collected on (atomic) |
 |------|----------------------------|----------------------------------|---------------------------|
 | **C2C** CBTC↔CC | User offer + vault accept | **~6–7 CC** | Vault fill submit (accept + deliver + fee CC) |
 | **HTLC forward** (WBTC→CBTC) | `HtlcLock.Claim` only | **~3.5–4 CC** | Claim submit (claim + fee CC) |
@@ -52,7 +52,7 @@ Implementation: `lib/canton-network-fee.ts` → `priceUserChargedTrafficBytes()`
 
 1. **Measure:** `POST /v2/interactive-submission/prepare` → `costEstimation.totalTrafficCostEstimation` (bytes per command).
 2. **Price:** `bytes / 1_000_000 × extraTrafficPriceUsdPerMb / amuletPriceUsd` (read live from Scan).
-3. **Buffer:** `× (1 + NETWORK_FEE_BUFFER_BPS / 10_000)` — default **+10%**.
+3. **Buffer:** `× (1 + NETWORK_FEE_BUFFER_BPS / 10_000)` — default **+15%**.
 4. **Min balance:** `networkFeeCc + NETWORK_FEE_RESERVE_CC` (default **+5 CC** reserve).
 
 Devnet list price (June 2026 probe): **~$60/MB**, **~$0.156/CC**. Devnet often burns **$0** traffic (WarpX subsidy); use list price for mainnet planning.
@@ -116,7 +116,7 @@ Platform net ≈ platform_fee_usd
              − evm_solver_ops_usd
 ```
 
-User network fee CC is **pass-through** to `NETWORK_FEE_RECEIVER_PARTY` (node traffic). It is not platform revenue. The **10% quote buffer** surplus (after traffic is paid) plus **1% platform fee** fund absorbed vault/solver legs.
+User network fee CC is **pass-through** to `NETWORK_FEE_RECEIVER_PARTY` (node traffic). It is not platform revenue. The **15% quote buffer** surplus (after traffic is paid) plus **1% platform fee** fund absorbed vault/solver legs.
 
 ### ~$100 notional (planning, list price, network fee ON)
 
@@ -157,7 +157,7 @@ Prepaid gate: user CC ≥ `networkFeeCc + NETWORK_FEE_RESERVE_CC` or swap blocke
 | `NETWORK_FEE_QUOTE_PREVIEW=1` | Show quotes without collecting (dev) |
 | `NETWORK_FEE_RECEIVER_PARTY` | Node party for fee CC (`warpx-*`) |
 | `CANTON_SWAP_SETTLEMENT_PARTY` | Vault for swap float (`oranj-settle-*`) |
-| `NETWORK_FEE_BUFFER_BPS` | Quote buffer (default 1000 = +10%) |
+| `NETWORK_FEE_BUFFER_BPS` | Quote buffer (default 1500 = +15%) |
 | `NETWORK_FEE_RESERVE_CC` | Min CC reserve beyond fee (default 5) |
 | `PLATFORM_FEE_BPS` | Output spread (default 100 = 1%) |
 
@@ -192,7 +192,7 @@ Enable `TARGET_TRAFFIC_THROUGHPUT` with Five North / WarpX so paid traffic is pu
 ### Track B — app enable
 
 1. Set env (§7) on web + HTLC solver (`CANTON_SWAP_SETTLEMENT_PARTY` on solver too).
-2. Apply Supabase migration `023_network_fee.sql` (+ later fee ledger migrations).
+2. Apply Supabase migrations through `027_network_fee_settlement_unique.sql` (+ earlier fee ledger migrations).
 3. Devnet E2E: C2C settle + HTLC forward/reverse — Review shows network fee → CC collected atomically.
 4. Staging → mainnet with `ALLOW_MAINNET=true` on solver.
 

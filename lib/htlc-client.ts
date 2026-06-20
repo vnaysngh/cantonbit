@@ -12,6 +12,7 @@ import {
   encodeRetake
 } from "./htlc-evm-encode";
 import { payLoopHtlcNetworkFeeIfNeeded } from "./loop-htlc-fee-client";
+import { getBrowserEvmProvider, waitForEvmReceipt } from "./evm-wait-receipt";
 
 export interface HtlcOrderInput {
   id: string;
@@ -157,15 +158,6 @@ export const htlcApi = {
     disclosedContracts: unknown[];
     synchronizerId: string;
   }> => jpost(`/api/htlc/${id}/prepare-network-fee`, { ccHoldingCids }),
-  /** Loop reverse — fee-only CC submit before user→venue CBTC lock. */
-  prepareSellerNetworkFee: (
-    id: string,
-    ccHoldingCids: string[]
-  ): Promise<{
-    command: unknown;
-    disclosedContracts: unknown[];
-    synchronizerId: string;
-  }> => jpost(`/api/htlc/${id}/prepare-seller-network-fee`, { ccHoldingCids }),
   recordNetworkFee: (id: string, settlementUpdateId: string) =>
     jpost(`/api/htlc/${id}/record-network-fee`, { settlementUpdateId }),
   confirmLockLoop: (id: string) => jpost(`/api/htlc/${id}/confirm-lock-loop`),
@@ -340,7 +332,10 @@ export async function claimSwap(opts: {
     if (!opts.send)
       throw new Error("Connect your EVM wallet to claim your WBTC.");
     const tx = await evmClaim(opts.send, escrow, preimage);
-    await htlcApi.recordClaim(order.id, preimage, tx).catch(() => {});
+    const provider = getBrowserEvmProvider();
+    if (!provider) throw new Error("no EVM provider");
+    await waitForEvmReceipt(provider, tx);
+    await htlcApi.recordClaim(order.id, preimage, tx);
     return { tx };
   }
 

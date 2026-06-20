@@ -13,10 +13,19 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const auth = await requireOrderOwner(id);
     if (auth.error) return auth.error;
     const body = await req.json().catch(() => ({}));
+    const rawMax = body.maxAttempts != null ? Number(body.maxAttempts) : undefined;
+    const rawPoll = body.pollMs != null ? Number(body.pollMs) : undefined;
+    const maxAttempts =
+      rawMax != null && Number.isFinite(rawMax)
+        ? Math.min(30, Math.max(1, Math.floor(rawMax)))
+        : undefined;
+    const pollMs =
+      rawPoll != null && Number.isFinite(rawPoll)
+        ? Math.min(5000, Math.max(500, Math.floor(rawPoll)))
+        : undefined;
     const order = await htlcService().confirmLoopSellerLock(id, {
-      maxAttempts:
-        body.maxAttempts != null ? Number(body.maxAttempts) : undefined,
-      pollMs: body.pollMs != null ? Number(body.pollMs) : undefined
+      maxAttempts,
+      pollMs
     });
     return NextResponse.json({ order });
   } catch (e) {

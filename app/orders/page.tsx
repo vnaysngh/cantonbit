@@ -31,14 +31,8 @@ import {
   type CantonSwapHistoryRow
 } from "@/lib/canton-swap-history";
 import { isSmokeTestOrderId, isSwapClaimable, shouldPollOrderOnOrdersPage, ORDERS_LIVE_POLL_MAX, ORDERS_LIVE_POLL_MS, ORDERS_PAGE_TERMINAL_STATUSES, htlcUserWbtcClaimTx } from "@/lib/htlc-order-logic";
-import type { SwapOrder, SwapStatus } from "@/lib/htlc-types";
-import {
-  deriveHtlcProgress,
-  htlcPayReceive,
-  htlcStepIndex,
-  HTLC_PROGRESS_COPY,
-  HTLC_SWAP_STEPS
-} from "@/lib/htlc-track-order";
+import { truncatePartyId } from "@/lib/party-display";
+import type { SwapStatus } from "@/lib/htlc-types";
 import {
   forgetSecret,
   hasStoredSecret,
@@ -47,7 +41,6 @@ import {
   vaultMetaFromOrder
 } from "@/lib/secret-vault";
 import { listLoopCbtcHoldingCids } from "@/lib/loop-holdings";
-import { payLoopHtlcNetworkFeeIfNeeded } from "@/lib/loop-htlc-fee-client";
 import { getSwapErrorMessage } from "@/lib/swap-api";
 import { SWAP_CHAIN, HTLC_ESCROW_ADDRESS } from "@/lib/swap-evm";
 import { cn } from "@/lib/utils";
@@ -210,7 +203,7 @@ function fmtCbtc(dec: string): string {
     : dec;
 }
 function shortId(s?: string): string {
-  return s ? `${s.slice(0, 8)}…${s.slice(-6)}` : "—";
+  return s ? truncatePartyId(s) : "—";
 }
 function fmtTime(unix?: number): string {
   return unix ? new Date(unix * 1000).toLocaleString() : "—";
@@ -553,7 +546,8 @@ function OrdersPageInner() {
           if (!evm.account)
             throw new Error("Connect your EVM wallet to retake your WBTC.");
           const tx = await evmRetake(evm.sendTransaction, HTLC_ESCROW, o.id);
-          await htlcApi.recordRetake(o.id, tx).catch(() => {});
+          await evm.waitForReceipt(tx);
+          await htlcApi.recordRetake(o.id, tx);
           forgetSecret(o.id);
         } else {
           await htlcApi.refundMain(o.id);
@@ -893,6 +887,12 @@ function OrdersPageInner() {
                       {displayOrder.counterMode === "loop"
                         ? "Loop wallet"
                         : "Account"}
+                      {/* M-05: surface whether the Canton network fee was collected */}
+                      {displayOrder.networkFeeCollected === true && (
+                        <span className="mt-0.5 block text-[11px] text-foreground/40">
+                          Network fee paid
+                        </span>
+                      )}
                     </td>
                     <td className="hidden whitespace-nowrap px-4 py-3.5 text-xs text-foreground/55 md:table-cell">
                       {fmtDateShort(displayOrder.createdAt)}

@@ -4,6 +4,13 @@
  */
 import type { SwapOrder } from "./htlc-types";
 
+/** C-02 guard: zero EVM lock amount alone must not flip reverse order to counter_claimed. */
+export function reverseZeroLockReconcileOutcome(
+  evmClaimed: boolean
+): "counter_claimed" | "continue" {
+  return evmClaimed ? "counter_claimed" : "continue";
+}
+
 /** Dev/smoke automation order ids — exclude from user history and UI polling. */
 export function isSmokeTestOrderId(id: string | undefined): boolean {
   if (!id) return false;
@@ -122,7 +129,9 @@ export function isEvmTxHash(s: string | undefined): s is string {
  * Legacy reverse orders may have the user's WBTC claim tx in counterClaimUpdateId.
  */
 export function htlcUserWbtcClaimTx(
-  o: Pick<SwapOrder, "direction" | "mainClaimTx" | "counterClaimUpdateId">
+  o: Pick<SwapOrder, "mainClaimTx" | "counterClaimUpdateId"> & {
+    direction: SwapOrder["direction"] | "canton-swap";
+  }
 ): string | undefined {
   if (o.direction !== "canton-to-evm") return undefined;
   if (isEvmTxHash(o.mainClaimTx)) return o.mainClaimTx;

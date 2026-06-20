@@ -9,7 +9,6 @@ import {
   isOrderExpired,
   isRetriableLoopFillError,
   counterReissueCooldownElapsed,
-  LOOP_USER_LEG_OFFER_TTL_SECONDS,
   QUOTE_GRACE_SECONDS,
   resolveCreateCantonSwapOrder,
   isFalseVaultMigrationExpire,
@@ -24,7 +23,7 @@ import {
   networkFeeReceiverParty,
   revalidateOrderNetworkFee
 } from "./canton-network-fee";
-import { recordNetworkFeeCollected } from "./network-fee-ledger";
+import { bestEffortRecordNetworkFeeCollected } from "./network-fee-ledger";
 import {
   holdingsForSwapAsset
 } from "./canton-swap-holdings";
@@ -291,8 +290,17 @@ export class CantonSwapService {
         await this.store.put(o);
       }
       const result = await settleManagedSwap(o);
+      this.applyManagedFillResult(o, result);
+      if (!(await this.transition(o, "settling"))) {
+        const fresh = await this.must(o.id);
+        if (fresh.status === "filled") return fresh;
+        if (o.status === "filled") {
+          await this.store.put(o);
+          return o;
+        }
+      }
       if (result.networkFeeCollected && feeEstimate) {
-        await recordNetworkFeeCollected({
+        await bestEffortRecordNetworkFeeCollected({
           orderId: o.id,
           orderKind: "c2c",
           userParty: o.userParty,
@@ -303,15 +311,6 @@ export class CantonSwapService {
           receiverParty: networkFeeReceiverParty(),
           settlementUpdateId: result.updateId
         });
-      }
-      this.applyManagedFillResult(o, result);
-      if (!(await this.transition(o, "settling"))) {
-        const fresh = await this.must(o.id);
-        if (fresh.status === "filled") return fresh;
-        if (o.status === "filled") {
-          await this.store.put(o);
-          return o;
-        }
       }
       return o;
     } catch (e) {
@@ -345,6 +344,27 @@ export class CantonSwapService {
     this.applyManagedFillResult(o, result);
     if (!(await this.transition(o, priorStatus))) {
       await this.store.put(o);
+    }
+    // M-05: backfill the fee ledger on the repair path. The CC fee is appended into
+    // the SAME atomic settle that this repair just confirmed committed (settle.ts
+    // only adds the fee leg when networkFeeCc>0 && fees enabled), so a committed fill
+    // with a bound fee means the fee was collected. Idempotent via the (order_id,
+    // order_kind) + settlement_update_id unique indexes, so a double-record is safe.
+    if (
+      isNetworkFeeEnabled() &&
+      o.networkFeeCc &&
+      Number.parseFloat(o.networkFeeCc) > 0 &&
+      o.settlementUpdateId
+    ) {
+      await bestEffortRecordNetworkFeeCollected({
+        orderId: o.id,
+        orderKind: "c2c",
+        userParty: o.userParty,
+        feeCc: o.networkFeeCc,
+        networkFeeSource: "repair",
+        receiverParty: networkFeeReceiverParty(),
+        settlementUpdateId: o.settlementUpdateId
+      });
     }
     return o;
   }
@@ -381,7 +401,7 @@ export class CantonSwapService {
     transferKind: string;
     counterRequiresAccept: boolean;
   }> {
-    let o = await this.reopenFalseVaultMigrationIfNeeded(id);
+    const o = await this.reopenFalseVaultMigrationIfNeeded(id);
     if (o.walletMode !== "loop") throw new Error("prepare-user-leg is loop only");
     if (o.status !== "open") throw new Error(`invalid status ${o.status}`);
     assertOrderNotExpired(o);
@@ -396,7 +416,7 @@ export class CantonSwapService {
     id: string,
     params?: { offerCid?: string; submitUpdateId?: string }
   ): Promise<CantonSwapOrder> {
-    let o = await this.must(id);
+    const o = await this.must(id);
     if (o.walletMode !== "loop") throw new Error("confirm-user-leg is loop only");
     if (o.status === "user_locked") return o;
 

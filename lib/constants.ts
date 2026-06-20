@@ -154,8 +154,8 @@ export const instrumentsMetadataUrl = (): string =>
 export const acceptChoiceContextUrl = (transferInstructionCid: string): string =>
   `${tokenStandardBase()}/transfer-instruction/v1/${transferInstructionCid}/choice-contexts/accept`;
 
-// Warn when holding count is high. No hard block — Canton enforces its own limits.
-export const UTXO_WARN_THRESHOLD = 20;
+// Warn when holding count is high. Canton enforces max ~10 UTXOs per party.
+export const UTXO_WARN_THRESHOLD = 8;
 export const BITCOIN_CONFIRMATIONS_REQUIRED = 6;
 export const JWT_REFRESH_BUFFER_SECONDS = 5 * 60;
 

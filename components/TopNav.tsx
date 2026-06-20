@@ -12,6 +12,7 @@ import { useWallet } from "@/hooks/useWallet";
 import { useEvmWallet } from "@/hooks/useEvmWallet";
 import { useBalance } from "@/hooks/useBalance";
 import { SWAP_CHAIN } from "@/lib/swap-evm";
+import { truncateEvmAddress, truncatePartyId } from "@/lib/party-display";
 import { cn } from "@/lib/utils";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
@@ -210,7 +211,7 @@ function WalletsMenu({
   if (ready && !party) return null;
 
   const evmConnected = !!evm.account;
-  const shortParty = party ? `${party.slice(0, 8)}…${party.slice(-6)}` : "Loading…";
+  const shortParty = party ? truncatePartyId(party) : "Loading…";
   const triggerLabel = evmSwitching
     ? "Switching network…"
     : evmWrongChain
@@ -297,7 +298,7 @@ function WalletRow({
   connectDisabled?: boolean;
   onDisconnect: () => void;
 }) {
-  const short = address ? `${address.slice(0, 8)}…${address.slice(-6)}` : "";
+  const short = address ? truncateEvmAddress(address) : "";
   return (
     <div className="flex items-center justify-between gap-3 rounded-lg p-2">
       <div className="flex min-w-0 items-center gap-3">

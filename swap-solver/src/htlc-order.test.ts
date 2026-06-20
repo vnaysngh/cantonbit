@@ -85,7 +85,10 @@ test("signHtlcOrder: signature recovers to the user, binds hashLock + timelocks"
   const typed = buildHtlcOrderTypedData({ req, chainId, escrow });
 
   const recovered = await recoverTypedDataAddress({
-    ...(typed as never),
+    domain: typed.domain,
+    types: typed.types,
+    primaryType: typed.primaryType,
+    message: typed.message,
     signature: sig,
   });
   assert.equal(recovered.toLowerCase(), account.address.toLowerCase());
@@ -96,7 +99,13 @@ test("signHtlcOrder: signature recovers to the user, binds hashLock + timelocks"
     chainId,
     escrow,
   });
-  const recovered2 = await recoverTypedDataAddress({ ...(tampered as never), signature: sig });
+  const recovered2 = await recoverTypedDataAddress({
+    domain: tampered.domain,
+    types: tampered.types,
+    primaryType: tampered.primaryType,
+    message: tampered.message,
+    signature: sig,
+  });
   assert.notEqual(recovered2.toLowerCase(), account.address.toLowerCase());
 });
 

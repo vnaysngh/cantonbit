@@ -40,10 +40,7 @@ export async function payLoopHtlcNetworkFeeIfNeeded(opts: {
     );
   }
 
-  const prep =
-    opts.direction === "canton-to-evm"
-      ? await htlcApi.prepareSellerNetworkFee(opts.orderId, ccCids)
-      : await htlcApi.prepareNetworkFee(opts.orderId, ccCids);
+  const prep = await htlcApi.prepareNetworkFee(opts.orderId, ccCids);
 
   const userParty = opts.provider.party_id ?? "";
   if (!userParty) throw new Error("Loop wallet party unavailable — reconnect Loop.");

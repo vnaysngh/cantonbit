@@ -39,6 +39,8 @@ export interface SwapOrder {
   htlcBlob?: string;
   counterTransferOfferCid?: string;
   counterTransferUpdateId?: string;
+  /** Loop reverse seller: solver CBTC holding CIDs at accept — new custody must not be in this set. */
+  solverCustodyBaselineCids?: string[];
   /** Bound network fee CC from quote (managed paths). */
   networkFeeCc?: string;
   networkFeeExpiresAt?: number;

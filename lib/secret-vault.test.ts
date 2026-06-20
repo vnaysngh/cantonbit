@@ -1,6 +1,8 @@
 import { strict as assert } from "node:assert";
 import { test, afterEach } from "node:test";
 
+const env = process.env as Record<string, string | undefined>;
+
 import {
   __setLoopUnlockBypassForTests,
   __setVaultStorageForTests,
@@ -145,15 +147,15 @@ test("loop recall rejects wrong public_key", async () => {
 });
 
 test("__setLoopUnlockBypassForTests throws in production", () => {
-  const prev = process.env.NODE_ENV;
-  process.env.NODE_ENV = "production";
+  const prev = env.NODE_ENV;
+  env.NODE_ENV = "production";
   try {
     assert.throws(
       () => __setLoopUnlockBypassForTests(true),
       /disabled in production/,
     );
   } finally {
-    process.env.NODE_ENV = prev;
+    env.NODE_ENV = prev;
   }
 });
 

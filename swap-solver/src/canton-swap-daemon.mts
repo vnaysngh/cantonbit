@@ -5,12 +5,38 @@
  *
  * Env: HTLC_DAEMON_SECRET, CANTON_SWAP_API_URL (or NEXT_PUBLIC_APP_URL)
  */
-const APP_URL =
-  process.env.CANTON_SWAP_API_URL ??
-  process.env.NEXT_PUBLIC_APP_URL ??
-  "http://localhost:3000";
-const SECRET = process.env.HTLC_DAEMON_SECRET ?? "";
+import { startHealthServer } from "./health-server.mjs";
+
+const APP_URL_EXPLICIT =
+  process.env.CANTON_SWAP_API_URL ?? process.env.NEXT_PUBLIC_APP_URL;
+const APP_URL = APP_URL_EXPLICIT ?? "http://localhost:3000";
+const SECRET = (process.env.HTLC_DAEMON_SECRET ?? "").trim();
 const POLL_MS = Number(process.env.CANTON_SWAP_POLL_MS ?? "5000");
+const IS_MAINNET =
+  process.env.SWAP_NETWORK === "mainnet" ||
+  process.env.ALLOW_MAINNET === "true";
+
+// M-01: fail fast on missing config. Without the secret the web side rejects every
+// daemon request (fail-closed auth), so the daemon would otherwise spin on 401s
+// forever with no signal.
+if (!SECRET) {
+  console.error(
+    "[canton-swap-daemon] FATAL: HTLC_DAEMON_SECRET is not set — all daemon API calls would 401. Set it (must match the web app) and restart."
+  );
+  process.exit(1);
+}
+// M-01: never silently run mainnet against the localhost default — that points the
+// daemon at nothing in a deployed environment.
+if (IS_MAINNET && !APP_URL_EXPLICIT) {
+  console.error(
+    "[canton-swap-daemon] FATAL: mainnet requires CANTON_SWAP_API_URL (or NEXT_PUBLIC_APP_URL) — refusing the localhost default."
+  );
+  process.exit(1);
+}
+if (!Number.isFinite(POLL_MS) || POLL_MS <= 0) {
+  console.error(`[canton-swap-daemon] FATAL: invalid CANTON_SWAP_POLL_MS`);
+  process.exit(1);
+}
 
 function authHeaders(): HeadersInit {
   return {
@@ -79,12 +105,21 @@ async function tick(): Promise<void> {
   await fillPending();
 }
 
+// M-01: health/readiness server + heartbeat.
+const heartbeat = startHealthServer({
+  name: "canton-swap-daemon",
+  port: Number(process.env.HEALTH_PORT ?? "8081"),
+  readyStaleMs: Math.max(POLL_MS * 3, 30_000),
+  nowMs: () => Date.now()
+});
+
 /** Serial scheduler — next tick starts only after the previous finishes. */
 async function runLoop(): Promise<never> {
   for (;;) {
     const t0 = Date.now();
     try {
       await tick();
+      heartbeat.pollOk();
     } catch (e) {
       console.error("[canton-swap-daemon]", e);
     }

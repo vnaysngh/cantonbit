@@ -79,29 +79,14 @@ https://api.utilities.digitalasset.com
 COORDINATOR_URL:
 https://mainnet.dlc.link/attestor-1
 
-## What is still mocked (pending BitSafe access)
+## BitSafe / coordinator status
 
-Search for TODO(bitsafe) to find every mocked call.
+`lib/bitsafe.ts` calls the public DLC.link coordinator endpoints (no API key) for mint/burn contract rules and deposit/withdraw account flows.
 
-Mocked calls:
+Still pending external access:
 
-- POST /app/get-account-contract-rules
-- POST /app/get-bitcoin-address
-- POST /app/get-token-standard-contracts
-- Minter credential check
-
-NOT mocked anymore (real values confirmed above):
-
-- DECENTRALIZED_PARTY_ID — confirmed for all networks
-- REGISTRY_URL — confirmed for all networks
-- Instrument ID — { admin: DECENTRALIZED_PARTY_ID, id: "CBTC" }
-- Token standard metadata endpoint — confirmed for all networks
-
-When BitSafe access is ready:
-
-1. Set real NEXT_PUBLIC_BITSAFE_API_URL in .env.local
-2. Replace mocks in lib/bitsafe.ts with real calls
-3. Remove TODO(bitsafe) comments
+- Minter credential / holder onboarding via BitSafe app API
+- `NEXT_PUBLIC_BITSAFE_API_URL` for app-authenticated endpoints (if required)
 
 ## What the Token Standard gives us
 
@@ -174,7 +159,7 @@ Mainnet CBTC↔CC swaps: branch **`c2c-swaps`**, deploy **`oranjswap-web-mainnet
 - [ ] Task 2: JWT auth with auto-refresh
 - [ ] Task 3: Loop wallet connection
 - [ ] Task 4: Canton API client (lib/canton.ts)
-- [ ] Task 5: BitSafe API client with mocks (lib/bitsafe.ts)
+- [ ] Task 5: BitSafe API client (lib/bitsafe.ts — real coordinator calls)
 - [ ] Task 6: Token Standard client (lib/tokenstandard.ts)
 - [ ] Task 7: useBalance hook
 - [ ] Task 8: Dashboard screen

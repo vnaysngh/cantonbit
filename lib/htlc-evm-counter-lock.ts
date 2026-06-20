@@ -14,6 +14,10 @@ export const HTLC_LOCKED_EVENT_TOPIC =
 export const HTLC_CLAIMED_EVENT_TOPIC =
   "0x9baa2625abab959dfcaa38cf2046eb3d90f7e017d3c1a9ae36b079d5c77db937";
 
+/** keccak256("Retaken(bytes32,uint256,uint256,address,address,address)") */
+export const HTLC_RETAKEN_EVENT_TOPIC =
+  "0x92fa5d2512a0c91c94e90087fc2ded03ce1ec5b10ef5c729af19bd597fc88d5f";
+
 function normalizeHashLock(hashLock: string): string {
   const h = hashLock.startsWith("0x") ? hashLock.slice(2) : hashLock;
   return h.toLowerCase().padStart(64, "0");
@@ -264,7 +268,11 @@ export async function hasEvmClaimedForHashLock(
   const rpc = opts?.rpcUrl;
   const tip = await getBlockNumberHex(rpc);
   const tipN = BigInt(tip);
-  let from = opts?.fromBlockHex ? BigInt(opts.fromBlockHex) : tipN - 50_000n;
+  // C-02: when we have no trustworthy anchor block (counterLockTx missing/unmined),
+  // scan from genesis rather than a fixed recent window — a claim on an older/legacy
+  // order could fall outside a 50k-block window, and missing it would let a refund
+  // proceed after the user already took the WBTC. Slow but never misses.
+  let from = opts?.fromBlockHex ? BigInt(opts.fromBlockHex) : 0n;
   if (from < 0n) from = 0n;
   const chunk = 1990n;
   while (from <= tipN) {
@@ -280,7 +288,7 @@ export async function hasEvmClaimedForHashLock(
         }
       ],
       rpc
-    ).catch(() => []);
+    );
     if ((logs?.length ?? 0) > 0) return true;
     from = to + 1n;
   }
@@ -332,4 +340,68 @@ export async function evmTxBlockHex(txHash: string): Promise<string | undefined>
     [txHash]
   );
   return receipt?.blockNumber;
+}
+
+function receiptHasHashLockEvent(
+  receipt: RpcReceipt,
+  hashLock: string,
+  eventTopic: string
+): boolean {
+  const want = normalizeHashLock(hashLock);
+  const topic1 = `0x${want}`;
+  const escrow = HTLC_ESCROW_ADDRESS.toLowerCase();
+  for (const log of receipt.logs ?? []) {
+    if ((log.address ?? "").toLowerCase() !== escrow) continue;
+    const topics = log.topics ?? [];
+    if (topics[0]?.toLowerCase() !== eventTopic.toLowerCase()) continue;
+    if ((topics[1] ?? "").toLowerCase() !== topic1) continue;
+    return true;
+  }
+  return false;
+}
+
+/** Verify forward user retake tx emitted Retaken for this hashLock. */
+export async function verifyForwardRetakeTx(
+  retakeTx: string,
+  hashLock: string
+): Promise<void> {
+  const tx = retakeTx.trim();
+  if (!tx.startsWith("0x") || tx.length !== 66) {
+    throw new Error("retakeTx must be a 32-byte tx hash (0x + 64 hex)");
+  }
+  const receipt = await rpcCall<RpcReceipt>("eth_getTransactionReceipt", [tx]);
+  if (!receipt) {
+    throw new Error(`retake tx not found on ${SWAP_CHAIN.name}: ${tx}`);
+  }
+  if (receipt.status !== "0x1") {
+    throw new Error(`retake tx reverted on-chain: ${tx}`);
+  }
+  if (!receiptHasHashLockEvent(receipt, hashLock, HTLC_RETAKEN_EVENT_TOPIC)) {
+    throw new Error(
+      `retake tx has no matching Retaken event for hashLock on escrow ${HTLC_ESCROW_ADDRESS}`
+    );
+  }
+}
+
+/** Verify reverse user claim tx emitted Claimed for this hashLock. */
+export async function verifyReverseClaimTx(
+  claimTx: string,
+  hashLock: string
+): Promise<void> {
+  const tx = claimTx.trim();
+  if (!tx.startsWith("0x") || tx.length !== 66) {
+    throw new Error("claim tx must be a 32-byte tx hash (0x + 64 hex)");
+  }
+  const receipt = await rpcCall<RpcReceipt>("eth_getTransactionReceipt", [tx]);
+  if (!receipt) {
+    throw new Error(`claim tx not found on ${SWAP_CHAIN.name}: ${tx}`);
+  }
+  if (receipt.status !== "0x1") {
+    throw new Error(`claim tx reverted on-chain: ${tx}`);
+  }
+  if (!receiptHasHashLockEvent(receipt, hashLock, HTLC_CLAIMED_EVENT_TOPIC)) {
+    throw new Error(
+      `claim tx has no matching Claimed event for hashLock on escrow ${HTLC_ESCROW_ADDRESS}`
+    );
+  }
 }
