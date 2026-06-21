@@ -6,6 +6,10 @@ import { NETWORK } from "./constants";
 const TAG = "[cc-registry]";
 
 let cachedDsoParty: string | null = null;
+const cachedTransferPreapprovalCids = new Map<
+  string,
+  { contractId: string; until: number }
+>();
 
 function validatorUrl(path: string): string {
   return `${NETWORK.validatorHost}/api/validator${path}`;
@@ -58,4 +62,44 @@ export async function fetchCcRegistry(
     headers,
     cache: "no-store"
   });
+}
+
+/** Active Splice CC TransferPreapproval contract for a receiver. */
+export async function getCcTransferPreapprovalContractId(
+  receiverParty: string
+): Promise<string> {
+  const cached = cachedTransferPreapprovalCids.get(receiverParty);
+  if (cached && cached.until > Date.now()) return cached.contractId;
+  const jwt = await getLedgerJwt();
+  const r = await fetch(
+    validatorUrl(
+      `/v0/scan-proxy/transfer-preapprovals/by-party/${encodeURIComponent(receiverParty)}`
+    ),
+    {
+      headers: { Authorization: `Bearer ${jwt}` },
+      cache: "no-store"
+    }
+  );
+  if (!r.ok) {
+    throw new Error(
+      `CC TransferPreapproval lookup failed (${r.status}): ${await r.text().catch(() => "")}`
+    );
+  }
+  const body = (await r.json().catch(() => null)) as {
+    transfer_preapproval?: {
+      contract?: { contract_id?: string; contractId?: string };
+    };
+  } | null;
+  const contract = body?.transfer_preapproval?.contract;
+  const contractId = contract?.contract_id ?? contract?.contractId;
+  if (!contractId) {
+    throw new Error(
+      "CC TransferPreapproval lookup returned no active contract id"
+    );
+  }
+  cachedTransferPreapprovalCids.set(receiverParty, {
+    contractId,
+    until: Date.now() + 60_000
+  });
+  return contractId;
 }

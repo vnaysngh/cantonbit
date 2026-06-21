@@ -40,6 +40,8 @@ function rowToOrder(r: Record<string, unknown>): SwapOrder {
     networkFeeExpiresAt: r.network_fee_expires_at
       ? Math.floor(new Date(r.network_fee_expires_at as string).getTime() / 1000)
       : undefined,
+    networkFeePreapprovalCid:
+      (r.network_fee_preapproval_cid as string) ?? undefined,
     createdAt: r.created_at ? Math.floor(new Date(r.created_at as string).getTime() / 1000) : 0,
   };
 }
@@ -73,6 +75,7 @@ function orderToRow(o: SwapOrder): Record<string, unknown> {
     network_fee_expires_at: o.networkFeeExpiresAt
       ? new Date(o.networkFeeExpiresAt * 1000).toISOString()
       : null,
+    network_fee_preapproval_cid: o.networkFeePreapprovalCid ?? null,
     updated_at: new Date().toISOString(),
   };
 }

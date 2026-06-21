@@ -430,8 +430,26 @@ class HtlcService {
 
   async recordMainLock(id: string, mainLockTx: string) {
     const o = await this.must(id);
-    if (o.status !== "accepted")
+    if (!isEvmTxHash(mainLockTx)) {
+      throw new Error("invalid EVM main lock transaction hash");
+    }
+    // Idempotent recovery: if the first request committed but its response was
+    // lost, the browser must be able to retry the same hash safely.
+    if (o.mainLockTx) {
+      if (o.mainLockTx.toLowerCase() !== mainLockTx.toLowerCase()) {
+        throw new Error("main lock already recorded with a different transaction");
+      }
+      return o;
+    }
+    if (o.status !== "accepted") {
       throw new Error(`order not accepted (${o.status})`);
+    }
+    if (o.direction !== "evm-to-canton") {
+      throw new Error("EVM main lock is only valid for forward swaps");
+    }
+    // A receipt timeout only means the transaction may still land. Do not advance
+    // the order until the escrow mapping itself proves the exact expected lock.
+    await verifyEvmLock(o);
     o.status = "main_locked";
     o.mainLockTx = mainLockTx;
     await this.store.put(o);
@@ -745,6 +763,7 @@ class HtlcService {
     synchronizerId: string;
     actAs: string[];
     networkFeeCc: string;
+    networkFeePreapprovalCid: string;
   }> {
     const o = await this.must(id);
     if (o.counterMode !== "loop") {
@@ -765,6 +784,9 @@ class HtlcService {
       networkFeeCc: feeEstimate.feeCc,
       ccHoldingCids
     });
+    o.networkFeeCc = feeEstimate.feeCc;
+    o.networkFeePreapprovalCid = prep.networkFeePreapprovalCid;
+    await this.store.put(o);
     return { ...prep, networkFeeCc: feeEstimate.feeCc };
   }
 
@@ -793,17 +815,29 @@ class HtlcService {
       action: "htlc-loop-claim"
     });
     const receiverParty = networkFeeReceiverParty();
+    // The fee amount is server-bound on the order. Never accept a browser-supplied
+    // amount here: the update tree must prove payment of this minimum.
+    const minFeeCc =
+      (o.networkFeeCc && o.networkFeeCc.trim()) ||
+      feeEstimate.feeCc;
+    const expectedPreapprovalCid = o.networkFeePreapprovalCid?.trim();
+    if (!expectedPreapprovalCid) {
+      throw new Error(
+        "network fee preapproval binding missing — prepare the fee again"
+      );
+    }
     await verifyLoopNetworkFeeSettlement({
       updateId,
       userParty: o.userCantonParty,
       receiverParty,
-      minFeeCc: feeEstimate.feeCc
+      minFeeCc,
+      expectedPreapprovalCid
     });
     await recordNetworkFeeCollected({
       orderId: o.id,
       orderKind: "htlc",
       userParty: o.userCantonParty,
-      feeCc: feeEstimate.feeCc,
+      feeCc: minFeeCc,
       feeUsd: feeEstimate.feeUsd,
       trafficBytes: feeEstimate.trafficBytes,
       networkFeeSource: feeEstimate.networkFeeSource,

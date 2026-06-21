@@ -53,8 +53,8 @@ export function vaultMetaFromOrder(o: {
     userEvmAddress: o.userEvmAddress,
     expiresAt: vaultExpiryFromTimelock(o.userTimelock, {
       direction: o.direction,
-      solverTimelock: o.solverTimelock,
-    }),
+      solverTimelock: o.solverTimelock
+    })
   };
 }
 
@@ -105,7 +105,7 @@ export function pickVaultAnchor(counterMode: "managed" | "loop"): VaultAnchor {
 
 export function vaultExpiryFromTimelock(
   userTimelock: number,
-  opts?: { direction?: SecretVaultMeta["direction"]; solverTimelock?: number },
+  opts?: { direction?: SecretVaultMeta["direction"]; solverTimelock?: number }
 ): number {
   let until = userTimelock;
   // Reverse: user claims on EVM before the shorter solver-side timelock ends.
@@ -116,7 +116,7 @@ export function vaultExpiryFromTimelock(
 }
 
 export function loopVaultUnlockMessage(partyId: string): string {
-  return `Oranj HTLC Vault Unlock for ${partyId}`;
+  return `WarpX Vault Unlock for ${partyId}`;
 }
 
 export function readActiveHtlcSwap(): string | null {
@@ -193,7 +193,10 @@ function readLegacyPlaintext(swapId: string): string | null {
   const s = storage();
   if (!s) return null;
   try {
-    const legacy = JSON.parse(s.getItem(KEY_V1) ?? "{}") as Record<string, string>;
+    const legacy = JSON.parse(s.getItem(KEY_V1) ?? "{}") as Record<
+      string,
+      string
+    >;
     const val = legacy[swapId];
     return typeof val === "string" && val.length > 0 ? val : null;
   } catch {
@@ -205,7 +208,10 @@ function removeLegacyEntry(swapId: string): void {
   const s = storage();
   if (!s) return;
   try {
-    const legacy = JSON.parse(s.getItem(KEY_V1) ?? "{}") as Record<string, string>;
+    const legacy = JSON.parse(s.getItem(KEY_V1) ?? "{}") as Record<
+      string,
+      string
+    >;
     if (!legacy[swapId]) return;
     delete legacy[swapId];
     s.setItem(KEY_V1, JSON.stringify(legacy));
@@ -244,33 +250,57 @@ async function sha256(data: BufferSource): Promise<ArrayBuffer> {
 }
 
 async function importAesKey(raw: ArrayBuffer): Promise<CryptoKey> {
-  return crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]);
+  return crypto.subtle.importKey("raw", raw, "AES-GCM", false, [
+    "encrypt",
+    "decrypt"
+  ]);
 }
 
-export async function deriveManagedVaultKey(userId: string, cantonParty: string): Promise<CryptoKey> {
-  const material = new TextEncoder().encode(`${VAULT_DOMAIN}:managed:${userId}:${cantonParty}`);
+export async function deriveManagedVaultKey(
+  userId: string,
+  cantonParty: string
+): Promise<CryptoKey> {
+  const material = new TextEncoder().encode(
+    `${VAULT_DOMAIN}:managed:${userId}:${cantonParty}`
+  );
   return importAesKey(await sha256(material));
 }
 
-export async function deriveLoopVaultKey(publicKey: string, partyId: string): Promise<CryptoKey> {
-  const material = new TextEncoder().encode(`${VAULT_DOMAIN}:loop:${partyId}:${publicKey}`);
+export async function deriveLoopVaultKey(
+  publicKey: string,
+  partyId: string
+): Promise<CryptoKey> {
+  const material = new TextEncoder().encode(
+    `${VAULT_DOMAIN}:loop:${partyId}:${publicKey}`
+  );
   return importAesKey(await sha256(material));
 }
 
-async function encryptWithKey(key: CryptoKey, secret: string): Promise<{ iv: string; ct: string }> {
+async function encryptWithKey(
+  key: CryptoKey,
+  secret: string
+): Promise<{ iv: string; ct: string }> {
   const ivBuf = new ArrayBuffer(12);
   const iv = new Uint8Array(ivBuf);
   crypto.getRandomValues(iv);
-  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(secret));
+  const ct = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    key,
+    new TextEncoder().encode(secret)
+  );
   return { iv: b64Encode(ivBuf), ct: b64Encode(ct) };
 }
 
-async function decryptWithKey(key: CryptoKey, iv: string, ct: string): Promise<string | null> {
+async function decryptWithKey(
+  key: CryptoKey,
+  iv: string,
+  ct: string
+): Promise<string | null> {
   try {
     const plain = await crypto.subtle.decrypt(
       { name: "AES-GCM", iv: b64Decode(iv) },
       key,
-      b64Decode(ct),
+      b64Decode(ct)
     );
     return new TextDecoder().decode(plain);
   } catch {
@@ -288,11 +318,14 @@ function entryExpired(entry: VaultEntryV3): boolean {
 
 export function evmAddressMatches(
   entry: Pick<SecretVaultMeta, "direction" | "userEvmAddress">,
-  evmAddress: string | null | undefined,
+  evmAddress: string | null | undefined
 ): boolean {
   if (entry.direction !== "canton-to-evm") return true;
   if (!evmAddress) return false;
-  return normalizeEvmAddress(evmAddress) === normalizeEvmAddress(entry.userEvmAddress);
+  return (
+    normalizeEvmAddress(evmAddress) ===
+    normalizeEvmAddress(entry.userEvmAddress)
+  );
 }
 
 function isVaultEntry(x: unknown): x is VaultEntryV3 {
@@ -305,15 +338,25 @@ function parseSignature(sigRaw: unknown): string | null {
   return typeof sig === "string" ? sig : null;
 }
 
-async function ensureLoopVaultUnlock(provider: LoopVaultProvider): Promise<boolean> {
+async function ensureLoopVaultUnlock(
+  provider: LoopVaultProvider
+): Promise<boolean> {
   if (loopUnlockBypassForTests) return true;
-  if (loopUnlockCache?.partyId === provider.party_id && loopUnlockCache.until > Date.now()) {
+  if (
+    loopUnlockCache?.partyId === provider.party_id &&
+    loopUnlockCache.until > Date.now()
+  ) {
     return true;
   }
   try {
-    const signature = parseSignature(await provider.signMessage(loopVaultUnlockMessage(provider.party_id)));
+    const signature = parseSignature(
+      await provider.signMessage(loopVaultUnlockMessage(provider.party_id))
+    );
     if (!signature) return false;
-    loopUnlockCache = { partyId: provider.party_id, until: Date.now() + LOOP_UNLOCK_CACHE_MS };
+    loopUnlockCache = {
+      partyId: provider.party_id,
+      until: Date.now() + LOOP_UNLOCK_CACHE_MS
+    };
     return true;
   } catch {
     return false;
@@ -350,7 +393,7 @@ export async function rememberSecret(
   swapId: string,
   secret: string,
   meta: SecretVaultMeta,
-  ctx: VaultRecallContext,
+  ctx: VaultRecallContext
 ): Promise<boolean> {
   if (!storage()) return false;
   purgeExpiredSecrets();
@@ -384,7 +427,7 @@ export async function rememberSecret(
     userCantonParty: meta.userCantonParty,
     userEvmAddress: normalizeEvmAddress(meta.userEvmAddress),
     expiresAt: meta.expiresAt,
-    loopPublicKey,
+    loopPublicKey
   };
   writeStore(store);
   removeLegacyEntry(swapId);
@@ -395,7 +438,7 @@ export async function rememberSecret(
 
 async function migrateLegacyIfNeeded(
   swapId: string,
-  ctx: VaultRecallContext,
+  ctx: VaultRecallContext
 ): Promise<void> {
   const legacy = readLegacyPlaintext(swapId);
   if (!legacy || !ctx.orderMeta) return;
@@ -404,7 +447,10 @@ async function migrateLegacyIfNeeded(
 }
 
 /** Recover a swap's secret, or null if unavailable / unlock failed. */
-export async function recallSecret(swapId: string, ctx: VaultRecallContext): Promise<string | null> {
+export async function recallSecret(
+  swapId: string,
+  ctx: VaultRecallContext
+): Promise<string | null> {
   if (!storage()) return null;
   purgeExpiredSecrets();
 
@@ -418,13 +464,17 @@ export async function recallSecret(swapId: string, ctx: VaultRecallContext): Pro
   if (raw.anchor === "managed-session") {
     if (!ctx.sessionUserId || !ctx.sessionPartyId) return null;
     if (ctx.sessionPartyId !== raw.userCantonParty) return null;
-    const key = await deriveManagedVaultKey(ctx.sessionUserId, raw.userCantonParty);
+    const key = await deriveManagedVaultKey(
+      ctx.sessionUserId,
+      raw.userCantonParty
+    );
     return decryptWithKey(key, raw.iv, raw.ct);
   }
 
   const provider = ctx.loopProvider;
   if (!provider || provider.party_id !== raw.userCantonParty) return null;
-  if (raw.loopPublicKey && provider.public_key !== raw.loopPublicKey) return null;
+  if (raw.loopPublicKey && provider.public_key !== raw.loopPublicKey)
+    return null;
   const unlocked = await ensureLoopVaultUnlock(provider);
   if (!unlocked) return null;
   const pubKey = raw.loopPublicKey ?? provider.public_key;

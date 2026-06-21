@@ -345,26 +345,22 @@ export class CantonSwapService {
     if (!(await this.transition(o, priorStatus))) {
       await this.store.put(o);
     }
-    // M-05: backfill the fee ledger on the repair path. The CC fee is appended into
-    // the SAME atomic settle that this repair just confirmed committed (settle.ts
-    // only adds the fee leg when networkFeeCc>0 && fees enabled), so a committed fill
-    // with a bound fee means the fee was collected. Idempotent via the (order_id,
-    // order_kind) + settlement_update_id unique indexes, so a double-record is safe.
+    // P2a: do NOT record fee collection on the repair path. repairManagedFillFromLedger
+    // verifies only the SWAP legs of the recovered tx — it does NOT prove a fee leg was
+    // present. The env flag + order.networkFeeCc are configuration/metadata, not on-ledger
+    // evidence (fees could have been toggled on after the fill, or the fee leg could have
+    // been absent while the swap legs settled). Recording from that would book revenue
+    // that may not have been collected. Instead, surface it for manual/aggregate
+    // reconciliation; only the authoritative settle path (which sees result.networkFeeCollected)
+    // records the fee.
     if (
       isNetworkFeeEnabled() &&
       o.networkFeeCc &&
-      Number.parseFloat(o.networkFeeCc) > 0 &&
-      o.settlementUpdateId
+      Number.parseFloat(o.networkFeeCc) > 0
     ) {
-      await bestEffortRecordNetworkFeeCollected({
-        orderId: o.id,
-        orderKind: "c2c",
-        userParty: o.userParty,
-        feeCc: o.networkFeeCc,
-        networkFeeSource: "repair",
-        receiverParty: networkFeeReceiverParty(),
-        settlementUpdateId: o.settlementUpdateId
-      });
+      console.warn(
+        `[canton-swap] repaired fill ${o.id.slice(0, 12)} has a bound fee (${o.networkFeeCc} CC) but the fee leg was not verified on-ledger — NOT recording; reconcile manually.`
+      );
     }
     return o;
   }

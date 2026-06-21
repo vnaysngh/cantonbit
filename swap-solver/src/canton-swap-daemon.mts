@@ -6,6 +6,7 @@
  * Env: HTLC_DAEMON_SECRET, CANTON_SWAP_API_URL (or NEXT_PUBLIC_APP_URL)
  */
 import { startHealthServer } from "./health-server.mjs";
+import { runDaemonPhases } from "./daemon-phases.js";
 
 const APP_URL_EXPLICIT =
   process.env.CANTON_SWAP_API_URL ?? process.env.NEXT_PUBLIC_APP_URL;
@@ -51,11 +52,13 @@ async function fillStatus(status: "user_locked" | "filling"): Promise<void> {
     { headers: authHeaders() }
   );
   if (!res.ok) {
-    console.warn(
-      `[canton-swap-daemon] pending list (${status}) failed`,
-      await res.text()
+    // P1b: a non-2xx on the pending list means the daemon is NOT actually working
+    // (bad secret → 401, app down → 5xx). THROW so tick() fails and the heartbeat is
+    // NOT marked healthy — /ready must report unhealthy in this state. (A single
+    // per-order fill failing below is different: that stays warn-and-continue.)
+    throw new Error(
+      `pending list (${status}) failed ${res.status}: ${await res.text().catch(() => "")}`
     );
-    return;
   }
   const { orders } = (await res.json()) as {
     orders?: Array<{
@@ -96,13 +99,23 @@ async function expireAndReconcile(): Promise<void> {
     headers: authHeaders()
   });
   if (!res.ok) {
-    console.warn("[canton-swap-daemon] expire failed", await res.text());
+    // P2b: a non-2xx here means the expire/reconcile endpoint is failing (auth/app
+    // down). Throw so tick() fails and the heartbeat is NOT marked healthy — /ready
+    // must report unhealthy when this core daemon call is broken.
+    throw new Error(
+      `expire failed ${res.status}: ${await res.text().catch(() => "")}`
+    );
   }
 }
 
 async function tick(): Promise<void> {
-  await expireAndReconcile();
-  await fillPending();
+  // Keep reconciliation/expiry and fills SERIAL: both mutate the same orders and
+  // ledger offers, so overlapping them can reject an offer while fill is consuming
+  // it. Still attempt both phases and report every failure to readiness.
+  await runDaemonPhases([
+    ["expire/reconcile", expireAndReconcile],
+    ["fill", fillPending]
+  ]);
 }
 
 // M-01: health/readiness server + heartbeat.

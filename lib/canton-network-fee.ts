@@ -19,6 +19,7 @@ import {
   trafficBytesToFeeCc,
   type NetworkFeeTxLeg
 } from "./canton-network-fee-math";
+import { disclosedCcTransferPreapprovalCid } from "./network-fee-verify-logic";
 import { selectHoldingsForAmount } from "./transfer-holdings";
 import { expectedSettlementParty } from "./htlc-auth";
 import {
@@ -1447,18 +1448,28 @@ export async function prepareLoopNetworkFeeOnly(params: {
   disclosedContracts: unknown[];
   synchronizerId: string;
   actAs: string[];
+  networkFeePreapprovalCid: string;
 }> {
   const feeLeg = await buildCcFeeTransferLeg({
     senderParty: params.userParty,
     amountCc: params.networkFeeCc,
     ccHoldingCids: params.ccHoldingCids
   });
+  const networkFeePreapprovalCid = disclosedCcTransferPreapprovalCid(
+    feeLeg.disclosedContracts
+  );
+  if (!networkFeePreapprovalCid) {
+    throw new Error(
+      "network fee prepare did not disclose the receiver TransferPreapproval"
+    );
+  }
   return {
     command: feeLeg.command,
     commands: [feeLeg.command],
     disclosedContracts: feeLeg.disclosedContracts,
     synchronizerId: feeLeg.synchronizerId,
-    actAs: [params.userParty]
+    actAs: [params.userParty],
+    networkFeePreapprovalCid
   };
 }
 

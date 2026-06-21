@@ -157,9 +157,13 @@ export const htlcApi = {
     command: unknown;
     disclosedContracts: unknown[];
     synchronizerId: string;
+    networkFeeCc: string;
+    networkFeePreapprovalCid: string;
   }> => jpost(`/api/htlc/${id}/prepare-network-fee`, { ccHoldingCids }),
   recordNetworkFee: (id: string, settlementUpdateId: string) =>
-    jpost(`/api/htlc/${id}/record-network-fee`, { settlementUpdateId }),
+    jpost(`/api/htlc/${id}/record-network-fee`, {
+      settlementUpdateId
+    }),
   confirmLockLoop: (id: string) => jpost(`/api/htlc/${id}/confirm-lock-loop`),
   prepareWithdrawLoop: (
     id: string

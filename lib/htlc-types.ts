@@ -44,4 +44,6 @@ export interface SwapOrder {
   /** Bound network fee CC from quote (managed paths). */
   networkFeeCc?: string;
   networkFeeExpiresAt?: number;
+  /** Exact CC TransferPreapproval disclosed when the Loop fee command was built. */
+  networkFeePreapprovalCid?: string;
 }

@@ -89,7 +89,7 @@ C-02/H-01 residuals were caught.
   1. **Sender-blind:** the verifier accepted a receiver-owned CC **Holding** without proving the **sender** — any receiver-owned Holding (from any source) passed (agent reproduced it locally).
   2. **Replay:** `settlement_update_id` was not unique (only `(order_id, order_kind)`) → one valid fee update reusable across orders.
   3. **Pending offer = paid:** the verifier accepted a bare `TransferInstruction`/`TransferOffer` (an offer/lock, not a settled transfer — can still expire/reject).
-- **Fix:** `ccNetworkFeePaidInEvents` (lib/network-fee-verify-logic.ts) now requires **settled proof** = a receiver-owned CC Holding created in the tree **AND** a sender-bound CC transfer exercise from the user in the same tree; **rejects** bare TransferInstruction/TransferOffer. Migration **027** adds a partial unique index on non-null `settlement_update_id`; `recordNetworkFeeCollected` raises `NetworkFeeSettlementReusedError` on cross-order replay and coerces empty-string ids → NULL. Regression tests added (pending-offer → false; unrelated-Holding → false; sender-mismatch → false).
+- **Fix:** `ccNetworkFeePaidInEvents` now accepts only the configured receiver's direct `TransferPreapproval_SendV2`, bound to the exact preapproval contract disclosed when the fee command was prepared plus the sender debit and receiver credit from the authoritative ledger tree. Migration **028** persists that historical binding so preapproval renewal cannot invalidate a paid update. Holdings, generic instructions, transfer-shaped exercises, and wrong-contract SendV2 events fail closed. Migration **027** adds a partial unique index on non-null `settlement_update_id`; `recordNetworkFeeCollected` raises `NetworkFeeSettlementReusedError` on cross-order replay and coerces empty-string ids → NULL.
 - **Status:** ✅ Code fixed. **DB: 027 applied to OLD DB (verified — empty-string rows cleaned); NEW DB (`oshqecdsloajfhdhhiul`) still needs 027 applied.**
 
 ### H-02 — HTLC order creation without ownership
@@ -144,6 +144,62 @@ C-02/H-01 residuals were caught.
 - **Found by:** agent round 3. **Verdict:** CONFIRMED Medium (UX/liveness, not security — on-chain verification is still correct once mined).
 - **Problem:** `useEvmWallet.sendTransaction` returns the hash pre-mining; the reverse claim and forward retake immediately called `recordClaim`/`recordRetake`, so the API tried to verify a receipt that didn't exist yet → transient failures.
 - **Fix:** added `waitForReceipt(hash)` to `useEvmWallet` (polls `eth_getTransactionReceipt`, throws on revert/timeout); both EVM record sites now `await evm.waitForReceipt(tx)` before recording. The two non-EVM record sites (Canton `claimCounter` / Loop `submitAndWaitForTransaction`) already wait and were left alone.
+- **Status:** ✅ Fixed.
+
+---
+
+## Follow-up findings (P1/P2) — regressions in this audit's own fixes
+
+A later review round caught second-order issues introduced by fixes earlier in this
+audit (the recurring "fixed the headline, missed a secondary path" pattern). All
+verified and fixed.
+
+### P1a — Receipt-timeout strands the user's WBTC
+- **Verdict:** CONFIRMED — introduced by the EVM-mining-race fix (`waitForReceipt`).
+- **Problem:** the forward-lock catch called `retry()` (reset to quote) on any error. If `waitForReceipt(lockTx)` timed out but the WBTC lock mined later, the order stayed `accepted` with no `mainLockTx`; a retry made a new order/hash → original locked WBTC unrecoverable from Orders.
+- **Fix:** the catch (app/swap/page.tsx) now distinguishes "tx submitted" (a hash exists, not a user rejection) from "never submitted". When submitted, it best-effort records `mainLockTx` on **the original order** and advances to the `htlc-locking` waiting stage (daemon + Orders can recover) instead of `retry()`. Only truly-not-submitted/user-rejection resets to quote. (Reverse claim + forward retake were already timeout-safe — the daemon watches `Claimed` itself and the WBTC is already the user's.)
+- **Status:** ✅ Fixed.
+
+### P1b — C2C `/ready` reports healthy while every request 401/500s
+- **Verdict:** CONFIRMED — introduced by the M-01 health-server fix.
+- **Problem:** `fillStatus`/`expireAndReconcile` warn-and-returned on non-2xx, so `tick()` resolved and `heartbeat.pollOk()` fired even when the daemon was doing nothing (bad secret → 401, app down → 5xx).
+- **Fix:** `fillStatus` (canton-swap-daemon.mts) now **throws** on a non-2xx pending-list response (the authoritative "can I list+act on orders" check), so `tick()` fails and the heartbeat is not marked healthy → `/ready` reports unhealthy. Per-order fill failures remain warn-and-continue.
+- **Status:** ✅ Fixed.
+
+### P2a — Repair path records fee without proving a fee leg
+- **Verdict:** CONFIRMED — over-claimed in the M-05 fix.
+- **Problem:** `repairManagedFromLedger` recorded fee collection based on `isNetworkFeeEnabled() && order.networkFeeCc>0` — configuration + metadata, not on-ledger evidence. `repairManagedFillFromLedger` verifies only the swap legs, not a fee leg. Fees toggled on after the fill (or a fee leg that never landed while swap legs did) would book uncollected revenue.
+- **Fix:** removed the unsound record; the repair path now logs a reconciliation warning instead. Only the authoritative settle path (which sees `result.networkFeeCollected`) records the fee.
+- **Status:** ✅ Fixed.
+
+### P3a — Fee verifier accepts any transfer-shaped exercise (Noop passes)
+- **Verdict:** CONFIRMED P1 (proven — a synthetic `Noop` exercise was accepted as paid).
+- **Problem:** `exercisedTransferFromNode` read `transfer.{sender,receiver,...}` from **any** exercised node without validating the choice or template, so a fabricated exercise (wrong choice + unrelated template) carrying transfer-shaped fields passed `transferFieldsMatch`.
+- **Fix:** removed transfer-shaped exercises as fee evidence entirely. Network-fee collection now accepts only the configured receiver's direct `TransferPreapproval_SendV2`, bound to the exact preapproval contract disclosed during preparation (persisted on the order), the sender debit, and the receiver credit. Generic instructions, Holdings, spoofed template names, and a SendV2 on any other preapproval contract fail closed. Permanent regression tests cover each bypass.
+- **Status:** ✅ Fixed.
+
+### P3b — Late-lock recovery still strands / records reverted tx
+- **Verdict:** CONFIRMED P1 — residual in the P1a fix.
+- **Problem:** the forward-lock catch (a) swallowed a failed `recordMainLock` (`.catch(()=>{})`) → order stayed `accepted` with no `mainLockTx`, hidden by `isAbandonedSwapDraft` and ignored by the daemon (which only processes `main_locked`); (b) recorded the hash even on a **reverted** tx.
+- **Fix:** typed errors (`EvmTxRevertedError`/`EvmReceiptTimeoutError`) distinguish revert from timeout. The submitted `{swapId, lockTx}` is persisted in local storage before receipt waiting, and a recovery loop retries across page/browser restarts. `recordMainLock` is idempotent for the same hash and now verifies the configured-chain escrow state before advancing the order, so pending/reverted hashes cannot become `main_locked`. A late revert clears the recovery record; a confirmed lock is automatically reattached to the original order.
+- **Status:** ✅ Fixed.
+
+### P3c — Stale `sessionReady=true` on Loop-wallet switch
+- **Verdict:** CONFIRMED P2.
+- **Problem:** the session-probe effect only updated `sessionReady` after the async `swapSessionActive(newParty)` resolved, so on a Loop-wallet switch the previous party's `true` persisted during the probe gap — allowing actions/preapproval checks against the stale session.
+- **Fix:** the effect now synchronously sets `sessionReady=null` (for non-managed users) **before** the async probe, so a party switch immediately invalidates readiness until the new probe completes.
+- **Status:** ✅ Fixed.
+
+### P3d — `/ready` healthy when expire/reconcile fails
+- **Verdict:** CONFIRMED P2 — residual in the P1b fix (which only covered the pending-list).
+- **Problem:** `expireAndReconcile` warn-and-returned on non-2xx, so a failing expire/reconcile endpoint didn't fail `tick()` → heartbeat stayed healthy.
+- **Fix:** `expireAndReconcile` now throws on non-2xx; `tick()` runs both phases via `Promise.allSettled` (a failure in one doesn't skip the other) and throws if either failed, so `/ready` reflects any core-call failure.
+- **Status:** ✅ Fixed.
+
+### P2b — Missing `counterLockTx` → from-genesis scan times out
+- **Verdict:** CONFIRMED.
+- **Problem:** with `ESCROW_START_BLOCK` unset (default 0) and no `counterLockTx`/recoverable lock, recovery scanned from block 0 in 1990-block chunks — thousands of RPC calls on a ~47M-block chain, timing out reconcile/refund.
+- **Fix:** the M-04 startup guard now **requires `ESCROW_START_BLOCK > 0` on mainnet** (the real deploy block), so the fallback never walks from genesis; the scan checkpoint keeps repeat scans cheap.
 - **Status:** ✅ Fixed.
 
 ---

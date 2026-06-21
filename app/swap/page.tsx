@@ -74,6 +74,17 @@ import {
   evmClaim,
   evmRetake
 } from "@/lib/htlc-client";
+import {
+  EvmTxRevertedError,
+  getBrowserEvmProvider,
+  getEvmReceiptState
+} from "@/lib/evm-wait-receipt";
+import {
+  forgetPendingMainLock,
+  readPendingMainLocks,
+  rememberPendingMainLock,
+  selectPendingMainLock
+} from "@/lib/htlc-pending-main-lock";
 import { isHtlcTerminal } from "@/lib/htlc-track-order";
 import {
   listLoopCbtcHoldingCids,
@@ -157,7 +168,22 @@ type Stage =
       swapId: string;
       secret: string;
       lockTx: string;
+      userCantonParty: string;
+      userEvmAddress: string;
       waitStartedAt: number;
+      /** P1a: set when the lock submitted but recording mainLockTx failed — the swap
+       *  is recoverable from Orders; shown as a warning so the user doesn't restart. */
+      recordError?: string;
+    }
+  // HTLC: a submitted EVM lock is being confirmed and durably recorded.
+  | {
+      kind: "htlc-recording";
+      swapId: string;
+      lockTx: string;
+      userCantonParty: string;
+      userEvmAddress: string;
+      waitStartedAt: number;
+      recordError?: string;
     }
   // HTLC: both legs locked — the USER can now claim (press to reveal).
   | {
@@ -676,6 +702,12 @@ export default function SwapPage() {
   //     form until the user signs. This is a pure probe (NO signature). ---
   useEffect(() => {
     let cancelled = false;
+    // P2: invalidate any prior-party readiness SYNCHRONOUSLY before the async probe.
+    // On a Loop-wallet switch the deps change and the probe for the NEW party is
+    // async; without this, sessionReady would keep the OLD party's `true` during the
+    // gap, letting actions/preapproval checks run against a stale session. Managed
+    // users are set true below (no probe needed).
+    if (!isParticipantManaged) setSessionReady(null);
     void (async () => {
       // Participant-managed (email) users don't have a Loop session — the backend
       // signs for them, so there's no preapproval signature to check. Mark ready.
@@ -683,18 +715,30 @@ export default function SwapPage() {
         if (!cancelled) setSessionReady(true);
         return;
       }
-      if (!wallet.provider) {
+      if (!wallet.isConnected || !wallet.provider || !wallet.partyId) {
         if (!cancelled) setSessionReady(null);
         return;
       }
-      if (!cancelled) setSessionReady(null); // checking
-      const active = await swapSessionActive();
+      const active = await swapSessionActive(wallet.partyId);
       if (!cancelled) setSessionReady(active);
     })();
     return () => {
       cancelled = true;
     };
-  }, [isParticipantManaged, wallet.provider]);
+  }, [
+    isParticipantManaged,
+    wallet.isConnected,
+    wallet.provider,
+    wallet.partyId
+  ]);
+
+  /** Loop path: probe finished and user still needs the one-time JWT signature. */
+  const needsLoopSignGate =
+    loopConnected &&
+    !isParticipantManaged &&
+    wallet.isConnected &&
+    !!wallet.provider &&
+    sessionReady === false;
 
   // --- The explicit "Sign in your Loop wallet" action (driven by the prerequisite
   //     popup CTA). One signature → mints the JWT session → unblocks the form. ---
@@ -1322,7 +1366,7 @@ export default function SwapPage() {
       }
 
       // 2/3. approve WBTC to the HTLC escrow + lock it (MetaMask) — THE USER's action.
-      let lockTx: string;
+      let lockTx = "";
       try {
         setStage({ kind: "approving", quote });
         const wbtcToken = SWAP_CHAIN.wbtc || quote.wbtc;
@@ -1339,9 +1383,44 @@ export default function SwapPage() {
             receiver: SOLVER_EVM
           }
         );
+        rememberPendingMainLock({
+          swapId: id,
+          lockTx,
+          userCantonParty: quote.cantonParty,
+          userEvmAddress: evm.account,
+          expiresAt: userTimelock + 3600
+        });
         await evm.waitForReceipt(lockTx);
         await htlcApi.recordMainLock(id, lockTx);
+        forgetPendingMainLock(id);
       } catch (e) {
+        // P1a: once evmApproveAndLock returned a tx hash, the WBTC lock may have been
+        // (or may still get) mined — DO NOT retry() into a fresh order/hash, which
+        // strands the locked WBTC on an order with no mainLockTx (hidden by
+        // isAbandonedSwapDraft + ignored by the daemon).
+        const submitted = typeof lockTx === "string" && lockTx.length > 0;
+        // A REVERT means the lock did NOT take effect — nothing is locked, so a clean
+        // reset to quote is correct.
+        const reverted = e instanceof EvmTxRevertedError;
+        if (submitted && !reverted && !isUserRejection(e)) {
+          // The durable pending-lock record survives refresh/restart. The recovery
+          // effect below waits for a successful receipt and retries the idempotent
+          // server write until it is acknowledged.
+          setStage({
+            kind: "htlc-locking",
+            quote,
+            swapId: id,
+            secret,
+            lockTx,
+            userCantonParty: quote.cantonParty,
+            userEvmAddress: evm.account.toLowerCase(),
+            waitStartedAt: Date.now(),
+            recordError:
+              "Your WBTC lock was submitted. Waiting for confirmation and automatically reconnecting it to this swap — do not start another swap."
+          });
+          return;
+        }
+        if (reverted) forgetPendingMainLock(id);
         retry(
           isUserRejection(e)
             ? "Lock cancelled. Approve + lock your WBTC to start the swap."
@@ -1357,6 +1436,8 @@ export default function SwapPage() {
         swapId: id,
         secret,
         lockTx,
+        userCantonParty: quote.cantonParty,
+        userEvmAddress: evm.account.toLowerCase(),
         waitStartedAt: Date.now()
       });
     },
@@ -1765,6 +1846,208 @@ export default function SwapPage() {
     [evm]
   );
 
+  // Recover a submitted EVM lock whose receipt/API acknowledgement raced a timeout.
+  // The pending record is non-secret localStorage state, so this continues across a
+  // page reload or browser restart. The API independently verifies the escrow state
+  // and is idempotent for the same tx hash.
+  const pendingLockRecoveryInFlightRef = useRef(false);
+  useEffect(() => {
+    let cancelled = false;
+
+    const recover = async () => {
+      if (pendingLockRecoveryInFlightRef.current) return;
+      const recoveryIdentityReady =
+        !!process.env.NEXT_PUBLIC_SWAP_DEST_PARTY ||
+        (identityProbed && !wallet.isLoading);
+      if (
+        !recoveryIdentityReady ||
+        !destinationParty ||
+        !evm.hydrated ||
+        !evm.account
+      ) {
+        return;
+      }
+      const recoveryEvmAddress = evm.account.trim().toLowerCase();
+
+      const stagePending =
+        stage.kind === "htlc-locking" &&
+        stage.recordError &&
+        stage.userCantonParty === destinationParty &&
+        stage.userEvmAddress === recoveryEvmAddress
+          ? {
+              swapId: stage.swapId,
+              lockTx: stage.lockTx,
+              userCantonParty: stage.userCantonParty,
+              userEvmAddress: stage.userEvmAddress
+            }
+          : stage.kind === "htlc-recording" &&
+              stage.userCantonParty === destinationParty &&
+              stage.userEvmAddress === recoveryEvmAddress
+            ? {
+                swapId: stage.swapId,
+                lockTx: stage.lockTx,
+                userCantonParty: stage.userCantonParty,
+                userEvmAddress: stage.userEvmAddress
+              }
+            : null;
+      const activeId = readActiveHtlcSwap();
+      const storedPending = selectPendingMainLock(readPendingMainLocks(), {
+        userCantonParty: destinationParty,
+        userEvmAddress: recoveryEvmAddress,
+        activeSwapId: activeId
+      });
+      const pending = stagePending ?? storedPending;
+      if (!pending) return;
+
+      pendingLockRecoveryInFlightRef.current = true;
+      if (
+        stage.kind !== "htlc-locking" &&
+        stage.kind !== "htlc-recording"
+      ) {
+        setStage({
+          kind: "htlc-recording",
+          swapId: pending.swapId,
+          lockTx: pending.lockTx,
+          userCantonParty: pending.userCantonParty,
+          userEvmAddress: pending.userEvmAddress,
+          waitStartedAt:
+            "createdAt" in pending && typeof pending.createdAt === "number"
+              ? pending.createdAt
+              : Date.now(),
+          recordError:
+            "Recovering your submitted WBTC lock and reconnecting it to this swap."
+        });
+      }
+
+      try {
+        const provider = getBrowserEvmProvider();
+        if (provider) {
+          const receipt = await getEvmReceiptState(provider, pending.lockTx);
+          if (receipt === "reverted") {
+            forgetPendingMainLock(pending.swapId);
+            forgetSecret(pending.swapId);
+            if (!cancelled) {
+              setStage({
+                kind: "error",
+                message:
+                  "The submitted WBTC lock reverted on-chain, so no funds were locked. Start a new swap."
+              });
+            }
+            return;
+          }
+        }
+
+        // The configured-chain server check is authoritative. While the tx is
+        // pending this fails closed; the interval retries until the lock is visible.
+        const recovered = (await htlcApi.recordMainLock(
+          pending.swapId,
+          pending.lockTx
+        )) as {
+          order?: {
+            status?: string;
+            wbtcAmount?: string;
+            cbtcAmount?: string;
+          };
+        };
+        forgetPendingMainLock(pending.swapId);
+        if (!cancelled) {
+          const recoveredStatus = recovered.order?.status;
+          if (
+            recoveredStatus === "main_claimed" ||
+            recoveredStatus === "both_claimed"
+          ) {
+            forgetSecret(pending.swapId);
+            setStage({
+              kind: "htlc-done",
+              swapId: pending.swapId,
+              lockTx: pending.lockTx,
+              wbtcAmount: recovered.order?.wbtcAmount,
+              cbtcAmount: recovered.order?.cbtcAmount
+            });
+            return;
+          }
+          if (
+            recoveredStatus === "refunded" ||
+            recoveredStatus === "cancelled" ||
+            recoveredStatus === "failed"
+          ) {
+            forgetSecret(pending.swapId);
+            setStage({
+              kind: "error",
+              message: swapWaitTerminalMessage(recoveredStatus)
+            });
+            return;
+          }
+          setStage((prev) =>
+            prev.kind === "htlc-locking" &&
+            prev.swapId === pending.swapId
+              ? { ...prev, recordError: undefined }
+              : {
+                  kind: "htlc-resume",
+                  swapId: pending.swapId,
+                  lockTx: pending.lockTx
+                }
+          );
+        }
+      } catch {
+        if (!cancelled) {
+          setStage((prev) => {
+            const recordError =
+              "Your WBTC lock is submitted. Waiting for on-chain confirmation and server acknowledgement; recovery retries automatically.";
+            if (
+              prev.kind === "htlc-locking" &&
+              prev.swapId === pending.swapId
+            ) {
+              return prev.recordError === recordError
+                ? prev
+                : { ...prev, recordError };
+            }
+            if (
+              prev.kind === "htlc-recording" &&
+              prev.swapId === pending.swapId
+            ) {
+              return prev.recordError === recordError
+                ? prev
+                : { ...prev, recordError };
+            }
+            return prev;
+          });
+        }
+      } finally {
+        pendingLockRecoveryInFlightRef.current = false;
+      }
+    };
+
+    void recover();
+    const timer = setInterval(() => void recover(), 5_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [
+    destinationParty,
+    evm.account,
+    evm.hydrated,
+    identityProbed,
+    stage,
+    wallet.isLoading
+  ]);
+
+  // A wallet switch must not leave another party's recovery screen blocking this
+  // wallet. The durable record remains and resumes when the originating wallet
+  // reconnects.
+  useEffect(() => {
+    if (
+      (stage.kind === "htlc-recording" ||
+        (stage.kind === "htlc-locking" && !!stage.recordError)) &&
+      ((destinationParty && stage.userCantonParty !== destinationParty) ||
+        (evm.account &&
+          stage.userEvmAddress !== evm.account.trim().toLowerCase()))
+    ) {
+      setStage({ kind: "idle" });
+    }
+  }, [destinationParty, evm.account, stage]);
+
   // Resume HTLC claim UI after refresh — detect claimable swap but do NOT auto-trigger
   // Loop signMessage; the user unlocks the vault with an explicit click.
   const resumeCheckedRef = useRef<string | null>(null);
@@ -1772,6 +2055,7 @@ export default function SwapPage() {
     if (
       stage.kind === "htlc-claimable" ||
       stage.kind === "htlc-claiming" ||
+      stage.kind === "htlc-recording" ||
       stage.kind === "htlc-resume" ||
       stage.kind === "rev-claimable" ||
       stage.kind === "rev-claiming" ||
@@ -1997,6 +2281,7 @@ export default function SwapPage() {
   const [waitNowMs, setWaitNowMs] = useState(() => Date.now());
   const waitStartedAt = useMemo(() => {
     if (stage.kind === "htlc-locking") return stage.waitStartedAt;
+    if (stage.kind === "htlc-recording") return stage.waitStartedAt;
     if (
       stage.kind === "rev-locking" &&
       (stage.phase === "solver" || stage.phase === "custody")
@@ -2249,6 +2534,7 @@ export default function SwapPage() {
     reviewing;
   const swapInProgress =
     stage.kind === "htlc-locking" ||
+    stage.kind === "htlc-recording" ||
     stage.kind === "rev-locking" ||
     stage.kind === "c2c-waiting";
   // Falls back to fee-only 1:1 (with "≈") until /api/htlc/price loads.
@@ -2647,6 +2933,11 @@ export default function SwapPage() {
                   isNetworkFeeUiEnabled() && !isParticipantManaged
               })}
             />
+            {stage.recordError ? (
+              <div className="mb-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-700">
+                {stage.recordError}
+              </div>
+            ) : null}
             <div className="mb-4 flex items-center gap-3">
               <div className="flex size-12 items-center justify-center rounded-2xl bg-primary/10">
                 <span className="inline-block size-5 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
@@ -2690,6 +2981,34 @@ export default function SwapPage() {
               ordersHref={`/orders?id=${encodeURIComponent(stage.swapId)}`}
               onStartNewSwap={() => dismissToNewSwap(stage.swapId)}
             />
+          </div>
+        )}
+
+        {stage.kind === "htlc-recording" && (
+          <div className="px-1 pb-1 pt-4 text-center">
+            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-primary/10">
+              <span className="inline-block size-6 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
+            </div>
+            <h3 className="text-lg font-semibold">Confirming your WBTC lock…</h3>
+            <p className="mt-1 text-sm text-foreground/60">
+              The transaction was submitted. WarpX is verifying the escrow
+              state and will reconnect it to this swap automatically.
+            </p>
+            {stage.recordError && (
+              <p className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-left text-sm text-amber-700">
+                {stage.recordError}
+              </p>
+            )}
+            <p className="mt-3 text-xs text-foreground/50">
+              Recovery has been running for {waitElapsedSec}s. Do not start a
+              second swap with the same funds.
+            </p>
+            <Link
+              href={`/orders?id=${encodeURIComponent(stage.swapId)}`}
+              className="mt-4 inline-flex text-sm font-medium text-primary hover:underline"
+            >
+              View order
+            </Link>
           </div>
         )}
 
@@ -3157,7 +3476,7 @@ export default function SwapPage() {
 
       {/* SIGN PREREQUISITE popup — shown when connected but no JWT session yet.
           Blocks the swap until the user signs once in their Loop wallet. */}
-      {loopConnected && sessionReady === false && (
+      {needsLoopSignGate && (
         <SignGateModal
           signing={signing}
           error={signError}

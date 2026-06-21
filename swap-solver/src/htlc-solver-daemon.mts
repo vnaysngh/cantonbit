@@ -290,6 +290,14 @@ async function main() {
         `ESCROW_START_BLOCK (${ESCROW_START_BLOCK}) is >= chain tip (${tipNow}) — historical event scans would cover zero blocks. Set it to the escrow deployment block.`
       );
     }
+    // P2b: on mainnet an unset/0 ESCROW_START_BLOCK makes recovery scans walk from
+    // genesis in 1990-block chunks — thousands of RPC calls that time out reconcile/
+    // refund. Require the real deploy block on mainnet.
+    if (isMainnet && ESCROW_START_BLOCK <= 0n) {
+      throw new Error(
+        "ESCROW_START_BLOCK required on mainnet (the escrow deploy block) — a from-genesis scan would time out recovery."
+      );
+    }
   }
   const wallet = createWalletClient({
     account,
