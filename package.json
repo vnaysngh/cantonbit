@@ -18,6 +18,7 @@
     "enable-cc:devnet": "bash scripts/with-env.sh devnet npx tsx scripts/enable-cc-party.mts",
     "enable-cbtc:devnet": "bash scripts/with-env.sh devnet npx tsx scripts/enable-cbtc-party.mts",
     "check-swap-preapprovals:devnet": "bash scripts/with-env.sh devnet npx tsx scripts/check-swap-preapprovals.mts",
+    "check-swap-preapprovals:mainnet": "bash scripts/with-env.sh mainnet npx tsx scripts/check-swap-preapprovals.mts",
     "probe-network-fee:devnet": "bash scripts/with-env.sh devnet npx tsx scripts/probe-network-fee.mts",
     "probe-network-fee:mainnet": "bash scripts/with-env.sh mainnet npx tsx scripts/probe-network-fee.mts",
     "audit-network-fee:devnet": "bash scripts/with-env.sh devnet npx tsx scripts/audit-network-fee.mts",

@@ -59,6 +59,34 @@ The important distinction is:
   fixes moved irreversible steps behind compare-and-swap state transitions,
   deterministic command IDs, and serialized inventory-reservation RPCs.
 
+### Core design decisions
+
+The app intentionally uses different settlement models for different wallet
+constraints:
+
+1. **Email / participant-managed cross-chain swaps use the custom Canton HTLC.**
+   These parties are hosted on the WarpX participant, where the `cbtc-htlc` DAR is
+   uploaded/vetted and the backend can submit with the user's `CanActAs`
+   authority. Canton enforces the hashlock, timelock, allocation binding, and
+   claim/refund controllers on-ledger.
+2. **Loop cross-chain swaps do not use the custom Canton HTLC.** Loop's
+   participant cannot currently vet arbitrary third-party DARs. Explicit
+   disclosure gives visibility to a contract, but it does not let Loop interpret
+   or confirm choices from an unvetted package. Loop users therefore sign only
+   standard Token Standard / Utility choices, and OranjSwap treats these flows as
+   trust-minimized venue settlement, not fully trustless HTLC settlement.
+3. **C2C swaps use same-ledger settlement instead of HTLCs.** CBTC and CC are both
+   Canton assets, so the strongest v1 path is a fixed-amount offer/fill where the
+   vault accepts the user sell leg and delivers the counter leg in one Canton
+   submit. When the counter leg is direct, the fill is atomic at the Canton
+   transaction boundary.
+4. **The settlement vault is intentionally preapproval-free.** The user sell leg
+   must create a pending offer to the vault; if vault preapproval auto-accepts the
+   sell leg before the counter leg is included, the app loses the atomic
+   offer-plus-counter fill shape. User receive parties should have preapproval on
+   for the assets they receive, so the counter leg can direct-deliver inside the
+   fill transaction.
+
 ---
 
 ## 2. Cross-chain HTLC swaps
@@ -108,6 +136,27 @@ verifies the revealed preimage; this is trust-minimized, not fully trustless.
 Email users use the custom `HtlcLock` path. Loop sellers use a standard transfer
 to the vault, so the vault is temporarily custodian of the CBTC during settlement.
 The reverse WBTC leg is reserved before user Canton funds are locked or custodied.
+
+### Why the Loop path is deliberately weaker
+
+The custom `HtlcLock` template is only used where every confirming participant can
+interpret and vet the package. Loop currently supports the standard Splice /
+Utility packages used by the Token Standard, but not third-party package vetting
+for `cbtc-htlc`. Passing a disclosed contract is not enough: disclosure solves
+visibility, while package vetting is required for interpretation and confirmation.
+
+Therefore:
+
+- **Email / managed:** use the custom HTLC and claim/refund on-ledger.
+- **Loop buyer:** backend verifies the preimage and delivers CBTC with a standard
+  transfer. This is a delivery obligation backed by recovery logic, not a Loop-side
+  custom `HtlcLock.Claim`.
+- **Loop seller:** user transfers CBTC to the vault with standard choices; WBTC is
+  reserved before that custody step and refunds are deterministic if settlement
+  cannot proceed.
+
+If Loop or 5N later supports vetting `cbtc-htlc`, the Loop route should be migrated
+to the same custom HTLC path as managed parties.
 
 ### HTLC secret vault
 
@@ -164,6 +213,21 @@ delivers the counter leg. If the counter leg is a pending offer, final receipt
 depends on the user accepting it in Loop. The service persists the counter-offer
 creation offset and permanent receipt proof before any reissue, so an old accepted
 offer cannot be mistaken for a failed delivery and paid twice.
+
+### C2C preapproval rules
+
+Preapproval is directional: it affects the **receiver** of a transfer.
+
+| Party / leg | Desired preapproval state | Reason |
+| --- | --- | --- |
+| User sell leg receiver: settlement vault | **OFF** for CC and CBTC | Forces a pending offer to the vault. The daemon can then accept that offer and include the counter leg in the same Canton submit. |
+| User counter-leg receiver: email / managed party | **ON** for the asset being received | Lets the vault direct-deliver the counter asset in the fill transaction; managed C2C refuses pending counter delivery. |
+| User counter-leg receiver: Loop party | **ON where Loop supports it** | Makes Loop C2C final in the fill transaction. If absent, the fill creates a pending counter offer that the Loop user must accept later. |
+| Network-fee receiver | **ON for CC** | Required for direct CC fee collection and fee proof verification. |
+
+Do **not** enable CC or CBTC preapproval on `CANTON_SWAP_SETTLEMENT_PARTY`.
+Scripts and readiness checks intentionally fail closed when the user sell leg
+would auto-settle into the vault.
 
 ### C2C order states
 
@@ -281,6 +345,29 @@ collection. The fee is:
 - collected in the same relevant Canton transaction where possible;
 - recorded through a durable accounting outbox.
 
+When `NETWORK_FEE_ENABLED=0`, the backend does not bind a CC fee to new orders,
+does not append CC fee-transfer commands, does not run the high-fee notional
+guard, and settlement/claim/lock revalidation returns a disabled zero-fee
+estimate. Existing historical orders may still show their stored fee metadata in
+history, but disabled runtime config will not collect a new fee leg.
+
+`NETWORK_FEE_QUOTE_PREVIEW=1` is preview-only. It may estimate and display the
+would-be Canton traffic fee, but it does not collect CC and it does not block
+small swaps on the max-bps guard. Keep it `0` when the fee row should disappear
+entirely from quotes and review screens.
+
+`NEXT_PUBLIC_NETWORK_FEE_ENABLED` controls the client-side display path. Set it
+to the same value as `NETWORK_FEE_ENABLED`; if the server says a fee is actually
+being charged, the review UI intentionally still shows it even if the public flag
+is misconfigured, so users never sign a hidden fee.
+
+`NETWORK_FEE_BUFFER_BPS` is basis points added to the raw Canton traffic estimate:
+`1000` = +10%, `1500` = +15%. Inline comments in env files are supported.
+
+In local dev, restart `npm run dev:devnet` / `npm run dev:mainnet` after changing
+fee flags. The dev wrapper regenerates `.env.development.local`; stale values in
+that file can otherwise override `.env.local` in Next/Turbopack workers.
+
 For Loop flows, the separate Oranj-side CC fee prepayment was removed. Loop wallet
 traffic cost is handled by Loop signing/traffic mechanics, and platform costs are
 covered by the spread. This avoids the old “fee paid but swap cannot proceed”
@@ -373,6 +460,31 @@ Recovery design:
   revalidation before irreversible Canton actions;
 - full-row lifecycle overwrites have been replaced with CAS/state-specific writes;
 - stale cancel/expire paths must not clear committed contract IDs or update IDs.
+
+### Hardening backlog
+
+The core protocol design is now acceptable for v1. The next improvements should
+focus on proving and operating the design rather than changing the settlement
+model:
+
+1. **State-machine/property tests:** assert no double-settlement, no custody
+   evidence reuse, no reveal without durable delivery obligation, no refund after
+   claim, and no accepted order without reserved inventory.
+2. **Crash-recovery drills:** kill the web/daemon after each external commit point
+   and verify deterministic-command recovery converges without duplicate payment
+   or stranded funds.
+3. **Independent watcher:** run a second read-only/watchtower process for expired
+   HTLC refunds, public preimage discovery, pending Loop counter offers, and stuck
+   accounting outbox rows.
+4. **Loop settlement commitments:** before any Loop custody or preimage reveal,
+   persist/sign the exact order terms and venue delivery obligation, then surface
+   that evidence in `/orders`.
+5. **Maximize direct C2C counter delivery:** keep user receive preapprovals enabled
+   for CC and CBTC, especially for Loop, while keeping the settlement vault
+   preapproval-free.
+
+Do not prioritize Dutch auctions or solver competition until these controls have
+production evidence from funded smoke tests.
 
 ---
 
@@ -487,6 +599,7 @@ Validation commands:
 npm run typecheck
 npm test
 npm run lint
+npm run check-swap-preapprovals:devnet -- '<vault-party>' '<user-party>'
 ```
 
 ---
@@ -560,6 +673,7 @@ Detailed rollout checklist: [`docs/MAINNET-DEPLOY.md`](./docs/MAINNET-DEPLOY.md)
 | [`docs/SWAP-RUNBOOK.md`](./docs/SWAP-RUNBOOK.md) | Operational swap runbook |
 | [`docs/SWAP-SECURITY-AUDIT-README-2026-06-21.md`](./docs/SWAP-SECURITY-AUDIT-README-2026-06-21.md) | Full post-audit security report |
 | [`docs/SWAP-QUOTE-DESIGN.md`](./docs/SWAP-QUOTE-DESIGN.md) | Quote architecture and deferred Dutch-auction work |
+| [`docs/SWAP-CRASH-RECOVERY-DRILLS.md`](./docs/SWAP-CRASH-RECOVERY-DRILLS.md) | Funded crash-recovery drill checklist |
 | [`docs/HTLC-SECRET-VAULT.md`](./docs/HTLC-SECRET-VAULT.md) | Browser preimage vault threat model |
 | [`docs/MAINNET-DEPLOY.md`](./docs/MAINNET-DEPLOY.md) | Deployment guide |
 | [`docs/canton-to-evm-design.md`](./docs/canton-to-evm-design.md) | Reverse HTLC design notes |

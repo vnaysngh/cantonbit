@@ -51,6 +51,7 @@ import {
 import {
   evmTxBlockHex,
   assertEvmTransactionFinalized,
+  evmBlockAtOrBeforeUnixTime,
   hasEvmClaimedForHashLock,
   isReverseEvmCounterLockReady,
   readErc20Balance,
@@ -246,7 +247,10 @@ async function waitForEvmTransactionFinality(txHash: string): Promise<void> {
 /** Reverse refund guard: refuse if user claimed WBTC on EVM (even when counterLockTx missing). */
 async function assertEvmCounterNotClaimed(o: SwapOrder): Promise<void> {
   if (o.direction !== "canton-to-evm") return;
-  if (o.status === "counter_claimed" || o.status === "main_claimed") {
+  if (
+    o.status === "main_claimed" ||
+    (o.status === "counter_claimed" && o.revealedPreimage)
+  ) {
     throw new Error("counter already claimed — swap must settle, not refund");
   }
   try {
@@ -258,7 +262,9 @@ async function assertEvmCounterNotClaimed(o: SwapOrder): Promise<void> {
     }
     const fromBlockHex = o.counterLockTx
       ? await evmTxBlockHex(o.counterLockTx)
-      : undefined;
+      : o.createdAt
+        ? await evmBlockAtOrBeforeUnixTime(o.createdAt - 10 * 60)
+        : undefined;
     const claimed = await hasEvmClaimedForHashLock(o.hashLock, {
       fromBlockHex
     });
@@ -378,7 +384,10 @@ class HtlcService {
       "counter_claimed"
     ]);
     return all.filter(
-      (o) => actionable.has(o.status) && !o.id.startsWith("smoke-")
+      (o) =>
+        (o.direction === "evm-to-canton" || o.direction === "canton-to-evm") &&
+        actionable.has(o.status) &&
+        !o.id.startsWith("smoke-")
     );
   }
 
@@ -640,7 +649,11 @@ class HtlcService {
       throw new Error(`main not locked (${o.status})`);
     }
     if (o.direction === "canton-to-evm") {
-      await assertHtlcSettlementQuoteFresh(o);
+      // Do NOT re-price after the user's Canton leg is already locked. Quote
+      // freshness is enforced before lock/custody starts; after that point the
+      // solver must either fulfill the committed minOut or let the protocol refund
+      // path handle expiry. Re-checking here strands users in main_locked when the
+      // market moves after their CBTC is already escrowed.
       if (evmFloatUnits == null || evmFloatUnits < 0n) {
         throw new Error("current solver WBTC balance required");
       }
@@ -1294,6 +1307,7 @@ class HtlcService {
       );
     if (o.status === "main_locked" && o.allocationCid && o.htlcCid) return o;
     if (o.status === "accepted") {
+      await assertHtlcSettlementQuoteFresh(o);
       o = await this.reserveReverseFloatBeforeMainLock(o);
     }
     // Retry after a partial run: allocation exists, HtlcLock create failed.
@@ -1494,7 +1508,7 @@ class HtlcService {
     id: string,
     preimageHex?: string
   ): Promise<{ order: SwapOrder; updateId: string }> {
-    const o = await this.must(id);
+    let o = await this.must(id);
     if (o.direction !== "canton-to-evm")
       throw new Error("claim-main is canton-to-evm only");
     if (o.status === "main_claimed")
@@ -1502,13 +1516,45 @@ class HtlcService {
     if (o.status !== "counter_claimed" && o.status !== "counter_locked") {
       throw new Error(`unexpected status ${o.status}`);
     }
-    const expectedStatus = o.status;
+    let expectedStatus: SwapStatus = o.status;
     const preimage =
       preimageHex ??
       (o.revealedPreimage ? o.revealedPreimage.slice(2) : undefined);
     if (!preimage) throw new Error("no preimage — user has not revealed yet");
     if (!preimageMatches(preimage, o.hashLock))
       throw new Error("invalid preimage");
+    const normalizedPreimage = ("0x" +
+      (preimage.startsWith("0x")
+        ? preimage.slice(2)
+        : preimage)) as `0x${string}`;
+
+    // The EVM claim has made the preimage public. Persist that fact BEFORE trying
+    // the Canton claim so auto-refund can never race a revealed secret, and so a
+    // failed Canton submit does not force the daemon to rediscover the event forever.
+    if (o.revealedPreimage !== normalizedPreimage || o.status === "counter_locked") {
+      const expected = o.status;
+      const withReveal: SwapOrder = {
+        ...o,
+        status: "counter_claimed",
+        revealedPreimage: normalizedPreimage
+      };
+      if (await this.store.putIfStatus(withReveal, expected)) {
+        o = withReveal;
+      } else {
+        const fresh = await this.must(id);
+        if (fresh.status === "main_claimed") {
+          return { order: fresh, updateId: fresh.counterClaimUpdateId ?? "" };
+        }
+        if (
+          fresh.status !== "counter_claimed" ||
+          fresh.revealedPreimage !== normalizedPreimage
+        ) {
+          throw new Error(`claim-main state changed (${fresh.status})`);
+        }
+        o = fresh;
+      }
+    }
+    expectedStatus = o.status;
     let updateId: string;
     if (o.counterMode === "loop") {
       // LOOP SELLER (Variant A custody): the CBTC entered our float at lock time
@@ -1521,42 +1567,48 @@ class HtlcService {
       if (!o.htlcCid || !o.allocationCid)
         throw new Error("on-ledger HtlcLock not present");
       const commandId = `htlc-claim-main-${id}`;
-      try {
-        ({ updateId } = await claimAsReceiver({
-          receiverParty: o.solverCantonParty, // the solver IS the receiver here
-          solverParty: o.solverCantonParty,
-          htlcCid: o.htlcCid,
-          htlcBlob: o.htlcBlob,
-          allocationCid: o.allocationCid,
-          preimageHex: preimage,
-          commandId
-        }));
-      } catch (e) {
-        if (
-          !(e instanceof Error) ||
-          !e.message.includes("duplicate command committed")
-        ) {
-          throw e;
-        }
-        const recovered = await fetchTransactionTreeByCommandId(
+      const recoverCommittedClaim = async () =>
+        fetchTransactionTreeByCommandId(
           commandId,
           o.solverCantonParty,
           50_000
         );
-        if (!recovered) {
-          throw new Error(
-            `duplicate main claim committed but transaction not found (${commandId})`
-          );
+      const alreadyCommitted = await recoverCommittedClaim();
+      if (alreadyCommitted) {
+        updateId = alreadyCommitted.updateId;
+      } else {
+        try {
+          ({ updateId } = await claimAsReceiver({
+            receiverParty: o.solverCantonParty, // the solver IS the receiver here
+            solverParty: o.solverCantonParty,
+            htlcCid: o.htlcCid,
+            htlcBlob: o.htlcBlob,
+            allocationCid: o.allocationCid,
+            preimageHex: preimage,
+            commandId
+          }));
+        } catch (e) {
+          const recovered = await recoverCommittedClaim();
+          if (recovered) {
+            updateId = recovered.updateId;
+          } else {
+            if (
+              !(e instanceof Error) ||
+              !e.message.includes("duplicate command committed")
+            ) {
+              throw e;
+            }
+            throw new Error(
+              `duplicate main claim committed but transaction not found (${commandId})`
+            );
+          }
         }
-        updateId = recovered.updateId;
       }
     }
-    o.revealedPreimage = ("0x" +
-      (preimage.startsWith("0x")
-        ? preimage.slice(2)
-        : preimage)) as `0x${string}`;
+    o.revealedPreimage = normalizedPreimage;
     o.status = "main_claimed";
     o.evmFloatReserved = false;
+    o.counterClaimUpdateId = updateId;
     if (!(await this.store.putIfStatus(o, expectedStatus))) {
       return { order: await this.must(id), updateId };
     }
@@ -1594,6 +1646,7 @@ class HtlcService {
       );
     }
     if (o.status === "accepted") {
+      await assertHtlcSettlementQuoteFresh(o);
       o = await this.reserveReverseFloatBeforeMainLock(o);
     }
     if (o.status !== "main_locking")
@@ -1643,6 +1696,7 @@ class HtlcService {
     }
     if (o.status === "main_locked") return o; // idempotent
     if (o.status === "accepted") {
+      await assertHtlcSettlementQuoteFresh(o);
       o = await this.reserveReverseFloatBeforeMainLock(o);
     }
     if (o.status !== "main_locking")
@@ -1754,6 +1808,7 @@ class HtlcService {
       o.status !== "main_locked" &&
       o.status !== "counter_locking" &&
       o.status !== "counter_locked" &&
+      o.status !== "counter_claimed" &&
       o.status !== "refunding"
     ) {
       throw new Error(`not refundable (${o.status})`);
@@ -2070,10 +2125,11 @@ class HtlcService {
     loopCustodyStalled: SwapOrder[];
   }> {
     const now = Math.floor(Date.now() / 1000);
-    const [accepted, counterLocked, counterLocking, mainLocked, refunding] = await Promise.all([
+    const [accepted, counterLocked, counterLocking, counterClaimed, mainLocked, refunding] = await Promise.all([
       this.store.byStatus("accepted"),
       this.store.byStatus("counter_locked"),
       this.store.byStatus("counter_locking"),
+      this.store.byStatus("counter_claimed"),
       this.store.byStatus("main_locked"),
       // F2 recovery: orders stuck mid-refund (crashed between the on-ledger transfer
       // and the `refunded` write) must be re-swept so the idempotent refund finishes.
@@ -2094,7 +2150,7 @@ class HtlcService {
       ),
       // Exclude revealed orders — once the secret is public the swap settles, never
       // refunds (refund-vs-claim race guard). Include `refunding` for crash recovery.
-      reverseMain: [...mainLocked, ...counterLocking, ...counterLocked, ...refunding].filter(
+      reverseMain: [...mainLocked, ...counterLocking, ...counterLocked, ...counterClaimed, ...refunding].filter(
         (o) =>
           o.direction === "canton-to-evm" &&
           o.counterMode !== "loop" &&

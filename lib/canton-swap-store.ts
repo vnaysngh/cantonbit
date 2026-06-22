@@ -70,7 +70,7 @@ function rowToOrder(r: Record<string, unknown>): CantonSwapOrder {
 }
 
 function orderToRow(o: CantonSwapOrder): Record<string, unknown> {
-  return {
+  const row: Record<string, unknown> = {
     id: o.id,
     status: o.status,
     from_asset: o.fromAsset,
@@ -95,18 +95,30 @@ function orderToRow(o: CantonSwapOrder): Record<string, unknown> {
       ? new Date(o.counterPendingClearedAt * 1000).toISOString()
       : null,
     failure_reason: o.failureReason ?? null,
-    network_fee_cc: o.networkFeeCc ?? null,
-    network_fee_expires_at: o.networkFeeExpiresAt
-      ? new Date(o.networkFeeExpiresAt * 1000).toISOString()
-      : null,
-    network_fee_settlement_update_id:
-      o.networkFeeSettlementUpdateId ?? null,
-    network_fee_accounting_pending: o.networkFeeAccountingPending ?? false,
     ...(o.createdAt > 0
       ? { created_at: new Date(o.createdAt * 1000).toISOString() }
       : {}),
     updated_at: new Date().toISOString()
   };
+
+  // Network-fee columns are optional feature columns. Avoid sending null/false
+  // placeholders when fees are disabled so local/dev DBs without those columns
+  // can still create and settle no-fee orders.
+  if (o.networkFeeCc != null) row.network_fee_cc = o.networkFeeCc;
+  if (o.networkFeeExpiresAt != null) {
+    row.network_fee_expires_at = new Date(o.networkFeeExpiresAt * 1000).toISOString();
+  }
+  if (o.networkFeeSettlementUpdateId != null) {
+    row.network_fee_settlement_update_id = o.networkFeeSettlementUpdateId;
+  }
+  if (
+    o.networkFeeAccountingPending === true ||
+    o.networkFeeSettlementUpdateId != null
+  ) {
+    row.network_fee_accounting_pending = o.networkFeeAccountingPending ?? false;
+  }
+
+  return row;
 }
 
 export interface CantonSwapStore {

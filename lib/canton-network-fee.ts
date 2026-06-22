@@ -865,72 +865,19 @@ function disabledEstimate(): NetworkFeeEstimate {
   };
 }
 
-/** Loop C2C — user pays offer submit + CC fee collection (vault accept/deliver = platform). */
+/** Loop C2C traffic is not collected as a separate Oranj CC fee. */
 export async function estimateLoopC2cSettleFee(params: {
   userParty: string;
   fromAsset: CantonSwapMvpAssetId;
   inAmount: string;
   notionalUsd?: number;
 }): Promise<NetworkFeeEstimate> {
-  void params.userParty;
-  void params.inAmount;
-  if (!shouldQuoteNetworkFee()) {
-    return disabledEstimate();
-  }
-  if (isNetworkFeeEnabled() && !networkFeeReceiverParty()) {
-    throw new Error("NETWORK_FEE_RECEIVER_PARTY not configured");
-  }
-
-  const [extraTrafficPriceUsdPerMb, amuletPriceUsd] = await Promise.all([
-    fetchExtraTrafficPriceUsdPerMb(),
-    fetchAmuletPriceUsd()
-  ]);
-
-  const offerBytes = C2C_OFFER_FALLBACK_BYTES[params.fromAsset];
-  const priced = trafficBytesToFeeCc({
-    trafficBytes: offerBytes,
-    extraTrafficPriceUsdPerMb,
-    amuletPriceUsd,
-    bufferBps: networkFeeBufferBps()
-  });
-  const notionalUsd =
-    params.notionalUsd ??
-    (await computeC2cSwapNotionalUsd({
-      fromAsset: params.fromAsset,
-      inAmount: params.inAmount
-    }));
-  enforceNetworkFeeNotional(priced.feeUsd, notionalUsd);
-
-  return {
-    feeCc: priced.feeCc,
-    feeUsd: priced.feeUsd,
-    trafficBytes: offerBytes,
-    minCcRequired: minCcRequiredForNetworkFee(priced.feeCc),
-    networkFeeSource: "fallback",
-    extraTrafficPriceUsdPerMb,
-    amuletPriceUsd,
-    transactions: [
-      {
-        id: "c2c-loop-offer",
-        label: "Send offer (Loop)",
-        trafficBytes: offerBytes,
-        charged: true
-      },
-      {
-        id: "c2c-vault-accept",
-        label: "Vault accept your offer (platform)",
-        trafficBytes: 0,
-        charged: false
-      },
-      {
-        id: "c2c-vault-deliver",
-        label: "Vault deliver counter (platform)",
-        trafficBytes: 0,
-        charged: false
-      },
-      ABSORBED_FEE_COLLECTION_LEG
-    ]
-  };
+  void params;
+  // Loop submits through the Loop participant/wallet. We do not insert an Oranj
+  // CC fee leg because it is not atomic with Loop signing and previously created
+  // a "fee paid, swap blocked" failure mode. Platform-side costs are handled by
+  // the spread.
+  return disabledEstimate();
 }
 
 /** Managed C2C — user fee = offer + accept traffic; deliver + fee-cmd traffic absorbed by platform. */

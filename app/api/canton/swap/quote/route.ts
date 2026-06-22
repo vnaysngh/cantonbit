@@ -10,6 +10,7 @@ import {
   computeC2cSwapNotionalUsd,
   estimateManagedC2cSettleFee,
   estimateToQuoteFields,
+  isNetworkFeeEnabled,
   logNetworkFeeEstimate,
   NetworkFeePrepareError,
   shouldQuoteNetworkFee
@@ -118,11 +119,11 @@ export async function POST(req: Request) {
           logNetworkFeeEstimate("c2c-quote managed", nf);
           networkFeeFields = estimateToQuoteFields(nf);
         } catch (e) {
-          if (shouldQuoteNetworkFee()) {
+          if (isNetworkFeeEnabled()) {
             throw e;
           }
           console.warn(
-            "[c2c-quote] managed network fee estimate failed — swap quote still returned:",
+            "[c2c-quote] preview network fee estimate failed — swap quote still returned without fee:",
             e instanceof Error ? e.message : e
           );
         }

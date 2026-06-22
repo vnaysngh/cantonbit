@@ -38,6 +38,9 @@ export const cantonSwapApi = {
       midPrice?: string;
       minReceived?: string;
       minReceivedToken?: string;
+      networkFeeCharged?: boolean;
+      networkFeePreview?: boolean;
+      networkFeeTransactions?: import("@/lib/canton-network-fee-math").NetworkFeeTxLeg[];
       expiresAt?: number;
       quoteIndicative?: boolean;
       quoteNote?: string;

@@ -103,6 +103,8 @@ interface Order {
   counterMode?: string;
   solverTimelock?: number;
   counterLockTx?: string;
+  createdAt?: number;
+  updatedAt?: number;
 }
 
 /** Forward fills and EVM claims first — reverse watchtower log scans are slow. */
@@ -156,17 +158,20 @@ const ERC20_ABI = [
   }
 ] as const;
 
-// M-04: deploy block of the escrow on the active chain — full-history scans start
-// here. Default 0 (scan from genesis: slow but NEVER misses) rather than a baked-in
-// block that may belong to a different chain. Set ESCROW_START_BLOCK per-env to the
-// real deploy block; the startup guard rejects a value >= the chain tip.
-const ESCROW_START_BLOCK = BigInt(process.env.ESCROW_START_BLOCK ?? "0");
+// M-04: deploy block of the escrow on the active chain — historical safety scans
+// start here. On mainnet this must be configured explicitly. On devnet/testnet we
+// discover it once at startup when unset/0, avoiding a from-genesis scan on every
+// reverse fill.
+let escrowStartBlock = BigInt(process.env.ESCROW_START_BLOCK ?? "0");
 const lockTxCache = new Map<string, Hex>();
 // M-04: per-(hashLock, event) checkpoint of the highest block already scanned with
 // NO match. A repeated scan for a still-unfound event resumes from here instead of
 // re-walking the whole deploy→tip range every call. In-memory only: on restart we
-// re-scan from ESCROW_START_BLOCK once (safe — never misses, just slower once).
+// re-scan from escrowStartBlock once (safe — never misses, just slower once).
 const scanCheckpoint = new Map<string, bigint>();
+const EVENT_SCAN_SAFETY_SECONDS = Number(
+  process.env.HTLC_EVENT_SCAN_SAFETY_SECONDS ?? 600
+);
 
 /** Scan the escrow history (chunked at the RPC 2000-block cap) for the latest event
  *  of `eventName` matching `hashLock`; return its tx hash. M-04: scans from the
@@ -182,9 +187,9 @@ async function findEventTx(
   const key = `${eventName}:${hashLock}`;
   const resumeFrom = scanCheckpoint.get(key);
   let from =
-    resumeFrom != null && resumeFrom + 1n > ESCROW_START_BLOCK
+    resumeFrom != null && resumeFrom + 1n > escrowStartBlock
       ? resumeFrom + 1n
-      : ESCROW_START_BLOCK;
+      : escrowStartBlock;
   for (; from <= tip; from += 1990n) {
     const to = from + 1989n > tip ? tip : from + 1989n;
     const logs = await pub.getContractEvents({
@@ -208,6 +213,74 @@ async function findEventTx(
   return undefined;
 }
 
+async function findEventTxFromBlock(
+  pub: ReturnType<typeof createPublicClient>,
+  hashLock: Hex,
+  eventName: "Locked" | "Claimed",
+  startBlock: bigint
+): Promise<Hex | undefined> {
+  const tip = await pub.getBlockNumber();
+  let from = startBlock > escrowStartBlock ? startBlock : escrowStartBlock;
+  for (; from <= tip; from += 1990n) {
+    const to = from + 1989n > tip ? tip : from + 1989n;
+    const logs = await pub.getContractEvents({
+      address: ESCROW,
+      abi: HTLC_ESCROW_ABI,
+      eventName,
+      args: { hashValue: hashLock },
+      fromBlock: from,
+      toBlock: to
+    });
+    if (logs.length) {
+      return (logs[logs.length - 1] as { transactionHash?: Hex })
+        .transactionHash;
+    }
+  }
+  return undefined;
+}
+
+async function blockAtOrBeforeUnixTime(
+  pub: ReturnType<typeof createPublicClient>,
+  unixSeconds: number
+): Promise<bigint> {
+  const tip = await pub.getBlockNumber();
+  const tipBlock = await pub.getBlock({ blockNumber: tip });
+  if (Number(tipBlock.timestamp) <= unixSeconds) return tip;
+
+  let lo = escrowStartBlock;
+  let hi = tip;
+  while (lo < hi) {
+    const mid = (lo + hi + 1n) >> 1n;
+    const block = await pub.getBlock({ blockNumber: mid });
+    if (Number(block.timestamp) <= unixSeconds) lo = mid;
+    else hi = mid - 1n;
+  }
+  return lo;
+}
+
+async function orderEventScanStartBlock(
+  pub: ReturnType<typeof createPublicClient>,
+  o: Order
+): Promise<bigint | undefined> {
+  const reference = o.updatedAt ?? o.createdAt;
+  if (!reference || !Number.isFinite(reference)) return undefined;
+  const safeUnixSeconds = Math.max(
+    0,
+    Math.floor(reference - EVENT_SCAN_SAFETY_SECONDS)
+  );
+  return blockAtOrBeforeUnixTime(pub, safeUnixSeconds);
+}
+
+async function findOrderScopedEventTx(
+  pub: ReturnType<typeof createPublicClient>,
+  o: Order,
+  eventName: "Locked" | "Claimed"
+): Promise<Hex | undefined> {
+  const startBlock = await orderEventScanStartBlock(pub, o);
+  if (startBlock == null) return findEventTx(pub, o.hashLock, eventName);
+  return findEventTxFromBlock(pub, o.hashLock, eventName, startBlock);
+}
+
 /** Recover the tx hash of the Locked event for a hashLock. Used when counterLockTx
  *  wasn't persisted, so the reverse watchtower never goes blind (M3). Cached. */
 async function findLockTx(
@@ -229,6 +302,30 @@ async function findClaimTx(
   hashLock: Hex
 ): Promise<Hex | undefined> {
   return findEventTx(pub, hashLock, "Claimed");
+}
+
+/** Locate the first block where the escrow bytecode exists. Devnet/testnet only:
+ * this keeps recovery scans bounded without baking one chain-specific block into
+ * source. Mainnet still requires explicit ESCROW_START_BLOCK. */
+async function discoverEscrowStartBlock(
+  pub: ReturnType<typeof createPublicClient>
+): Promise<bigint> {
+  const tip = await pub.getBlockNumber();
+  let lo = 0n;
+  let hi = tip;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1n;
+    const code = await pub.getBytecode({ address: ESCROW, blockNumber: mid });
+    if (code && code !== "0x") hi = mid;
+    else lo = mid + 1n;
+  }
+  const code = await pub.getBytecode({ address: ESCROW, blockNumber: lo });
+  if (!code || code === "0x") {
+    throw new Error(
+      `HTLC escrow ${ESCROW} has no bytecode at chain tip ${tip}; check HTLC_ESCROW_ADDRESS/EVM_CHAIN/RPC.`
+    );
+  }
+  return lo;
 }
 
 async function jget(path: string) {
@@ -279,21 +376,28 @@ async function main() {
   const pub = createPublicClient({ chain, transport: http(rpcUrl) });
   await verifyRpcChainId(pub, chain);
 
+  if (!isMainnet && escrowStartBlock <= 0n) {
+    escrowStartBlock = await discoverEscrowStartBlock(pub);
+    console.log(
+      `[solver] discovered escrowStartBlock=${escrowStartBlock} for escrow=${ESCROW}`
+    );
+  }
+
   // M-04: fail fast on a bogus ESCROW_START_BLOCK. If it is at/after the chain tip,
   // every findEventTx/findLockTx/findClaimTx loop scans ZERO blocks and silently
   // recovers nothing — which also defeats the C-02 re-lock guard. A misconfigured
   // value (e.g. an extra digit) must crash at startup, not fail open at runtime.
   {
     const tipNow = await pub.getBlockNumber();
-    if (ESCROW_START_BLOCK >= tipNow) {
+    if (escrowStartBlock >= tipNow) {
       throw new Error(
-        `ESCROW_START_BLOCK (${ESCROW_START_BLOCK}) is >= chain tip (${tipNow}) — historical event scans would cover zero blocks. Set it to the escrow deployment block.`
+        `ESCROW_START_BLOCK (${escrowStartBlock}) is >= chain tip (${tipNow}) — historical event scans would cover zero blocks. Set it to the escrow deployment block.`
       );
     }
     // P2b: on mainnet an unset/0 ESCROW_START_BLOCK makes recovery scans walk from
     // genesis in 1990-block chunks — thousands of RPC calls that time out reconcile/
     // refund. Require the real deploy block on mainnet.
-    if (isMainnet && ESCROW_START_BLOCK <= 0n) {
+    if (isMainnet && escrowStartBlock <= 0n) {
       throw new Error(
         "ESCROW_START_BLOCK required on mainnet (the escrow deploy block) — a from-genesis scan would time out recovery."
       );
@@ -359,6 +463,9 @@ async function main() {
       const orders = sortDaemonOrders(rawOrders ?? []);
       for (const o of orders) {
         try {
+        if (o.direction !== "evm-to-canton" && o.direction !== "canton-to-evm") {
+          continue;
+        }
         if (
           !o.solverEvmAddress ||
           o.solverEvmAddress.toLowerCase() !== account.address.toLowerCase()
@@ -377,6 +484,7 @@ async function main() {
             (o.status === "main_locked" || o.status === "counter_locking") &&
             !lockedCounter.has(o.id)
           ) {
+            const beganThisAttempt = o.status === "main_locked";
             const amount = BigInt(o.wbtcAmount);
             const wbtc = resolveWbtcAddress(slug);
             const unlock = BigInt(o.solverTimelock ?? 0);
@@ -424,15 +532,17 @@ async function main() {
               // C-02: lock reads empty. Before re-locking, prove the hash was NOT
               // already claimed. A scan ERROR must FAIL CLOSED — never re-lock on an
               // unconfirmed scan, or a real claim + RPC blip makes us double-fund.
-              let claimedAlready: boolean;
-              try {
-                const claimTx = await findClaimTx(pub, o.hashLock);
-                claimedAlready = !!claimTx;
-              } catch (e) {
-                console.error(
-                  `[solver] ${o.id.slice(0, 12)} rev: Claimed scan failed — SKIP re-lock (fail-closed): ${e instanceof Error ? e.message : e}`
-                );
-                continue;
+              let claimedAlready = false;
+              if (!beganThisAttempt) {
+                try {
+                  const claimTx = await findOrderScopedEventTx(pub, o, "Claimed");
+                  claimedAlready = !!claimTx;
+                } catch (e) {
+                  console.error(
+                    `[solver] ${o.id.slice(0, 12)} rev: Claimed scan failed — SKIP re-lock (fail-closed): ${e instanceof Error ? e.message : e}`
+                  );
+                  continue;
+                }
               }
               if (claimedAlready) {
                 console.log(
@@ -488,7 +598,9 @@ async function main() {
                 );
                 continue;
               }
-              const realTx = await findLockTx(pub, o.hashLock);
+              const realTx =
+                (await findOrderScopedEventTx(pub, o, "Locked")) ??
+                (await findLockTx(pub, o.hashLock));
               if (!realTx) {
                 console.log(
                   `[solver] ${o.id.slice(0, 12)} rev: lock on-chain but Locked tx not found — skip`
@@ -564,7 +676,9 @@ async function main() {
                 }
               }
               if (fromBlock === undefined) {
-                const lockTx = await findLockTx(pub, o.hashLock);
+                const lockTx =
+                  (await findOrderScopedEventTx(pub, o, "Locked")) ??
+                  (await findLockTx(pub, o.hashLock));
                 if (lockTx) {
                   try {
                     fromBlock = (
@@ -578,7 +692,7 @@ async function main() {
               // M-04: last-resort fallback scans from the escrow deploy (a Claimed
               // event can't predate it), not a fixed recent window that a 48–72h
               // order could outlive.
-              if (fromBlock === undefined) fromBlock = ESCROW_START_BLOCK;
+              if (fromBlock === undefined) fromBlock = escrowStartBlock;
               if (fromBlock < 0n) fromBlock = 0n;
               const tip = await pub.getBlockNumber();
               let found: { args?: { preImage?: Hex } } | undefined;
@@ -687,13 +801,22 @@ async function main() {
             Address
           ];
           if (lock[1] === 0n) {
+            const claimTx =
+              (await findOrderScopedEventTx(pub, o, "Claimed")) ??
+              (await findClaimTx(pub, o.hashLock));
+            if (!claimTx) {
+              console.log(
+                `[solver] ${o.id.slice(0, 12)} lock empty but Claimed tx not found — cannot finalize`
+              );
+              continue;
+            }
             console.log(
-              `[solver] ${o.id.slice(0, 12)} lock already claimed/empty`
+              `[solver] ${o.id.slice(0, 12)} lock already claimed → recording tx=${claimTx.slice(0, 14)}`
             );
-            claimedMain.add(o.id);
             await jpost(`/api/htlc/${o.id}/main-claim`, {
-              mainClaimTx: "already-claimed"
-            }).catch(() => {});
+              mainClaimTx: claimTx
+            });
+            claimedMain.add(o.id);
             continue;
           }
           console.log(

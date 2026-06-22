@@ -5,7 +5,9 @@ import {
   applyNetworkFeeBuffer,
   assertNetworkFeeNotionalGuard,
   capNetworkFeeAtOrder,
+  isNetworkFeeEnabled,
   minCcRequiredForNetworkFee,
+  networkFeeBufferBps,
   shouldQuoteNetworkFee,
   trafficBytesToCcRaw,
   trafficBytesToFeeCc
@@ -37,10 +39,15 @@ test("trafficBytesToFeeCc returns feeUsd", () => {
 });
 
 test("minCcRequiredForNetworkFee adds reserve", () => {
+  const prevEnabled = process.env.NETWORK_FEE_ENABLED;
+  const prevReserve = process.env.NETWORK_FEE_RESERVE_CC;
   process.env.NETWORK_FEE_ENABLED = "1";
   process.env.NETWORK_FEE_RESERVE_CC = "5";
   assert.equal(minCcRequiredForNetworkFee("1.5"), "6.5");
-  delete process.env.NETWORK_FEE_RESERVE_CC;
+  if (prevEnabled == null) delete process.env.NETWORK_FEE_ENABLED;
+  else process.env.NETWORK_FEE_ENABLED = prevEnabled;
+  if (prevReserve == null) delete process.env.NETWORK_FEE_RESERVE_CC;
+  else process.env.NETWORK_FEE_RESERVE_CC = prevReserve;
 });
 
 test("assertNetworkFeeNotionalGuard rejects fees above the configured ratio", () => {
@@ -82,10 +89,33 @@ test("shouldQuoteNetworkFee is true when preview enabled without collection", ()
   else process.env.NETWORK_FEE_QUOTE_PREVIEW = prevPreview;
 });
 
-test("minCcRequiredForNetworkFee returns 0 when feature disabled", () => {
+test("networkFeeBufferBps parses inline comments from dotenv files", () => {
+  const prev = process.env.NETWORK_FEE_BUFFER_BPS;
+  process.env.NETWORK_FEE_BUFFER_BPS = "1000  # +10%";
+  assert.equal(networkFeeBufferBps(), 1000);
+  if (prev == null) delete process.env.NETWORK_FEE_BUFFER_BPS;
+  else process.env.NETWORK_FEE_BUFFER_BPS = prev;
+});
+
+test("network fee flags parse inline comments from dotenv files", () => {
   const prev = process.env.NETWORK_FEE_ENABLED;
-  process.env.NETWORK_FEE_ENABLED = "0";
-  assert.equal(minCcRequiredForNetworkFee("5"), "0");
+  process.env.NETWORK_FEE_ENABLED = "1  # collect fees";
+  assert.equal(isNetworkFeeEnabled(), true);
+  process.env.NETWORK_FEE_ENABLED = "0  # disabled";
+  assert.equal(isNetworkFeeEnabled(), false);
   if (prev == null) delete process.env.NETWORK_FEE_ENABLED;
   else process.env.NETWORK_FEE_ENABLED = prev;
+});
+
+test("minCcRequiredForNetworkFee returns 0 when feature disabled", () => {
+  const prevEnabled = process.env.NETWORK_FEE_ENABLED;
+  const prevPreview = process.env.NETWORK_FEE_QUOTE_PREVIEW;
+  process.env.NETWORK_FEE_ENABLED = "0";
+  process.env.NETWORK_FEE_QUOTE_PREVIEW = "0";
+  assert.equal(minCcRequiredForNetworkFee("5"), "0");
+  assert.equal(shouldQuoteNetworkFee(), false);
+  if (prevEnabled == null) delete process.env.NETWORK_FEE_ENABLED;
+  else process.env.NETWORK_FEE_ENABLED = prevEnabled;
+  if (prevPreview == null) delete process.env.NETWORK_FEE_QUOTE_PREVIEW;
+  else process.env.NETWORK_FEE_QUOTE_PREVIEW = prevPreview;
 });

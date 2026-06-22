@@ -30,7 +30,15 @@ import {
   needsCantonSwapCounterAccept,
   type CantonSwapHistoryRow
 } from "@/lib/canton-swap-history";
-import { isSmokeTestOrderId, isSwapClaimable, shouldPollOrderOnOrdersPage, ORDERS_LIVE_POLL_MAX, ORDERS_LIVE_POLL_MS, ORDERS_PAGE_TERMINAL_STATUSES, htlcUserWbtcClaimTx } from "@/lib/htlc-order-logic";
+import {
+  isSmokeTestOrderId,
+  isSwapClaimable,
+  shouldPollOrderOnOrdersPage,
+  ORDERS_LIVE_POLL_MAX,
+  ORDERS_LIVE_POLL_MS,
+  ORDERS_PAGE_TERMINAL_STATUSES,
+  htlcUserWbtcClaimTx
+} from "@/lib/htlc-order-logic";
 import { truncatePartyId } from "@/lib/party-display";
 import type { SwapStatus } from "@/lib/htlc-types";
 import {
@@ -78,7 +86,9 @@ interface HistoryOrder {
   networkFeeCollected?: boolean;
 }
 
-function isCantonSwapOrder(o: HistoryOrder): o is HistoryOrder & CantonSwapHistoryRow {
+function isCantonSwapOrder(
+  o: HistoryOrder
+): o is HistoryOrder & CantonSwapHistoryRow {
   return isCantonSwapHistoryRow(o);
 }
 
@@ -353,9 +363,9 @@ function OrdersPageInner() {
     const kind = searchParams.get("kind");
     const fetchOrder =
       kind === "canton-swap"
-        ? cantonSwapApi.get(id).then(({ order }) =>
-            mapCantonSwapToHistoryRow(order)
-          )
+        ? cantonSwapApi
+            .get(id)
+            .then(({ order }) => mapCantonSwapToHistoryRow(order))
         : htlcApi.getOrder(id).then(({ order }) => order as HistoryOrder);
     void fetchOrder
       .then((row) => {
@@ -467,7 +477,7 @@ function OrdersPageInner() {
       sessionAuthed,
       sessionParty,
       loopParty: wallet.partyId,
-      userEvmAddress: sessionAuthed ? evm.account : null,
+      userEvmAddress: sessionAuthed ? evm.account : null
     })
       .then(async (d) => {
         if (!alive) return;
@@ -642,7 +652,9 @@ function OrdersPageInner() {
         const ctx = await vaultContext();
         const orderMeta =
           vaultMetaFromOrder({
-            direction: crossChain.direction as "evm-to-canton" | "canton-to-evm",
+            direction: crossChain.direction as
+              | "evm-to-canton"
+              | "canton-to-evm",
             counterMode: crossChain.counterMode,
             userCantonParty: crossChain.userCantonParty,
             userEvmAddress: crossChain.userEvmAddress,
@@ -1000,8 +1012,7 @@ function DetailDrawer({
   const lockConfirm = !cantonSwap && needsLoopLockConfirm(o);
   const loopAccept = !cantonSwap && needsLoopAccept(o);
   const awaitingSolver = !cantonSwap && isAwaitingSolverFinalize(o);
-  const cantonCounterAccept =
-    cantonSwap && needsCantonSwapCounterAccept(o);
+  const cantonCounterAccept = cantonSwap && needsCantonSwapCounterAccept(o);
   const vaultReady = hasStoredSecret(o.id);
   const [manualSecret, setManualSecret] = useState("");
   const cantonAmounts = cantonSwap ? cantonSwapPayReceive(o) : null;
@@ -1220,8 +1231,8 @@ function DetailDrawer({
           {cantonCounterAccept ? (
             <div className="mt-4 space-y-2">
               <p className="rounded-xl bg-amber-500/10 px-4 py-3 text-center text-xs text-amber-700">
-                The solver delivered your {o.counterLeg?.asset ?? "tokens"} — accept
-                the incoming transfer in Loop to complete the swap.
+                The solver delivered your {o.counterLeg?.asset ?? "tokens"} —
+                accept the incoming transfer in Loop to complete the swap.
               </p>
               <button
                 onClick={() => onCantonCounterAccept(o)}
@@ -1270,8 +1281,8 @@ function DetailDrawer({
             <div className="mt-4 space-y-2">
               <p className="rounded-xl bg-amber-500/10 px-4 py-3 text-center text-xs text-amber-700">
                 Your CBTC has been delivered. We&apos;re completing the final
-                step on Base — this usually finishes in under a minute. Refresh
-                this page in a few seconds; no action needed from you.
+                step on {EVM_CHAIN} — this usually finishes in under a minute.
+                Refresh this page in a few seconds; no action needed from you.
               </p>
             </div>
           ) : loopAccept ? (

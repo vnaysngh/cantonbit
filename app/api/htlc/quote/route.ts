@@ -18,6 +18,7 @@ import {
   computeHtlcSwapNotionalUsd,
   estimateHtlcManagedFee,
   estimateToQuoteFields,
+  isNetworkFeeEnabled,
   logNetworkFeeEstimate,
   measureAndLogSolverCounterLockTraffic,
   NetworkFeePrepareError,
@@ -106,14 +107,14 @@ export async function POST(req: Request) {
           }
         }
       } catch (e) {
-        if (shouldQuoteNetworkFee()) {
+        if (isNetworkFeeEnabled()) {
           if (e instanceof NetworkFeePrepareError) {
             return NextResponse.json({ error: e.userMessage }, { status: 400 });
           }
           throw e;
         }
         console.warn(
-          "[htlc-quote] network fee estimate failed — quote still returned:",
+          "[htlc-quote] preview network fee estimate failed — quote still returned without fee:",
           e instanceof Error ? e.message : e
         );
       }

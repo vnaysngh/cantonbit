@@ -12,22 +12,33 @@ export interface NetworkFeeTxLeg {
   charged: boolean;
 }
 
-export function parseEnvInt(name: string, fallback: number): number {
+function envValue(name: string): string | undefined {
   const raw = process.env[name]?.trim();
+  if (!raw) return undefined;
+  const withoutInlineComment = raw.replace(/\s+#.*$/, "").trim();
+  if (!withoutInlineComment) return undefined;
+  return withoutInlineComment.replace(/^["']|["']$/g, "").trim();
+}
+
+export function parseEnvInt(name: string, fallback: number): number {
+  const raw = envValue(name);
   if (!raw) return fallback;
   const n = Number.parseInt(raw, 10);
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
-export function isNetworkFeeEnabled(): boolean {
-  const raw = process.env.NETWORK_FEE_ENABLED?.trim().toLowerCase();
+function envFlagEnabled(name: string): boolean {
+  const raw = envValue(name)?.toLowerCase();
   return raw === "1" || raw === "true" || raw === "yes";
+}
+
+export function isNetworkFeeEnabled(): boolean {
+  return envFlagEnabled("NETWORK_FEE_ENABLED");
 }
 
 /** Show fee estimates in quotes/UI without collecting CC (local dev). */
 export function isNetworkFeeQuotePreview(): boolean {
-  const raw = process.env.NETWORK_FEE_QUOTE_PREVIEW?.trim().toLowerCase();
-  return raw === "1" || raw === "true" || raw === "yes";
+  return envFlagEnabled("NETWORK_FEE_QUOTE_PREVIEW");
 }
 
 export function shouldQuoteNetworkFee(): boolean {

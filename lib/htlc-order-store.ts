@@ -57,7 +57,7 @@ function rowToOrder(r: Record<string, unknown>): SwapOrder {
 }
 
 function orderToRow(o: SwapOrder): Record<string, unknown> {
-  return {
+  const row: Record<string, unknown> = {
     id: o.id,
     direction: o.direction,
     status: o.status,
@@ -83,16 +83,30 @@ function orderToRow(o: SwapOrder): Record<string, unknown> {
     counter_transfer_update_id: o.counterTransferUpdateId ?? null,
     solver_custody_baseline_cids: o.solverCustodyBaselineCids ?? null,
     evm_float_reserved: o.evmFloatReserved ?? false,
-    network_fee_cc: o.networkFeeCc ?? null,
-    network_fee_expires_at: o.networkFeeExpiresAt
-      ? new Date(o.networkFeeExpiresAt * 1000).toISOString()
-      : null,
-    network_fee_preapproval_cid: o.networkFeePreapprovalCid ?? null,
-    network_fee_settlement_update_id:
-      o.networkFeeSettlementUpdateId ?? null,
-    network_fee_accounting_pending: o.networkFeeAccountingPending ?? false,
     updated_at: new Date().toISOString(),
   };
+
+  // Network-fee columns are optional feature columns. Do not send null/false
+  // placeholders when fees are disabled; otherwise older dev DBs or a stale
+  // PostgREST schema cache reject order creation even though no fee is involved.
+  if (o.networkFeeCc != null) row.network_fee_cc = o.networkFeeCc;
+  if (o.networkFeeExpiresAt != null) {
+    row.network_fee_expires_at = new Date(o.networkFeeExpiresAt * 1000).toISOString();
+  }
+  if (o.networkFeePreapprovalCid != null) {
+    row.network_fee_preapproval_cid = o.networkFeePreapprovalCid;
+  }
+  if (o.networkFeeSettlementUpdateId != null) {
+    row.network_fee_settlement_update_id = o.networkFeeSettlementUpdateId;
+  }
+  if (
+    o.networkFeeAccountingPending === true ||
+    o.networkFeeSettlementUpdateId != null
+  ) {
+    row.network_fee_accounting_pending = o.networkFeeAccountingPending ?? false;
+  }
+
+  return row;
 }
 
 export interface SwapStore {

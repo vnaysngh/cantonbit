@@ -143,6 +143,37 @@ import {
   extractSubmitUpdateId
 } from "@/lib/mint-processor-logic";
 
+function publicEnvFlagEnabled(raw: string | undefined): boolean {
+  if (raw == null || raw.trim() === "") return true;
+  const v = raw.trim().replace(/\s+#.*$/, "").trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
+}
+
+const NETWORK_FEE_UI_ENABLED = publicEnvFlagEnabled(
+  process.env.NEXT_PUBLIC_NETWORK_FEE_ENABLED
+);
+
+function quoteExpiresAtSeconds(quote: QuoteResponse): number | undefined {
+  return quote.expiresAt ?? quote.expires;
+}
+
+function quoteIsExpired(
+  quote: QuoteResponse,
+  nowSec = Math.floor(Date.now() / 1000)
+): boolean {
+  const expiresAt = quoteExpiresAtSeconds(quote);
+  return typeof expiresAt === "number" && nowSec >= expiresAt;
+}
+
+function formatQuoteCountdown(secondsRemaining: number): string {
+  const total = Math.max(0, Math.ceil(secondsRemaining));
+  if (total <= 0) return "Expired";
+  if (total < 60) return `in ${total}s`;
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return seconds > 0 ? `in ${minutes}m ${seconds}s` : `in ${minutes}m`;
+}
+
 // HTLC EVM leg config (Base Sepolia). The new trustless escrow (replaces the old
 // oracle InputSettlerEscrow for swaps). Shared resolver fails closed in production.
 const HTLC_ESCROW = HTLC_ESCROW_ADDRESS;
@@ -909,6 +940,7 @@ export default function SwapPage() {
           trafficBytes?: number;
           networkFeeCharged?: boolean;
           networkFeePreview?: boolean;
+          networkFeeTransactions?: import("@/lib/canton-network-fee-math").NetworkFeeTxLeg[];
           quoteSource?: string;
           quoteAgeMs?: number;
           quoteStale?: boolean;
@@ -950,6 +982,7 @@ export default function SwapPage() {
             trafficBytes: q.trafficBytes,
             networkFeeCharged: q.networkFeeCharged,
             networkFeePreview: q.networkFeePreview,
+            networkFeeTransactions: q.networkFeeTransactions,
             quoteSource: q.quoteSource,
             quoteAgeMs: q.quoteAgeMs,
             quoteStale: q.quoteStale,
@@ -1400,6 +1433,14 @@ export default function SwapPage() {
             receiver: SOLVER_EVM
           }
         );
+        setStage({
+          kind: "htlc-recording",
+          swapId: id,
+          lockTx,
+          userCantonParty: quote.cantonParty,
+          userEvmAddress: evm.account.toLowerCase(),
+          waitStartedAt: Date.now()
+        });
         rememberPendingMainLock({
           swapId: id,
           lockTx,
@@ -2451,7 +2492,7 @@ export default function SwapPage() {
                 ? {
                     ...prev,
                     solverNote:
-                      "Solver has not locked WBTC yet. For local dev, run `npm run solver:htlc` in a second terminal (keep it running)."
+                      "The solver is still preparing the WBTC lock. Your CBTC remains locked and refundable if the swap cannot complete before the timeout."
                   }
                 : prev
             );
@@ -2997,8 +3038,8 @@ export default function SwapPage() {
             </div>
             <h3 className="text-lg font-semibold">Confirming your WBTC lock…</h3>
             <p className="mt-1 text-sm text-foreground/60">
-              The transaction was submitted. WarpX is verifying the escrow
-              state and will reconnect it to this swap automatically.
+              The transaction was submitted. WarpX is waiting for the on-chain
+              receipt and verifying the escrow state before the solver locks CBTC.
             </p>
             {stage.recordError && (
               <p className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-left text-sm text-amber-700">
@@ -3006,8 +3047,9 @@ export default function SwapPage() {
               </p>
             )}
             <p className="mt-3 text-xs text-foreground/50">
-              Recovery has been running for {waitElapsedSec}s. Do not start a
-              second swap with the same funds.
+              {stage.recordError
+                ? `Recovery has been running for ${waitElapsedSec}s. Do not start a second swap with the same funds.`
+                : `Verification has been running for ${waitElapsedSec}s. Do not start a second swap with the same funds.`}
             </p>
             <Link
               href={`/orders?id=${encodeURIComponent(stage.swapId)}`}
@@ -3044,8 +3086,7 @@ export default function SwapPage() {
                 </h3>
                 <p className="mt-0.5 text-sm text-muted-foreground">
                   {stage.phase === "solver"
-                    ? (stage.solverNote ??
-                      reverseSolverWaitDetail(SWAP_CHAIN.name))
+                    ? reverseSolverWaitDetail(SWAP_CHAIN.name)
                     : stage.counterMode === "managed" ||
                         (stage.counterMode !== "loop" && isParticipantManaged)
                       ? "Your CBTC is being locked on Canton by the platform"
@@ -3467,8 +3508,13 @@ export default function SwapPage() {
           isLoopWallet={!isParticipantManaged && !!wallet.provider}
           destinationParty={destinationParty}
           loopProvider={wallet.provider ?? undefined}
+          onRefreshQuote={handleQuote}
           onConfirm={() => {
             if (stage.kind !== "quoted") return;
+            if (quoteIsExpired(stage.quote)) {
+              void handleQuote();
+              return;
+            }
             if (stage.quote.direction === "canton-to-evm") {
               void handleConfirmReverse(stage.quote);
             } else {
@@ -3827,6 +3873,7 @@ function ReviewModal({
   isLoopWallet,
   destinationParty,
   loopProvider,
+  onRefreshQuote,
   onConfirm,
   onClose
 }: {
@@ -3859,6 +3906,7 @@ function ReviewModal({
   isLoopWallet?: boolean;
   destinationParty?: string | null;
   loopProvider?: unknown;
+  onRefreshQuote: () => void;
   onConfirm: () => void;
   onClose: () => void;
 }) {
@@ -3891,6 +3939,16 @@ function ReviewModal({
   const [networkFeeTransactions, setNetworkFeeTransactions] = useState<
     import("@/lib/canton-network-fee-math").NetworkFeeTxLeg[] | undefined
   >(quote?.networkFeeTransactions);
+  const quoteExpiresAtForTick = quote ? quoteExpiresAtSeconds(quote) : undefined;
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    setNowSec(Math.floor(Date.now() / 1000));
+    if (!quoteExpiresAtForTick || busy) return;
+    const timer = window.setInterval(() => {
+      setNowSec(Math.floor(Date.now() / 1000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [quoteExpiresAtForTick, busy]);
   useEffect(() => {
     if (!quote) return;
 
@@ -3925,6 +3983,14 @@ function ReviewModal({
       networkFeeSource: quote.networkFeeSource,
       networkFeePreview: quote.networkFeePreview
     });
+
+    const quoteNetworkFeeEnabled =
+      quote.networkFeeCharged === true ||
+      (NETWORK_FEE_UI_ENABLED && quote.networkFeePreview === true);
+    if (!quoteNetworkFeeEnabled) {
+      setNetworkFeeLoading(false);
+      return;
+    }
 
     if (
       quote.direction === "canton-to-canton" &&
@@ -4035,8 +4101,10 @@ function ReviewModal({
 
   const isC2c = quote.direction === "canton-to-canton";
   const reverse = quote.direction === "canton-to-evm";
+  const quoteChargesCantonNetworkFee = quote.networkFeeCharged === true;
   const hideCantonNetworkFee =
-    !!isLoopWallet && !isParticipantManaged;
+    (!quoteChargesCantonNetworkFee && !NETWORK_FEE_UI_ENABLED) ||
+    (!!isLoopWallet && !isParticipantManaged);
   const feeBps = quote.feeBps ?? 0;
 
   let payAmount: string;
@@ -4150,39 +4218,30 @@ function ReviewModal({
     }
   }
 
-  const blockingError = retryError ?? setupError;
-  const quoteAgeLabel =
-    typeof quote.quoteAgeMs === "number"
-      ? quote.quoteAgeMs < 1000
-        ? "fresh"
-        : quote.quoteAgeMs < 60_000
-          ? `${Math.round(quote.quoteAgeMs / 1000)}s old`
-          : `${Math.round(quote.quoteAgeMs / 60_000)}m old`
+  const quoteExpiresAt = quoteExpiresAtSeconds(quote);
+  const quoteSecondsRemaining =
+    typeof quoteExpiresAt === "number" ? quoteExpiresAt - nowSec : undefined;
+  const quoteExpired =
+    !busy &&
+    typeof quoteSecondsRemaining === "number" &&
+    quoteSecondsRemaining <= 0;
+  const quoteExpiryLabel =
+    typeof quoteSecondsRemaining === "number"
+      ? formatQuoteCountdown(quoteSecondsRemaining)
       : undefined;
-  const quoteSourceLabel = quote.quoteSource
-    ? [
-        quote.quoteSource,
-        quoteAgeLabel,
-        quote.quoteStale ? "stale" : undefined,
-        quote.quoteIndicative ? "indicative" : undefined
-      ]
-        .filter(Boolean)
-        .join(" • ")
-    : undefined;
-  const quoteExpiresAt = quote.expiresAt ?? quote.expires;
-  const quoteExpiryLabel = quoteExpiresAt
-    ? new Date(quoteExpiresAt * 1000).toLocaleTimeString(undefined, {
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit"
-      })
-    : undefined;
+  const quoteExpiredError = quoteExpired
+    ? "This quote expired. Get a fresh quote before confirming so the swap uses current pricing."
+    : null;
+  const blockingError = retryError ?? quoteExpiredError ?? setupError;
 
   let actionLabel = "Confirm swap";
   let actionDisabled = !!busy;
-  const actionOnClick: () => void = onConfirm;
+  let actionOnClick: () => void = onConfirm;
 
-  if (!busy && reviewPayLimit && !reviewPayLimit.ok) {
+  if (quoteExpired) {
+    actionLabel = "Get fresh quote";
+    actionOnClick = onRefreshQuote;
+  } else if (!busy && reviewPayLimit && !reviewPayLimit.ok) {
     actionLabel = reviewPayLimit.message;
     actionDisabled = true;
   } else if (managedSetup && isC2c && !busy) {
@@ -4256,9 +4315,6 @@ function ReviewModal({
         <div className="mt-5 border-t border-foreground/10 pt-4">
           <div className="flex flex-col gap-1.5 text-sm">
             <DetailRow label="Rate" value={rateLabel} />
-            {quoteSourceLabel && (
-              <DetailRow label="Quote source" value={quoteSourceLabel} />
-            )}
             {quoteExpiryLabel && (
               <DetailRow label="Quote expires" value={quoteExpiryLabel} />
             )}

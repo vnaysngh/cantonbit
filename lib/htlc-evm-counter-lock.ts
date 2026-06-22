@@ -192,6 +192,28 @@ async function rpcCall<T>(
   return result as T;
 }
 
+export async function evmBlockAtOrBeforeUnixTime(
+  timestampSeconds: number,
+  rpcUrl?: string
+): Promise<string> {
+  const tipHex = await getBlockNumberHex(rpcUrl);
+  let lo = 0n;
+  let hi = BigInt(tipHex);
+  const target = BigInt(Math.max(0, Math.floor(timestampSeconds)));
+  while (lo < hi) {
+    const mid = (lo + hi + 1n) / 2n;
+    const block = await rpcCall<{ timestamp?: string } | null>(
+      "eth_getBlockByNumber",
+      [`0x${mid.toString(16)}`, false],
+      rpcUrl
+    );
+    const ts = BigInt(block?.timestamp ?? "0x0");
+    if (ts <= target) lo = mid;
+    else hi = mid - 1n;
+  }
+  return `0x${lo.toString(16)}`;
+}
+
 /** Canonical ERC-20 balance read used before reserving reverse solver inventory. */
 export async function readErc20Balance(
   tokenAddress: string,
