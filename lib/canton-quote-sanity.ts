@@ -1,28 +1,38 @@
 /**
- * Optional cross-check: Tradecraft vs amuletPrice × BTC/USD reference mid.
- * NOT used on the C2C quote path — Tradecraft is the executable price for CC↔CBTC.
- * Enable manually via CANTON_QUOTE_ENABLE_SANITY=1 if you want this guardrail back.
+ * Mandatory cross-check: Tradecraft vs amuletPrice × BTC/USD reference mid.
+ * Tradecraft remains the executable price, while this independent reference is
+ * the circuit breaker that prevents a manipulated pool from draining vault float.
  */
 import "server-only";
 
-import { alert } from "./alert";
 import { fromBaseUnits, toBaseUnitsFloor } from "./amount-units";
 import { getSwapAsset, type CantonSwapAssetId } from "./canton-assets";
 import { fetchAmuletPriceUsd } from "./canton-price-scan";
-import { CantonQuoteSanityError } from "./canton-quote";
+import { CantonQuoteSanityError } from "./canton-quote-errors";
 import { cantonQuoteSanityUserMessage } from "./canton-quote-messages";
 import { NETWORK } from "./constants";
+import {
+  fetchWithFreshness,
+  type PriceCacheEntry
+} from "./price-cache";
 
 /** Max deviation of Tradecraft gross from reference mid (bps). Wider on devnet (mainnet Tradecraft). */
 export const CANTON_QUOTE_SANITY_BPS = Number(
   process.env.CANTON_QUOTE_SANITY_BPS ??
     (NETWORK.name === "devnet" ? "1000" : "300")
 );
+if (
+  !Number.isInteger(CANTON_QUOTE_SANITY_BPS) ||
+  CANTON_QUOTE_SANITY_BPS <= 0 ||
+  CANTON_QUOTE_SANITY_BPS > 2500
+) {
+  throw new Error("CANTON_QUOTE_SANITY_BPS must be an integer from 1 to 2500");
+}
 
 const BTC_PRICE_USER_MSG =
   "Could not verify the Bitcoin reference price. Please try again shortly.";
 
-let btcUsdCache: { price: number; at: number } | null = null;
+let btcUsdCache: PriceCacheEntry<number> | null = null;
 const BTC_CACHE_FRESH_MS = 60_000;
 /** Serve stale BTC/USD briefly when all live sources fail (matches HTLC quote policy). */
 const BTC_CACHE_MAX_STALE_MS = 90_000;
@@ -80,47 +90,30 @@ async function tryBinanceBtcUsd(): Promise<number | null> {
   return parsePositivePrice(j.price);
 }
 
-async function fetchBtcUsdLive(): Promise<number> {
-  const sources: Array<{ name: string; fn: () => Promise<number | null> }> = [
-    { name: "coingecko", fn: tryCoinGeckoBtcUsd },
-    { name: "coinbase", fn: tryCoinbaseBtcUsd },
-    { name: "binance", fn: tryBinanceBtcUsd }
-  ];
-  const errors: string[] = [];
-  for (const { name, fn } of sources) {
-    try {
-      const p = await fn();
-      if (p != null) return p;
-      errors.push(`${name}: invalid payload`);
-    } catch (e) {
-      errors.push(`${name}: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
-  throw new Error(errors.join("; "));
-}
-
 /** BTC/USD reference for notional guards (network fee, optional sanity). */
 export async function fetchBtcUsdReference(): Promise<number> {
   return fetchBtcUsd();
 }
 
 async function fetchBtcUsd(): Promise<number> {
-  const now = Date.now();
-  if (btcUsdCache && now - btcUsdCache.at < BTC_CACHE_FRESH_MS) {
-    return btcUsdCache.price;
-  }
   try {
-    const p = await fetchBtcUsdLive();
-    btcUsdCache = { price: p, at: now };
-    return p;
+    const result = await fetchWithFreshness<number>({
+      cached: btcUsdCache,
+      setCached: (entry) => {
+        btcUsdCache = entry;
+      },
+      sources: [
+        { name: "coingecko", fetch: tryCoinGeckoBtcUsd },
+        { name: "coinbase", fetch: tryCoinbaseBtcUsd },
+        { name: "binance", fetch: tryBinanceBtcUsd }
+      ],
+      freshMs: BTC_CACHE_FRESH_MS,
+      maxStaleMs: BTC_CACHE_MAX_STALE_MS,
+      alertTitle: "BTC/USD reference down — serving stale checked price",
+      unavailableMessage: (reason) => reason
+    });
+    return result.value;
   } catch (e) {
-    if (btcUsdCache && now - btcUsdCache.at < BTC_CACHE_MAX_STALE_MS) {
-      void alert("warn", "BTC/USD reference down — serving stale price", {
-        ageMs: now - btcUsdCache.at,
-        reason: e instanceof Error ? e.message : String(e)
-      });
-      return btcUsdCache.price;
-    }
     throw new CantonQuoteSanityError(
       `BTC/USD reference unavailable (${e instanceof Error ? e.message : e})`,
       BTC_PRICE_USER_MSG
@@ -135,8 +128,12 @@ export async function assertCantonQuoteSanity(
   inUnits: bigint,
   grossOutUnits: bigint
 ): Promise<void> {
-  if (process.env.CANTON_QUOTE_ENABLE_SANITY !== "1") return;
-  if (process.env.CANTON_QUOTE_SKIP_SANITY === "1") return;
+  if (
+    process.env.CANTON_QUOTE_SKIP_SANITY === "1" &&
+    process.env.NODE_ENV !== "production"
+  ) {
+    return;
+  }
   if (
     (fromAsset !== "CBTC" && fromAsset !== "CC") ||
     (toAsset !== "CBTC" && toAsset !== "CC") ||
@@ -151,20 +148,7 @@ export async function assertCantonQuoteSanity(
   if (!Number.isFinite(inDec) || inDec <= 0) return;
 
   const ccUsd = await fetchAmuletPriceUsd();
-  let btcUsd: number;
-  try {
-    btcUsd = await fetchBtcUsd();
-  } catch (e) {
-    // Tradecraft is the executable price; sanity is defense-in-depth only.
-    // If every BTC/USD source is down (common on Railway + CoinGecko 429), don't block swaps.
-    if (e instanceof CantonQuoteSanityError) {
-      void alert("warn", "Canton quote sanity skipped — BTC/USD unavailable", {
-        reason: e.message
-      });
-      return;
-    }
-    throw e;
-  }
+  const btcUsd = await fetchBtcUsd();
 
   let expectedOutDec: number;
   if (fromAsset === "CBTC") {

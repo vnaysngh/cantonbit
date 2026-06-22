@@ -47,10 +47,9 @@ export function networkFeeReserveCc(): string {
   return String(n);
 }
 
-/** Notional cap disabled — fee is purely prepare-based traffic × price. */
-// export function networkFeeMaxBpsOfNotional(): number {
-//   return parseEnvInt("NETWORK_FEE_MAX_BPS_OF_NOTIONAL", 250);
-// }
+export function networkFeeMaxBpsOfNotional(): number {
+  return parseEnvInt("NETWORK_FEE_MAX_BPS_OF_NOTIONAL", 250);
+}
 
 /** bytes → CC before buffer. */
 export function trafficBytesToCcRaw(params: {
@@ -128,13 +127,32 @@ export function compareCcBalanceGte(balanceCc: string, requiredCc: string): bool
   );
 }
 
-/** No-op — notional cap removed; users see prepare-based fee only. */
-export function assertNetworkFeeNotionalGuard(_params: {
+/** Refuse economically irrational swaps whose Canton fee exceeds the bound. */
+export function assertNetworkFeeNotionalGuard(params: {
   feeUsd: number;
   notionalUsd: number;
   maxBps?: number;
 }): void {
-  // Previously blocked when feeUsd/notionalUsd exceeded NETWORK_FEE_MAX_BPS_OF_NOTIONAL.
+  const maxBps = params.maxBps ?? networkFeeMaxBpsOfNotional();
+  if (
+    !Number.isFinite(params.feeUsd) ||
+    params.feeUsd < 0 ||
+    !Number.isFinite(params.notionalUsd) ||
+    params.notionalUsd <= 0 ||
+    !Number.isInteger(maxBps) ||
+    maxBps <= 0 ||
+    maxBps > 10_000
+  ) {
+    throw new NetworkFeeNotionalError(
+      "Could not verify the swap value against the Canton network fee."
+    );
+  }
+  const feeBps = (params.feeUsd / params.notionalUsd) * 10_000;
+  if (feeBps > maxBps) {
+    throw new NetworkFeeNotionalError(
+      `Canton network fee is too high for this swap (${feeBps.toFixed(0)} bps; max ${maxBps} bps). Increase the swap amount or try later.`
+    );
+  }
 }
 
 export class NetworkFeeNotionalError extends Error {

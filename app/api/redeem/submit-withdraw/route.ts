@@ -19,6 +19,7 @@ import { randomUUID } from "node:crypto";
 
 import { getLedgerJwt, invalidateLedgerJwtCache } from "@/lib/auth";
 import { NETWORK } from "@/lib/constants";
+import { parseBtc } from "@/lib/format";
 import { resolveSessionParty } from "@/lib/session-party";
 
 const APPLICATION_ID = "cbtc-app";
@@ -62,6 +63,23 @@ export async function POST(req: NextRequest) {
         {
           error: "withdrawAccountContractId, holdingCids, and amount required"
         },
+        { status: 400 }
+      );
+    }
+
+    // Validate the burn amount: must be a well-formed positive BTC decimal, not
+    // negative/zero/NaN/garbage. (Mirrors transfers/create. The ledger ultimately
+    // rejects spending holdings the user doesn't own, so this isn't a theft vector,
+    // but unvalidated amounts should never reach the Withdraw choice.)
+    let amountSats: bigint;
+    try {
+      amountSats = parseBtc(String(amount).trim());
+    } catch {
+      return NextResponse.json({ error: "invalid amount" }, { status: 400 });
+    }
+    if (amountSats <= 0n) {
+      return NextResponse.json(
+        { error: "amount must be greater than 0" },
         { status: 400 }
       );
     }

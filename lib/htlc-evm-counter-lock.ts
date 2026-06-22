@@ -164,6 +164,7 @@ async function readLockArgsFromTx(txHash: string): Promise<{
 type RpcReceipt = {
   status?: string;
   blockNumber?: string;
+  blockHash?: string;
   logs?: { address?: string; topics?: string[]; data?: string }[];
 };
 
@@ -189,6 +190,34 @@ async function rpcCall<T>(
   };
   if (error) throw new Error(error.message ?? `EVM RPC ${method} error`);
   return result as T;
+}
+
+/** Canonical ERC-20 balance read used before reserving reverse solver inventory. */
+export async function readErc20Balance(
+  tokenAddress: string,
+  ownerAddress: string,
+  rpcUrl?: string
+): Promise<bigint> {
+  const token = normalizeAddr(tokenAddress);
+  const owner = normalizeAddr(ownerAddress).replace(/^0x/, "");
+  if (!/^0x[0-9a-f]{40}$/.test(token) || !/^[0-9a-f]{40}$/.test(owner)) {
+    throw new Error("invalid token or owner address for balance read");
+  }
+  const result = await rpcCall<string>(
+    "eth_call",
+    [
+      {
+        to: token,
+        data: `0x70a08231${owner.padStart(64, "0")}`
+      },
+      "latest"
+    ],
+    rpcUrl
+  );
+  if (!/^0x[0-9a-f]+$/i.test(result ?? "")) {
+    throw new Error("ERC-20 balanceOf returned invalid data");
+  }
+  return BigInt(result);
 }
 
 function findLockedLog(
@@ -225,6 +254,7 @@ export async function verifyReverseCounterLockTx(
   if (receipt.status !== "0x1") {
     throw new Error(`counter-lock tx reverted on-chain: ${tx}`);
   }
+  await assertEvmTransactionFinalized(tx);
   const locked = findLockedLog(receipt, req.hashLock);
   if (!locked) {
     throw new Error(
@@ -256,6 +286,52 @@ export async function verifyReverseCounterLockTx(
 
 async function getBlockNumberHex(rpcUrl?: string): Promise<string> {
   return rpcCall<string>("eth_blockNumber", [], rpcUrl);
+}
+
+export function evmMinConfirmations(): number {
+  const value = Number(process.env.EVM_MIN_CONFIRMATIONS ?? "3");
+  if (!Number.isInteger(value) || value < 1 || value > 100) {
+    throw new Error("EVM_MIN_CONFIRMATIONS must be an integer from 1 to 100");
+  }
+  return value;
+}
+
+/** Refuse to treat a merely included transaction as final settlement evidence. */
+export async function assertEvmTransactionFinalized(
+  txHash: string,
+  opts?: { minConfirmations?: number; rpcUrl?: string }
+): Promise<void> {
+  const receipt = await rpcCall<RpcReceipt | null>(
+    "eth_getTransactionReceipt",
+    [txHash],
+    opts?.rpcUrl
+  );
+  if (!receipt?.blockNumber) {
+    throw new Error("EVM transaction is not mined yet");
+  }
+  const tip = BigInt(await getBlockNumberHex(opts?.rpcUrl));
+  const block = BigInt(receipt.blockNumber);
+  const confirmations = tip >= block ? tip - block + 1n : 0n;
+  const required = BigInt(opts?.minConfirmations ?? evmMinConfirmations());
+  if (confirmations < required) {
+    throw new Error(
+      `EVM transaction awaiting finality (${confirmations}/${required} confirmations)`
+    );
+  }
+  const confirmed = await rpcCall<RpcReceipt | null>(
+    "eth_getTransactionReceipt",
+    [txHash],
+    opts?.rpcUrl
+  );
+  if (
+    !confirmed ||
+    confirmed.status !== "0x1" ||
+    confirmed.blockNumber !== receipt.blockNumber ||
+    !confirmed.blockHash ||
+    confirmed.blockHash !== receipt.blockHash
+  ) {
+    throw new Error("EVM transaction receipt changed during finality check");
+  }
 }
 
 /** True if a Claimed event exists for this hashLock (user revealed preimage on EVM). */
@@ -376,6 +452,7 @@ export async function verifyForwardRetakeTx(
   if (receipt.status !== "0x1") {
     throw new Error(`retake tx reverted on-chain: ${tx}`);
   }
+  await assertEvmTransactionFinalized(tx);
   if (!receiptHasHashLockEvent(receipt, hashLock, HTLC_RETAKEN_EVENT_TOPIC)) {
     throw new Error(
       `retake tx has no matching Retaken event for hashLock on escrow ${HTLC_ESCROW_ADDRESS}`
@@ -399,6 +476,7 @@ export async function verifyReverseClaimTx(
   if (receipt.status !== "0x1") {
     throw new Error(`claim tx reverted on-chain: ${tx}`);
   }
+  await assertEvmTransactionFinalized(tx);
   if (!receiptHasHashLockEvent(receipt, hashLock, HTLC_CLAIMED_EVENT_TOPIC)) {
     throw new Error(
       `claim tx has no matching Claimed event for hashLock on escrow ${HTLC_ESCROW_ADDRESS}`

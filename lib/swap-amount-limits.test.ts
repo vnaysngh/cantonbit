@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  assertSwapPayAmountLimit,
+  assertSwapPayAmountLimitUnits,
   checkSwapPayAmountLimit,
   MAX_SWAP_CBTC,
   MAX_SWAP_CC
@@ -22,4 +24,13 @@ test("rejects amounts above caps with asset-specific message", () => {
   const cbtc = checkSwapPayAmountLimit("CBTC", "0.00010001");
   assert.equal(cbtc.ok, false);
   if (!cbtc.ok) assert.match(cbtc.message, new RegExp(MAX_SWAP_CBTC.replace(".", "\\.")));
+});
+
+test("strict server checks reject invalid, zero, and over-cap values", () => {
+  assert.equal(assertSwapPayAmountLimit("CC", "1"), 10_000_000_000n);
+  assert.throws(() => assertSwapPayAmountLimit("CBTC", "garbage"));
+  assert.throws(() => assertSwapPayAmountLimit("CBTC", "0"));
+  assert.throws(() => assertSwapPayAmountLimit("WBTC", "0.00010001"));
+  assert.throws(() => assertSwapPayAmountLimitUnits("WBTC", 0n));
+  assert.throws(() => assertSwapPayAmountLimitUnits("WBTC", 10_001n));
 });

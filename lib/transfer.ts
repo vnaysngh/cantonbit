@@ -17,7 +17,7 @@
 import "server-only";
 
 import { getLedgerJwt } from "./auth";
-import { getPendingTransfers } from "./canton";
+import { getLedgerEnd, getPendingTransfers } from "./canton";
 import type { InstrumentId } from "./constants";
 import { NETWORK } from "./constants";
 import { fetchCcRegistry } from "./cc-registry";
@@ -463,6 +463,7 @@ export async function submitLedgerCommands(params: {
 }): Promise<{
   updateId: string;
   eventsById: Record<string, unknown>;
+  offset: number;
 }> {
   const jwt = await getLedgerJwt();
   const disclosedContracts = params.synchronizerId
@@ -505,12 +506,19 @@ export async function submitLedgerCommands(params: {
   const json = JSON.parse(text) as {
     transactionTree?: {
       updateId: string;
+      offset?: number;
       eventsById?: Record<string, unknown>;
     };
   };
+  // Some participant versions omit offset from submit-and-wait. Capturing the
+  // ledger end after the response is safe: a wallet cannot accept the new offer
+  // before it has received this response and learned the offer CID.
+  const offset =
+    Number(json.transactionTree?.offset ?? 0) || (await getLedgerEnd());
   return {
     updateId: json.transactionTree?.updateId ?? "",
-    eventsById: json.transactionTree?.eventsById ?? {}
+    eventsById: json.transactionTree?.eventsById ?? {},
+    offset
   };
 }
 
@@ -614,6 +622,9 @@ export async function createTransfer(params: {
   registryKind?: TransferRegistryKind;
   /** Asset symbol for balance-selection errors. */
   assetSymbol?: string;
+  /** Deterministic command id for idempotent retries (ledger dedups duplicates).
+   *  Omit for a random id (default). */
+  commandId?: string;
 }): Promise<CreateTransferResult> {
   const {
     senderParty,
@@ -625,7 +636,8 @@ export async function createTransfer(params: {
     instrumentId = NETWORK.instrumentId,
     registrarAdmin = NETWORK.decentralizedPartyId,
     registryKind = "cbtc",
-    assetSymbol = instrumentId.id === "Amulet" ? "CC" : "CBTC"
+    assetSymbol = instrumentId.id === "Amulet" ? "CC" : "CBTC",
+    commandId: commandIdParam
   } = params;
   const jwt = await getLedgerJwt();
   const now = new Date().toISOString();
@@ -667,7 +679,7 @@ export async function createTransfer(params: {
   const factory = (await factoryRes.json()) as TransferFactoryResponse;
 
   // Step 2: submit TransferFactory_Transfer on the ledger as the sender.
-  const commandId = crypto.randomUUID();
+  const commandId = commandIdParam ?? crypto.randomUUID();
   const disclosed: DisclosedContract[] = [
     ...factory.choiceContext.disclosedContracts.map((dc) => ({
       ...dc,

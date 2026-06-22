@@ -24,6 +24,7 @@ export const cantonSwapApi = {
   quote(fromAsset: CantonSwapMvpAssetId, toAsset: CantonSwapMvpAssetId, amount: string, userParty?: string) {
     return json<{
       inAmount: string;
+      grossOutAmount?: string;
       outAmount: string;
       feeBps: number;
       expires: number;
@@ -31,6 +32,15 @@ export const cantonSwapApi = {
       networkFeeUsd?: number;
       minCcRequired?: string;
       networkFeeSource?: string;
+      quoteSource?: string;
+      quoteAgeMs?: number;
+      quoteStale?: boolean;
+      midPrice?: string;
+      minReceived?: string;
+      minReceivedToken?: string;
+      expiresAt?: number;
+      quoteIndicative?: boolean;
+      quoteNote?: string;
     }>("/api/canton/swap/quote", {
       method: "POST",
       body: JSON.stringify({ fromAsset, toAsset, amount, userParty })

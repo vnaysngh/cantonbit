@@ -113,7 +113,7 @@ function daemonPriority(o: Order): number {
     return 8;
   }
   if (o.direction === "canton-to-evm") {
-    if (o.status === "main_locked") return 2;
+    if (o.status === "main_locked" || o.status === "counter_locking") return 2;
     if (o.status === "counter_locked" || o.status === "counter_claimed")
       return 6;
   }
@@ -359,25 +359,68 @@ async function main() {
       const orders = sortDaemonOrders(rawOrders ?? []);
       for (const o of orders) {
         try {
+        if (
+          !o.solverEvmAddress ||
+          o.solverEvmAddress.toLowerCase() !== account.address.toLowerCase()
+        ) {
+          throw new Error(
+            `order solver EVM ${o.solverEvmAddress || "missing"} does not match daemon hot key ${account.address}`
+          );
+        }
         // ================= REVERSE (canton-to-evm) =================
         // Main leg = user's CBTC (locked by our backend, LONG timelock); counter
         // leg = OUR WBTC (SHORT timelock). See docs/canton-to-evm-design.md.
         if (o.direction === "canton-to-evm") {
           // R-STEP 3 — CBTC locked on-ledger (our own backend's write) → lock WBTC
           // on EVM: same hashLock, receiver = the USER's EVM address, SHORT timelock.
-          if (o.status === "main_locked" && !lockedCounter.has(o.id)) {
+          if (
+            (o.status === "main_locked" || o.status === "counter_locking") &&
+            !lockedCounter.has(o.id)
+          ) {
             const amount = BigInt(o.wbtcAmount);
+            const wbtc = resolveWbtcAddress(slug);
             const unlock = BigInt(o.solverTimelock ?? 0);
-            if (unlock <= BigInt(Math.floor(Date.now() / 1000) + 300)) {
-              console.log(
-                `[solver] ${o.id.slice(0, 12)} rev: timelock too close — skip`
-              );
-              continue;
-            }
             const existing = (await escrow.read.locks([
               o.hashLock
             ])) as readonly [bigint, bigint, Address, Address, Address];
             if (existing[1] === 0n) {
+              const balance = (await pub.readContract({
+                address: wbtc,
+                abi: ERC20_ABI,
+                functionName: "balanceOf",
+                args: [account.address]
+              })) as bigint;
+              if (balance < amount) {
+                void alert(
+                  "Solver WBTC balance too low — cannot fill reverse swap",
+                  {
+                    order: o.id.slice(0, 18),
+                    have: String(balance),
+                    need: String(amount)
+                  }
+                );
+                if (o.status === "counter_locking") {
+                  await jpost(`/api/htlc/${o.id}/abort-counter-lock`);
+                }
+                continue;
+              }
+              if (o.status === "main_locked") {
+                const begun = (await jpost(
+                  `/api/htlc/${o.id}/begin-counter-lock`,
+                  { evmFloatUnits: balance.toString() }
+                )) as { order?: Order };
+                if (!begun.order || begun.order.status !== "counter_locking") {
+                  continue;
+                }
+                Object.assign(o, begun.order);
+              }
+              if (unlock <= BigInt(Math.floor(Date.now() / 1000) + 300)) {
+                console.log(
+                  `[solver] ${o.id.slice(0, 12)} rev: timelock too close — skip`
+                );
+                await jpost(`/api/htlc/${o.id}/abort-counter-lock`);
+                continue;
+              }
               // C-02: lock reads empty. Before re-locking, prove the hash was NOT
               // already claimed. A scan ERROR must FAIL CLOSED — never re-lock on an
               // unconfirmed scan, or a real claim + RPC blip makes us double-fund.
@@ -394,26 +437,6 @@ async function main() {
               if (claimedAlready) {
                 console.log(
                   `[solver] ${o.id.slice(0, 12)} rev: EVM already claimed — skip re-lock`
-                );
-                continue;
-              }
-              const wbtc = resolveWbtcAddress(slug);
-              // SOLVENCY (M1): don't lock if the solver's WBTC balance is short — the
-              // user's CBTC is already custodied/locked, so it auto-refunds cleanly.
-              const balance = (await pub.readContract({
-                address: wbtc,
-                abi: ERC20_ABI,
-                functionName: "balanceOf",
-                args: [account.address]
-              })) as bigint;
-              if (balance < amount) {
-                void alert(
-                  "Solver WBTC balance too low — cannot fill reverse swap",
-                  {
-                    order: o.id.slice(0, 18),
-                    have: String(balance),
-                    need: String(amount)
-                  }
                 );
                 continue;
               }
@@ -446,6 +469,7 @@ async function main() {
                 console.log(
                   `[solver] ${o.id.slice(0, 12)} rev: lock tx reverted on-chain — skip record`
                 );
+                await jpost(`/api/htlc/${o.id}/abort-counter-lock`);
                 continue;
               }
               await jpost(`/api/htlc/${o.id}/counter-lock`, {

@@ -16,7 +16,23 @@ export function quoteGrossOutUnits(
 }
 
 export function applyOutputFee(gross: bigint, feeBps: number): bigint {
+  if (!Number.isInteger(feeBps) || feeBps < 0 || feeBps > 10_000) {
+    throw new Error("feeBps must be an integer from 0 to 10000");
+  }
   return gross - (gross * BigInt(feeBps)) / 10000n;
+}
+
+/** Parse operator fee config without permitting NaN, fractions, or over-100% fees. */
+export function parsePlatformFeeBps(
+  raw: string | undefined,
+  fallback: number
+): number {
+  const text = raw?.trim();
+  const value = text ? Number(text) : fallback;
+  if (!Number.isInteger(value) || value < 0 || value > 10_000) {
+    throw new Error("PLATFORM_FEE_BPS must be an integer from 0 to 10000");
+  }
+  return value;
 }
 
 export function quoteOutUnits(

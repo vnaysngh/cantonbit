@@ -5,7 +5,7 @@ import { Reveal } from "./Reveal";
 export const metadata = {
   title: "How it works",
   description:
-    "How WarpX moves Bitcoin-backed tokens between EVM and Canton with hashlocked atomic swaps."
+    "How WarpX settles Bitcoin-backed token swaps across EVM and Canton."
 };
 
 const STEPS = [
@@ -17,7 +17,7 @@ const STEPS = [
   {
     icon: "sync_lock",
     title: "Both legs lock",
-    body: "The solver locks the other asset under the same hashlock. Until both sides are in place, neither party can walk away with the other's funds."
+    body: "Managed wallets use hashlocks on both legs. Loop wallets use standard Canton transfers with durable venue delivery and refund recovery because Loop cannot vet the custom HTLC contract."
   },
   {
     icon: "key",
@@ -26,7 +26,7 @@ const STEPS = [
   }
 ] as const;
 
-const TAGS = ["HASHLOCKED", "TIMED REFUNDS", "NON-CUSTODIAL"] as const;
+const TAGS = ["HASHLOCKED EVM", "TIMED REFUNDS", "MODE-SPECIFIC CUSTODY"] as const;
 
 const dottedBg: React.CSSProperties = {
   backgroundImage:
@@ -47,8 +47,8 @@ export default function HowItWorksPage() {
           </h1>
           <p className="mx-auto mt-4 max-w-[560px] text-[15px] leading-relaxed text-muted-foreground sm:text-base">
             Swap Bitcoin-backed tokens across chains. Both legs share one
-            hashlock — a single secret settles the trade, and staggered
-            timelocks protect each side if anything stops halfway.
+            secret. Managed wallets use an on-ledger Canton HTLC; Loop wallets
+            use trust-minimized standard transfers with venue recovery.
           </p>
           {/*   <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
             {(["EVM → Canton", "Canton → EVM"] as const).map((dir) => (

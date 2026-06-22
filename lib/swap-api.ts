@@ -62,6 +62,7 @@ export interface QuoteResponse {
   fromAsset?: string;
   toAsset?: string;
   inAmount?: string;
+  grossOutAmount?: string;
   outAmount?: string;
   feeBps: number;
   /** Live WBTC/BTC price used for this quote: price = wbtcPriceRaw / 10^wbtcPriceDecimals. */
@@ -81,6 +82,16 @@ export interface QuoteResponse {
   networkFeeTransactions?: import("@/lib/canton-network-fee-math").NetworkFeeTxLeg[];
   networkFeeCharged?: boolean;
   networkFeePreview?: boolean;
+  /** Quote transparency metadata. */
+  quoteSource?: string;
+  quoteAgeMs?: number;
+  quoteStale?: boolean;
+  midPrice?: string;
+  minReceived?: string;
+  minReceivedToken?: string;
+  expiresAt?: number;
+  quoteIndicative?: boolean;
+  quoteNote?: string;
 }
 
 export type SwapStatus =

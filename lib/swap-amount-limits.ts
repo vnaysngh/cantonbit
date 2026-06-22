@@ -37,6 +37,33 @@ export function checkSwapPayAmountLimit(
   }
 }
 
+/** Strict server-side cap validation. Unlike the UI helper, malformed/zero input fails. */
+export function assertSwapPayAmountLimit(
+  asset: SwapPayAsset,
+  amount: string
+): bigint {
+  const decimals = asset === "CC" ? CC_DECIMALS : BTC_DECIMALS;
+  let units: bigint;
+  try {
+    units = toBaseUnits(amount.trim(), decimals);
+  } catch {
+    throw new Error(`invalid ${asset} amount`);
+  }
+  return assertSwapPayAmountLimitUnits(asset, units);
+}
+
+/** Strict server-side cap validation for callers that already hold base units. */
+export function assertSwapPayAmountLimitUnits(
+  asset: SwapPayAsset,
+  units: bigint
+): bigint {
+  if (units <= 0n) throw new Error(`${asset} amount must be > 0`);
+  if (units > swapPayAmountLimitUnits(asset)) {
+    throw new Error(swapPayAmountLimitMessage(asset));
+  }
+  return units;
+}
+
 /** Map Canton swap leg token or HTLC pay token to a capped asset id. */
 export function swapPayAssetFromToken(token: string): SwapPayAsset | null {
   if (token === "CC") return "CC";

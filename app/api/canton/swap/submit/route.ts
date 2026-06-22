@@ -7,6 +7,7 @@ import { cantonSwapService } from "@/lib/canton-swap-service";
 import type { CantonSwapMvpAssetId } from "@/lib/canton-swap-types";
 import { isParticipantManagedParty, requirePartyOwner } from "@/lib/htlc-auth";
 import { CantonQuoteUnavailableError } from "@/lib/canton-quote";
+import { distributedRateLimitOk } from "@/lib/api-rate-limit";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +34,15 @@ export async function POST(req: Request) {
 
     const auth = await requirePartyOwner(userParty);
     if (auth.error) return auth.error;
+    if (
+      !(await distributedRateLimitOk({
+        scope: "c2c-submit",
+        key: auth.partyId,
+        limit: 8
+      }))
+    ) {
+      return NextResponse.json({ error: "rate limit exceeded" }, { status: 429 });
+    }
 
     if (!(await isParticipantManagedParty(userParty))) {
       return NextResponse.json(

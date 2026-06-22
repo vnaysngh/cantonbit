@@ -1138,6 +1138,7 @@ export async function refundHtlcLock(params: {
   allocationCid: string;
   lockerParty?: string;
   instrumentId?: InstrumentId;
+  commandId?: string;
 }): Promise<{ updateId: string }> {
   const jwt = await getLedgerJwt();
   const ctx = await allocationChoiceContext(
@@ -1160,7 +1161,8 @@ export async function refundHtlcLock(params: {
         }
       }
     ],
-    ctx.disclosed
+    ctx.disclosed,
+    params.commandId
   );
   return { updateId };
 }

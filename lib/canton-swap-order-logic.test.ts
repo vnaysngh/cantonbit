@@ -124,43 +124,31 @@ test("isRetriableLoopFillError detects transient fill failures", () => {
   );
 });
 
-test("resolveCreateCantonSwapOrder: same id does not overwrite", () => {
+test("resolveCreateCantonSwapOrder: exact retry returns existing order", () => {
   const existing = baseOrder({ id: "swap-1", status: "user_locked" });
-  const incoming = {
-    id: "swap-1",
-    fromAsset: "CBTC" as const,
-    toAsset: "CC" as const,
-    inAmount: "9",
-    outAmount: "99",
-    minOut: "99",
-    quoteExpiresAt: 9_999,
-    userParty: "user::1",
-    solverParty: "solver::1",
-    walletMode: "loop" as const
-  };
+  const { status: _status, createdAt: _createdAt, ...incoming } = existing;
   const { order, isNew } = resolveCreateCantonSwapOrder(existing, incoming, 500);
   assert.equal(isNew, false);
   assert.equal(order.status, "user_locked");
   assert.equal(order.inAmount, "1");
 });
 
-test("resolveCreateCantonSwapOrder: rejects id owned by another party", () => {
+test("resolveCreateCantonSwapOrder: rejects changed immutable terms", () => {
   const existing = baseOrder({ id: "swap-1", userParty: "user::1" });
   const incoming = {
-    id: "swap-1",
-    fromAsset: "CBTC" as const,
-    toAsset: "CC" as const,
-    inAmount: "1",
-    outAmount: "10",
-    minOut: "10",
-    quoteExpiresAt: 9_999,
-    userParty: "user::2",
-    solverParty: "solver::1",
-    walletMode: "loop" as const
+    ...existing,
+    status: undefined,
+    createdAt: undefined,
+    inAmount: "2"
   };
+  const {
+    status: _status,
+    createdAt: _createdAt,
+    ...incomingWithoutState
+  } = incoming;
   assert.throws(
-    () => resolveCreateCantonSwapOrder(existing, incoming, 500),
-    /another party/
+    () => resolveCreateCantonSwapOrder(existing, incomingWithoutState, 500),
+    /different immutable terms/
   );
 });
 

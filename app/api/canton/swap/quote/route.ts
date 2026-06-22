@@ -3,10 +3,8 @@
  */
 import { NextResponse } from "next/server";
 
-import {
-  cantonSwapQuoteRateLimitOk,
-  clientIpFromRequest
-} from "@/lib/canton-swap-rate-limit";
+import { clientIpFromRequest } from "@/lib/canton-swap-rate-limit";
+import { distributedRateLimitOk } from "@/lib/api-rate-limit";
 import { quoteMvpCantonSwap } from "@/lib/canton-swap-quote";
 import {
   computeC2cSwapNotionalUsd,
@@ -27,6 +25,8 @@ import {
 } from "@/lib/canton-quote";
 import { cantonQuoteUnavailableUserMessage } from "@/lib/canton-quote-messages";
 import type { CantonSwapMvpAssetId } from "@/lib/canton-swap-types";
+import { assertSwapPayAmountLimit } from "@/lib/swap-amount-limits";
+import { NETWORK } from "@/lib/constants";
 
 export const dynamic = "force-dynamic";
 
@@ -35,12 +35,17 @@ function parseMvpAsset(raw: unknown): CantonSwapMvpAssetId | null {
   return null;
 }
 
+function impliedPrice(outAmount: string, inAmount: string): string | undefined {
+  const out = Number(outAmount);
+  const input = Number(inAmount);
+  if (!Number.isFinite(out) || !Number.isFinite(input) || input <= 0) {
+    return undefined;
+  }
+  return (out / input).toPrecision(12);
+}
+
 export async function POST(req: Request) {
   try {
-    if (!cantonSwapQuoteRateLimitOk(clientIpFromRequest(req))) {
-      return NextResponse.json({ error: "rate limit exceeded" }, { status: 429 });
-    }
-
     const body = await req.json();
     const fromAsset = parseMvpAsset(body.fromAsset);
     const toAsset = parseMvpAsset(body.toAsset);
@@ -52,6 +57,30 @@ export async function POST(req: Request) {
         { status: 400 }
       );
     }
+    const clientIp = clientIpFromRequest(req);
+    if (
+      !(await distributedRateLimitOk({
+        scope: "c2c-quote-ip",
+        key: clientIp,
+        limit: 30
+      }))
+    ) {
+      return NextResponse.json({ error: "rate limit exceeded" }, { status: 429 });
+    }
+    if (userParty) {
+      const auth = await authorizeQuoteParty(userParty);
+      if (auth.error) return auth.error;
+      if (
+        !(await distributedRateLimitOk({
+          scope: "c2c-quote-party",
+          key: auth.partyId,
+          limit: 30
+        }))
+      ) {
+        return NextResponse.json({ error: "rate limit exceeded" }, { status: 429 });
+      }
+    }
+    assertSwapPayAmountLimit(fromAsset, String(amount));
     const q = await quoteMvpCantonSwap(fromAsset, toAsset, String(amount));
 
     let networkFeeFields = estimateToQuoteFields({
@@ -62,9 +91,6 @@ export async function POST(req: Request) {
       networkFeeSource: "disabled"
     });
     if (shouldQuoteNetworkFee() && userParty) {
-      const auth = await authorizeQuoteParty(userParty);
-      if (auth.error) return auth.error;
-
       const managed = await isParticipantManagedParty(userParty);
       if (managed) {
         const vault = expectedCantonSwapParty();
@@ -109,10 +135,22 @@ export async function POST(req: Request) {
       toAsset,
       inAmount: q.inAmount,
       outAmount: q.outAmount,
+      grossOutAmount: q.grossOutAmount,
       feeBps: q.feeBps,
       bridgeFeeBps: q.feeBps,
       expires: q.expiresAt,
+      expiresAt: q.expiresAt,
       quoteSource: q.source,
+      quoteAgeMs: q.ageMs,
+      quoteStale: q.stale,
+      midPrice: impliedPrice(q.grossOutAmount, q.inAmount),
+      minReceived: q.outAmount,
+      minReceivedToken: toAsset,
+      quoteIndicative: NETWORK.name === "devnet",
+      quoteNote:
+        NETWORK.name === "devnet"
+          ? "Devnet C2C quotes use mainnet Tradecraft pricing and are indicative."
+          : undefined,
       ...networkFeeFields
     });
   } catch (e) {

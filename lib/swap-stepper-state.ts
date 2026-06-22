@@ -50,6 +50,7 @@ export function reverseLoopHtlcSteps(opts: {
 /** Loop forward HTLC (WBTC → CBTC) progress steps. */
 export function forwardLoopHtlcSteps(opts: {
   phase: "lock" | "solver" | "claim" | "done";
+  /** Legacy argument kept for call-site compatibility; Loop HTLC fees are no longer separately charged. */
   networkFeeEnabled: boolean;
 }): SwapStep[] {
   const lockDone = opts.phase !== "lock";
@@ -74,21 +75,11 @@ export function forwardLoopHtlcSteps(opts: {
             : "pending"
     )
   ];
-  if (opts.networkFeeEnabled) {
-    steps.push(
-      step(
-        "fee",
-        "Pay network fee in Loop (CC)",
-        opts.phase === "claim" ? "active" : claimDone ? "done" : "pending"
-      )
-    );
-  }
+  void opts.networkFeeEnabled;
   steps.push(
     step(
       "accept",
-      opts.networkFeeEnabled
-        ? "Accept CBTC in Loop"
-        : "Claim CBTC in Loop",
+      "Claim CBTC in Loop",
       opts.phase === "claim" ? "active" : claimDone ? "done" : "pending"
     )
   );

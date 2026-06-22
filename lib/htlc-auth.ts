@@ -7,6 +7,7 @@ import { resolveSessionParty } from "@/lib/session-party";
 import { getJwtSession, loopApiBase } from "@/lib/swap-session";
 import { htlcService, type SwapOrder } from "@/lib/htlc-service-singleton";
 import { isBearerAuthorized } from "@/lib/htlc-auth-logic";
+import { distributedRateLimitOk } from "@/lib/api-rate-limit";
 
 type GuardOk<T = unknown> = T & { error: null };
 type GuardErr = { error: NextResponse };
@@ -115,6 +116,15 @@ export async function requireOrderOwner(id: string): Promise<GuardOk<{ order: Sw
   if (!order) return unauthorized("not found", 404);
   const owner = await requirePartyOwner(order.userCantonParty);
   if (owner.error) return owner;
+  if (
+    !(await distributedRateLimitOk({
+      scope: "htlc-order-owner",
+      key: owner.partyId,
+      limit: 120
+    }))
+  ) {
+    return unauthorized("rate limit exceeded", 429);
+  }
   return { order, error: null };
 }
 
@@ -124,6 +134,15 @@ export async function requireOrderOwnerOrDaemon(req: Request, id: string): Promi
   if (isDaemonAuthorized(req)) return { order, daemon: true, error: null };
   const owner = await requirePartyOwner(order.userCantonParty);
   if (owner.error) return owner;
+  if (
+    !(await distributedRateLimitOk({
+      scope: "htlc-order-owner",
+      key: owner.partyId,
+      limit: 120
+    }))
+  ) {
+    return unauthorized("rate limit exceeded", 429);
+  }
   return { order, daemon: false, error: null };
 }
 

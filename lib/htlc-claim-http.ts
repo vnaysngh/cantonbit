@@ -12,6 +12,10 @@ export function htlcClaimErrorStatus(message: string): number {
     msg.includes("unexpected status") ||
     msg.includes("not ready") ||
     msg.includes("not present") ||
+    msg.includes("fresh htlc quote") ||
+    msg.includes("minout") ||
+    msg.includes("settlement floor") ||
+    msg.includes("quote expired") ||
     msg.includes("claim-counter is the loop path") ||
     msg.includes("claim-managed")
   ) {

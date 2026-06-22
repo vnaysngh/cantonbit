@@ -179,13 +179,15 @@ function readStore(): VaultStore {
   }
 }
 
-function writeStore(v: VaultStore): void {
+function writeStore(v: VaultStore): boolean {
   const s = storage();
-  if (!s) return;
+  if (!s) return false;
   try {
-    s.setItem(KEY_V3, JSON.stringify(v));
+    const serialized = JSON.stringify(v);
+    s.setItem(KEY_V3, serialized);
+    return s.getItem(KEY_V3) === serialized;
   } catch {
-    /* quota / disabled storage */
+    return false;
   }
 }
 
@@ -374,7 +376,7 @@ export function purgeExpiredSecrets(): void {
       changed = true;
     }
   }
-  if (changed) writeStore(store);
+  if (changed) void writeStore(store);
 }
 
 /** True if a non-expired vault entry exists (sync UI probe — does not decrypt). */
@@ -429,7 +431,15 @@ export async function rememberSecret(
     expiresAt: meta.expiresAt,
     loopPublicKey
   };
-  writeStore(store);
+  if (!writeStore(store)) return false;
+  const persisted = readStore()[swapId];
+  if (
+    !isVaultEntry(persisted) ||
+    persisted.iv !== iv ||
+    persisted.ct !== ct
+  ) {
+    return false;
+  }
   removeLegacyEntry(swapId);
   removeLegacyV2Store();
   markActiveHtlcSwap(swapId);

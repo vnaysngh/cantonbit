@@ -27,25 +27,47 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "depositAccountContractId required" }, { status: 400 });
     }
 
+    // SECURITY (IDOR): a deposit account's BTC address is per-user PII. Require the
+    // authenticated user to OWN this deposit account BEFORE the coordinator read —
+    // previously auth only gated the optional cache write, so any caller who knew a
+    // contract id could read another user's funding address.
+    const supabase = await createSupabaseServerClient();
+    const {
+      data: { user }
+    } = await supabase.auth.getUser();
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    const serviceClient = await createSupabaseServiceClient();
+    const { data: owned } = await serviceClient
+      .from("deposit_accounts")
+      .select("deposit_account_contract_id")
+      .eq("user_id", user.id)
+      .eq("deposit_account_contract_id", depositAccountContractId)
+      .maybeSingle();
+    if (!owned) {
+      return NextResponse.json(
+        { error: "Deposit account not found for this account" },
+        { status: 404 }
+      );
+    }
+
     console.log(`${TAG} depositAccountContractId=${depositAccountContractId.slice(0, 30)}...`);
     const address = await getBitcoinAddress(depositAccountContractId);
-    console.log(`${TAG} bitcoin address=${address}`);
+    // Don't log the full deposit address (sensitive PII) — truncate for ops only.
+    console.log(`${TAG} bitcoin address=${address.slice(0, 6)}…${address.slice(-4)}`);
 
-    // Save bitcoin address to Supabase so next page load can return it without coordinator call
+    // Cache the address for list-deposit-accounts (scoped to this user's row).
     try {
-      const supabase = await createSupabaseServerClient();
-      const { data: { user } } = await supabase.auth.getUser();
-      if (user) {
-        const serviceClient = await createSupabaseServiceClient();
-        const { error } = await serviceClient
-          .from("deposit_accounts")
-          .update({ bitcoin_address: address })
-          .eq("deposit_account_contract_id", depositAccountContractId);
-        if (error) {
-          console.warn(`${TAG} Supabase address update failed (non-fatal):`, error.message);
-        } else {
-          console.log(`${TAG} Supabase address update ok`);
-        }
+      const { error } = await serviceClient
+        .from("deposit_accounts")
+        .update({ bitcoin_address: address })
+        .eq("user_id", user.id)
+        .eq("deposit_account_contract_id", depositAccountContractId);
+      if (error) {
+        console.warn(`${TAG} Supabase address update failed (non-fatal):`, error.message);
+      } else {
+        console.log(`${TAG} Supabase address update ok`);
       }
     } catch (sbErr) {
       console.warn(`${TAG} Supabase update failed (non-fatal):`, sbErr);

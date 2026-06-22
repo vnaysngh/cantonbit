@@ -1,7 +1,5 @@
 import "server-only";
 
-import { fromBaseUnits, toBaseUnitsFloor } from "./amount-units";
-import { getSwapAsset } from "./canton-assets";
 import { createSupabaseServiceClient } from "./supabase/server";
 import type {
   CantonSwapOrder,
@@ -42,9 +40,16 @@ function rowToOrder(r: Record<string, unknown>): CantonSwapOrder {
     solverParty: r.solver_party as string,
     settlementParty: (r.settlement_party as string) ?? undefined,
     walletMode: r.wallet_mode as CantonSwapWalletMode,
+    floatReserved: Boolean(r.float_reserved),
     userLegOfferCid: (r.user_leg_offer_cid as string) ?? undefined,
     userLegSubmitUpdateId: (r.user_leg_submit_update_id as string) ?? undefined,
     counterLegOfferCid: (r.counter_leg_offer_cid as string) ?? undefined,
+    counterLegCreatedOffset:
+      r.counter_leg_created_offset == null
+        ? undefined
+        : Number(r.counter_leg_created_offset),
+    counterReceiptUpdateId:
+      (r.counter_receipt_update_id as string) ?? undefined,
     settlementUpdateId: (r.settlement_update_id as string) ?? undefined,
     counterReissueAttempt: Number(r.counter_reissue_attempt ?? 0),
     counterPendingClearedAt: r.counter_pending_cleared_at
@@ -55,6 +60,9 @@ function rowToOrder(r: Record<string, unknown>): CantonSwapOrder {
     networkFeeExpiresAt: r.network_fee_expires_at
       ? Math.floor(new Date(r.network_fee_expires_at as string).getTime() / 1000)
       : undefined,
+    networkFeeSettlementUpdateId:
+      (r.network_fee_settlement_update_id as string) ?? undefined,
+    networkFeeAccountingPending: Boolean(r.network_fee_accounting_pending),
     createdAt: r.created_at
       ? Math.floor(new Date(r.created_at as string).getTime() / 1000)
       : 0
@@ -75,9 +83,12 @@ function orderToRow(o: CantonSwapOrder): Record<string, unknown> {
     solver_party: o.solverParty,
     settlement_party: o.settlementParty ?? null,
     wallet_mode: o.walletMode,
+    float_reserved: o.floatReserved ?? false,
     user_leg_offer_cid: o.userLegOfferCid ?? null,
     user_leg_submit_update_id: o.userLegSubmitUpdateId ?? null,
     counter_leg_offer_cid: o.counterLegOfferCid ?? null,
+    counter_leg_created_offset: o.counterLegCreatedOffset ?? null,
+    counter_receipt_update_id: o.counterReceiptUpdateId ?? null,
     settlement_update_id: o.settlementUpdateId ?? null,
     counter_reissue_attempt: o.counterReissueAttempt ?? 0,
     counter_pending_cleared_at: o.counterPendingClearedAt
@@ -88,6 +99,9 @@ function orderToRow(o: CantonSwapOrder): Record<string, unknown> {
     network_fee_expires_at: o.networkFeeExpiresAt
       ? new Date(o.networkFeeExpiresAt * 1000).toISOString()
       : null,
+    network_fee_settlement_update_id:
+      o.networkFeeSettlementUpdateId ?? null,
+    network_fee_accounting_pending: o.networkFeeAccountingPending ?? false,
     ...(o.createdAt > 0
       ? { created_at: new Date(o.createdAt * 1000).toISOString() }
       : {}),
@@ -97,7 +111,8 @@ function orderToRow(o: CantonSwapOrder): Record<string, unknown> {
 
 export interface CantonSwapStore {
   get(id: string): Promise<CantonSwapOrder | undefined>;
-  put(o: CantonSwapOrder): Promise<void>;
+  /** First-write-wins order creation. */
+  insert(o: CantonSwapOrder): Promise<void>;
   /** Optimistic status transition — returns false if status changed concurrently. */
   putIfStatus(o: CantonSwapOrder, expectedStatus: CantonSwapStatus): Promise<boolean>;
   /** Status + counter offer CAS — prevents concurrent counter reissues. */
@@ -108,11 +123,16 @@ export interface CantonSwapStore {
   ): Promise<boolean>;
   byStatus(status: CantonSwapStatus): Promise<CantonSwapOrder[]>;
   byParty(party: string, limit?: number): Promise<CantonSwapOrder[]>;
-  /** Sum out_amount reserved by in-flight orders (includes open Loop intents). */
-  sumReservedOut(
-    solverParty: string,
-    toAsset: CantonSwapOrder["toAsset"]
-  ): Promise<string>;
+  pendingNetworkFeeAccounting(): Promise<CantonSwapOrder[]>;
+  /** Atomically reserve current vault float and transition the order. */
+  reserveFloat(params: {
+    orderId: string;
+    expectedStatus: CantonSwapStatus;
+    nextStatus: CantonSwapStatus;
+    floatUnits: bigint;
+    userLegOfferCid?: string;
+    userLegSubmitUpdateId?: string;
+  }): Promise<{ reservedUnits: bigint; needUnits: bigint }>;
 }
 
 export class SupabaseCantonSwapStore implements CantonSwapStore {
@@ -127,12 +147,16 @@ export class SupabaseCantonSwapStore implements CantonSwapStore {
     return data ? rowToOrder(data) : undefined;
   }
 
-  async put(o: CantonSwapOrder): Promise<void> {
+  async insert(o: CantonSwapOrder): Promise<void> {
     const sb = await createSupabaseServiceClient();
-    const { error } = await sb
-      .from(TABLE)
-      .upsert(orderToRow(o), { onConflict: "id" });
-    if (error) throw new Error(enrichSchemaError("put", error.message));
+    const { error } = await sb.from(TABLE).insert(orderToRow(o));
+    if (error) {
+      const err = new Error(enrichSchemaError("insert", error.message)) as Error & {
+        code?: string;
+      };
+      err.code = error.code;
+      throw err;
+    }
   }
 
   async putIfStatus(
@@ -203,25 +227,64 @@ export class SupabaseCantonSwapStore implements CantonSwapStore {
     return (data ?? []).map(rowToOrder);
   }
 
-  async sumReservedOut(
-    solverParty: string,
-    toAsset: CantonSwapOrder["toAsset"]
-  ): Promise<string> {
+  async pendingNetworkFeeAccounting(): Promise<CantonSwapOrder[]> {
     const sb = await createSupabaseServiceClient();
     const { data, error } = await sb
       .from(TABLE)
-      .select("out_amount")
-      .eq("solver_party", solverParty)
-      .eq("to_asset", toAsset)
-      .in("status", ["open", "settling", "filling", "user_locked"]);
+      .select("*")
+      .eq("network_fee_accounting_pending", true);
     if (error) {
-      throw new Error(enrichSchemaError("sumReservedOut", error.message));
+      throw new Error(enrichSchemaError("pendingNetworkFeeAccounting", error.message));
     }
-    const asset = getSwapAsset(toAsset);
-    let total = 0n;
-    for (const row of data ?? []) {
-      total += toBaseUnitsFloor(String(row.out_amount ?? "0"), asset.decimals);
+    return (data ?? []).map(rowToOrder);
+  }
+
+  async reserveFloat(params: {
+    orderId: string;
+    expectedStatus: CantonSwapStatus;
+    nextStatus: CantonSwapStatus;
+    floatUnits: bigint;
+    userLegOfferCid?: string;
+    userLegSubmitUpdateId?: string;
+  }): Promise<{ reservedUnits: bigint; needUnits: bigint }> {
+    const sb = await createSupabaseServiceClient();
+    const { data, error } = await sb.rpc("reserve_canton_swap_float", {
+      p_order_id: params.orderId,
+      p_expected_status: params.expectedStatus,
+      p_next_status: params.nextStatus,
+      p_float_units: params.floatUnits.toString(),
+      p_user_leg_offer_cid: params.userLegOfferCid ?? null,
+      p_user_leg_submit_update_id: params.userLegSubmitUpdateId ?? null
+    });
+    if (error) {
+      const err = new Error(enrichSchemaError("reserveFloat", error.message)) as Error & {
+        code?: string;
+      };
+      err.code = error.code;
+      throw err;
     }
-    return fromBaseUnits(total, asset.decimals);
+    const result = data as {
+      reserved?: boolean;
+      reason?: string;
+      status?: string;
+      reservedUnits?: string;
+      needUnits?: string;
+      availableUnits?: string;
+    } | null;
+    if (!result?.reserved) {
+      if (result?.reason === "insufficient_float") {
+        throw new Error(
+          `swap vault insufficient float (need ${result.needUnits ?? "?"} units, ` +
+            `${result.availableUnits ?? "0"} available after reservations)`
+        );
+      }
+      throw new Error(
+        `could not reserve swap float (${result?.reason ?? "unknown"}, status ${result?.status ?? "unknown"})`
+      );
+    }
+    return {
+      reservedUnits: BigInt(result.reservedUnits ?? "0"),
+      needUnits: BigInt(result.needUnits ?? "0")
+    };
   }
 }

@@ -21,6 +21,7 @@ export interface CounterOfferMatchParams {
   receiverParty: string;
   amount: string;
   amountDecimals: number;
+  expectedInstrument?: InstrumentId;
 }
 
 function isHoldingTemplate(templateId: string): boolean {
@@ -73,6 +74,24 @@ function createdEventFromNode(node: unknown): {
       }
     | undefined;
   return created?.contractId ? created : null;
+}
+
+function exercisedEventFromNode(node: unknown): {
+  templateId?: string;
+  choice?: string;
+  choiceArgument?: unknown;
+  exerciseResult?: unknown;
+} | null {
+  const n = node as {
+    ExercisedTreeEvent?: { value?: Record<string, unknown> };
+    ExercisedEvent?: Record<string, unknown>;
+  };
+  return (n.ExercisedTreeEvent?.value ?? n.ExercisedEvent ?? null) as {
+    templateId?: string;
+    choice?: string;
+    choiceArgument?: unknown;
+    exerciseResult?: unknown;
+  } | null;
 }
 
 /** Parse user sell leg proof from a Loop submit or ledger update tree. */
@@ -188,6 +207,12 @@ export function extractCounterOfferCidFromEvents(
     if (!amountsEqual(match.amount, transfer.amount, match.amountDecimals)) {
       continue;
     }
+    if (
+      match.expectedInstrument &&
+      !matchesInstrument(transfer.instrumentId, match.expectedInstrument)
+    ) {
+      continue;
+    }
     hits.push(created.contractId);
   }
 
@@ -206,6 +231,7 @@ export function counterLegDeliveredToUserInEvents(
   }
 ): boolean {
   if (!eventsById) return false;
+  let receiverHoldingProven = false;
   for (const node of Object.values(eventsById)) {
     const created = createdEventFromNode(node);
     if (!created?.contractId || !created.templateId) continue;
@@ -228,9 +254,13 @@ export function counterLegDeliveredToUserInEvents(
     ) {
       continue;
     }
-    return true;
+    receiverHoldingProven = true;
+    break;
   }
-  return false;
+  return (
+    receiverHoldingProven &&
+    directSettlementBindsSender(eventsById, params)
+  );
 }
 
 function isDirectTransferKind(kind: string): boolean {
@@ -238,12 +268,115 @@ function isDirectTransferKind(kind: string): boolean {
   return k === "direct" || k === "self" || k.includes("direct");
 }
 
+function signedAmountMatches(
+  value: unknown,
+  amount: string,
+  decimals: number,
+  sign: "positive" | "negative"
+): boolean {
+  if (typeof value !== "string") return false;
+  const negative = value.trim().startsWith("-");
+  if ((sign === "negative") !== negative) return false;
+  const absolute = negative ? value.trim().slice(1) : value.trim();
+  return amountsEqual(amount, absolute, decimals);
+}
+
+/** Prove the direct settlement was debited from the expected sender. */
+function directSettlementBindsSender(
+  eventsById: Record<string, unknown>,
+  params: {
+    senderParty: string;
+    receiverParty: string;
+    amount: string;
+    amountDecimals: number;
+    expectedInstrument: InstrumentId;
+  }
+): boolean {
+  for (const node of Object.values(eventsById)) {
+    const ex = exercisedEventFromNode(node);
+    if (!ex?.choice) continue;
+    const arg = ex.choiceArgument as
+      | {
+          sender?: string;
+          receiver?: string;
+          amount?: string;
+          instrumentId?: InstrumentId;
+          transfer?: {
+            sender?: string;
+            receiver?: string;
+            amount?: string;
+            instrumentId?: InstrumentId;
+          };
+        }
+      | undefined;
+    const transfer = arg?.transfer ?? arg;
+
+    if (
+      ex.choice.includes("Transfer") &&
+      !ex.choice.includes("Accept") &&
+      !ex.choice.includes("Reject") &&
+      transfer?.sender === params.senderParty &&
+      transfer.receiver === params.receiverParty &&
+      amountsEqual(params.amount, transfer.amount ?? "", params.amountDecimals) &&
+      (!transfer.instrumentId ||
+        matchesInstrument(transfer.instrumentId, params.expectedInstrument))
+    ) {
+      return true;
+    }
+
+    if (
+      ex.choice === "TransferPreapproval_SendV2" &&
+      arg?.sender === params.senderParty &&
+      amountsEqual(params.amount, arg.amount ?? "", params.amountDecimals)
+    ) {
+      const result = ex.exerciseResult as
+        | {
+            result?: {
+              summary?: {
+                balanceChanges?: Array<
+                  [
+                    string,
+                    { changeToInitialAmountAsOfRoundZero?: string }
+                  ]
+                >;
+              };
+            };
+          }
+        | undefined;
+      const changes = result?.result?.summary?.balanceChanges ?? [];
+      const senderDebited = changes.some(
+        ([party, change]) =>
+          party === params.senderParty &&
+          signedAmountMatches(
+            change?.changeToInitialAmountAsOfRoundZero,
+            params.amount,
+            params.amountDecimals,
+            "negative"
+          )
+      );
+      const receiverCredited = changes.some(
+        ([party, change]) =>
+          party === params.receiverParty &&
+          signedAmountMatches(
+            change?.changeToInitialAmountAsOfRoundZero,
+            params.amount,
+            params.amountDecimals,
+            "positive"
+          )
+      );
+      if (senderDebited && receiverCredited) return true;
+    }
+  }
+  return false;
+}
+
 /** Build fill outcome from committed ledger events (pure — safe for tests). */
 export function buildLoopFillResultFromEvents(
   order: CantonSwapOrder,
   updateId: string,
   eventsById: Record<string, unknown>,
-  deliverTransferKind: string
+  deliverTransferKind: string,
+  expectedInstrument?: InstrumentId
 ): {
   updateId: string;
   counterLegOfferCid?: string;
@@ -255,7 +388,8 @@ export function buildLoopFillResultFromEvents(
       senderParty: swapParty(order),
       receiverParty: order.userParty,
       amount: order.outAmount,
-      amountDecimals: asset.decimals
+      amountDecimals: asset.decimals,
+      expectedInstrument
     }) ?? undefined;
   const counterLegPendingAccept = Boolean(
     counterLegOfferCid && !isDirectTransferKind(deliverTransferKind)

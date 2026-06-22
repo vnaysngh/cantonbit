@@ -11,6 +11,8 @@ import {
   requirePartyOwner
 } from "@/lib/htlc-auth";
 import { CantonQuoteUnavailableError } from "@/lib/canton-quote";
+import { assertSwapPayAmountLimit } from "@/lib/swap-amount-limits";
+import { distributedRateLimitOk } from "@/lib/api-rate-limit";
 
 export const dynamic = "force-dynamic";
 
@@ -35,9 +37,19 @@ export async function POST(req: Request) {
     if (fromAsset === toAsset) {
       return NextResponse.json({ error: "same asset" }, { status: 400 });
     }
+    assertSwapPayAmountLimit(fromAsset, inAmount);
 
     const auth = await requirePartyOwner(userParty);
     if (auth.error) return auth.error;
+    if (
+      !(await distributedRateLimitOk({
+        scope: "c2c-create",
+        key: auth.partyId,
+        limit: 12
+      }))
+    ) {
+      return NextResponse.json({ error: "rate limit exceeded" }, { status: 429 });
+    }
 
     const managed = await isParticipantManagedParty(userParty);
     let walletMode: CantonSwapWalletMode;

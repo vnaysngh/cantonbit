@@ -43,10 +43,17 @@ test("minCcRequiredForNetworkFee adds reserve", () => {
   delete process.env.NETWORK_FEE_RESERVE_CC;
 });
 
-test("assertNetworkFeeNotionalGuard is a no-op (notional cap removed)", () => {
-  assert.doesNotThrow(() =>
+test("assertNetworkFeeNotionalGuard rejects fees above the configured ratio", () => {
+  assert.throws(() =>
     assertNetworkFeeNotionalGuard({
       feeUsd: 5,
+      notionalUsd: 10,
+      maxBps: 200
+    })
+  );
+  assert.doesNotThrow(() =>
+    assertNetworkFeeNotionalGuard({
+      feeUsd: 0.1,
       notionalUsd: 10,
       maxBps: 200
     })

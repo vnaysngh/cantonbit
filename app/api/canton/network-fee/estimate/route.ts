@@ -3,13 +3,9 @@
  */
 import { NextResponse } from "next/server";
 
+import { clientIpFromRequest } from "@/lib/canton-swap-rate-limit";
+import { distributedRateLimitOk } from "@/lib/api-rate-limit";
 import {
-  cantonSwapQuoteRateLimitOk,
-  clientIpFromRequest
-} from "@/lib/canton-swap-rate-limit";
-import {
-  computeHtlcSwapNotionalUsd,
-  estimateHtlcLoopFee,
   estimateHtlcManagedFee,
   estimateLoopC2cSettleFee,
   estimateManagedC2cSettleFee,
@@ -43,7 +39,13 @@ function parseAsset(raw: unknown): CantonSwapMvpAssetId | null {
 
 export async function POST(req: Request) {
   try {
-    if (!cantonSwapQuoteRateLimitOk(clientIpFromRequest(req))) {
+    if (
+      !(await distributedRateLimitOk({
+        scope: "network-fee-estimate",
+        key: clientIpFromRequest(req),
+        limit: 30
+      }))
+    ) {
       return NextResponse.json({ error: "rate limit exceeded" }, { status: 429 });
     }
 
@@ -157,31 +159,27 @@ export async function POST(req: Request) {
 
     if (action === "htlc-loop-claim" || action === "htlc-loop-lock") {
       const userParty = String(body.userParty ?? body.cantonParty ?? "");
-      const cbtcAmount =
-        body.cbtcAmount != null ? String(body.cbtcAmount) : undefined;
-      if (!userParty || !cbtcAmount) {
+      if (!userParty) {
         return NextResponse.json(
-          { error: "missing userParty / cbtcAmount" },
+          { error: "missing userParty" },
           { status: 400 }
         );
       }
       const auth = await authorizeQuoteParty(userParty);
       if (auth.error) return auth.error;
 
-      const notionalUsd =
-        body.notionalUsd != null
-          ? Number(body.notionalUsd)
-          : await computeHtlcSwapNotionalUsd(cbtcAmount);
-      const estimate = await estimateHtlcLoopFee({
-        action,
-        userParty,
-        cbtcAmount,
-        notionalUsd
+      const disabled = estimateToQuoteFields({
+        feeCc: "0",
+        feeUsd: 0,
+        trafficBytes: 0,
+        minCcRequired: "0",
+        networkFeeSource: "disabled",
+        transactions: []
       });
-      logNetworkFeeEstimate(`estimate ${action}`, estimate);
       return NextResponse.json({
-        ...estimate,
-        ...estimateToQuoteFields(estimate)
+        feeCc: disabled.networkFeeCc,
+        feeUsd: disabled.networkFeeUsd,
+        ...disabled
       });
     }
 

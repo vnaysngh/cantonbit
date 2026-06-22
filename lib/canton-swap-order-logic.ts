@@ -203,8 +203,22 @@ export function resolveCreateCantonSwapOrder(
   nowSeconds: number
 ): { order: CantonSwapOrder; isNew: boolean } {
   if (existing) {
-    if (existing.userParty !== incoming.userParty) {
-      throw new Error("order id already exists for another party");
+    const immutableTermsMatch =
+      existing.fromAsset === incoming.fromAsset &&
+      existing.toAsset === incoming.toAsset &&
+      existing.inAmount === incoming.inAmount &&
+      existing.outAmount === incoming.outAmount &&
+      existing.minOut === incoming.minOut &&
+      existing.quoteExpiresAt === incoming.quoteExpiresAt &&
+      existing.userParty === incoming.userParty &&
+      existing.solverParty === incoming.solverParty &&
+      (existing.settlementParty ?? existing.solverParty) ===
+        (incoming.settlementParty ?? incoming.solverParty) &&
+      existing.walletMode === incoming.walletMode &&
+      existing.networkFeeCc === incoming.networkFeeCc &&
+      existing.networkFeeExpiresAt === incoming.networkFeeExpiresAt;
+    if (!immutableTermsMatch) {
+      throw new Error("order id already exists with different immutable terms");
     }
     return { order: existing, isNew: false };
   }

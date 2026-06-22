@@ -45,7 +45,9 @@ async function forward(req: NextRequest, path: string[]): Promise<NextResponse> 
     body:
       req.method === "GET" || req.method === "HEAD"
         ? undefined
-        : await req.text()
+        : await req.text(),
+    // Bound the proxied call so a hung-but-connected solver can't pin the worker.
+    signal: AbortSignal.timeout(20_000)
   };
 
   try {
@@ -58,11 +60,13 @@ async function forward(req: NextRequest, path: string[]): Promise<NextResponse> 
       }
     });
   } catch (e) {
+    // Do NOT leak the raw error (it contains SOLVER_INTERNAL_URL host:port). Log it
+    // server-side; return a generic message.
+    console.error("[solver-proxy] forward failed:", e);
+    const timedOut = e instanceof Error && e.name === "TimeoutError";
     return NextResponse.json(
-      {
-        error: `solver unreachable: ${e instanceof Error ? e.message : String(e)}`
-      },
-      { status: 502 }
+      { error: timedOut ? "solver timed out" : "solver unreachable" },
+      { status: 504 }
     );
   }
 }

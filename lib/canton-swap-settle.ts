@@ -3,7 +3,10 @@
  */
 import "server-only";
 
-import { fetchTransactionTreeByCommandId, fetchTransactionTreeForOfferAccept } from "./canton-command-recovery";
+import {
+  fetchOfferAcceptFromOffset,
+  fetchTransactionTreeByCommandId
+} from "./canton-command-recovery";
 import type { CantonSwapOrder } from "./canton-swap-types";
 import { loopFillActAsParties, swapParty, userLegReceiverParty } from "./canton-swap-types";
 import { appendNetworkFeeToFill, isNetworkFeeEnabled } from "./canton-network-fee";
@@ -81,7 +84,8 @@ export async function listPendingOffersStrict(
 
 function parseCounterOfferCid(
   eventsById: Record<string, unknown>,
-  order: CantonSwapOrder
+  order: CantonSwapOrder,
+  expectedInstrument: Awaited<ReturnType<typeof resolveSwapInstrumentId>>
 ): string {
   const asset = getSwapAsset(order.toAsset);
   return (
@@ -89,7 +93,8 @@ function parseCounterOfferCid(
       senderParty: swapParty(order),
       receiverParty: order.userParty,
       amount: order.outAmount,
-      amountDecimals: asset.decimals
+      amountDecimals: asset.decimals,
+      expectedInstrument
     }) ?? ""
   );
 }
@@ -102,6 +107,7 @@ async function recoverCommittedFill(
   updateId: string;
   counterLegOfferCid?: string;
   counterLegPendingAccept: boolean;
+  counterLegCreatedOffset?: number;
 }> {
   const recovered = await fetchTransactionTreeByCommandId(
     commandId,
@@ -112,12 +118,20 @@ async function recoverCommittedFill(
       `duplicate command committed but fill transaction not found (${commandId})`
     );
   }
-  return buildLoopFillResultFromEvents(
+  const expectedInstrument = await resolveSwapInstrumentId(order.toAsset);
+  const result = buildLoopFillResultFromEvents(
     order,
     recovered.updateId,
     recovered.eventsById,
-    deliverTransferKind
+    deliverTransferKind,
+    expectedInstrument
   );
+  return {
+    ...result,
+    counterLegCreatedOffset: result.counterLegPendingAccept
+      ? recovered.offset
+      : undefined
+  };
 }
 
 async function isPendingUserLegOffer(
@@ -156,9 +170,13 @@ async function buildLeg(params: {
 }
 
 /** Managed user: backend offer to vault, then vault fill (Accept + counter). */
-async function submitManagedUserLegOffer(order: CantonSwapOrder): Promise<{
+export async function ensureManagedUserLegOffer(order: CantonSwapOrder): Promise<{
   userLegOfferCid: string;
 }> {
+  if (order.userLegOfferCid) {
+    await verifyUserLegOffer(order, order.userLegOfferCid);
+    return { userLegOfferCid: order.userLegOfferCid };
+  }
   const vault = swapParty(order);
   const userLeg = await buildLeg({
     senderParty: order.userParty,
@@ -248,6 +266,7 @@ async function fillFromUserOffer(
   updateId: string;
   counterLegOfferCid?: string;
   counterLegPendingAccept: boolean;
+  counterLegCreatedOffset?: number;
   networkFeeCollected?: import("./canton-network-fee").NetworkFeeCollection;
 }> {
   const pendingOffer = await isPendingUserLegOffer(order, userLegOfferCid);
@@ -270,6 +289,14 @@ async function fillFromUserOffer(
     amount: order.outAmount,
     expirationSeconds: LOOP_COUNTER_OFFER_TTL_SECONDS
   });
+  if (
+    order.walletMode === "managed" &&
+    !isDirectTransferKind(deliverLeg.transferKind)
+  ) {
+    throw new Error(
+      "managed counter leg would require a pending offer — refusing to consume the user sell leg without atomic direct delivery"
+    );
+  }
 
   assertFillIncludesUserLegConsumption({
     userLegOfferCid,
@@ -310,8 +337,9 @@ async function fillFromUserOffer(
 
   let updateId: string;
   let eventsById: Record<string, unknown>;
+  let offset: number;
   try {
-    ({ updateId, eventsById } = await submitLedgerCommands({
+    ({ updateId, eventsById, offset } = await submitLedgerCommands({
       actAs,
       commands,
       disclosedContracts: disclosed,
@@ -329,13 +357,17 @@ async function fillFromUserOffer(
     throw e;
   }
 
-  return {
-    ...buildLoopFillResultFromEvents(
+  const expectedInstrument = await resolveSwapInstrumentId(order.toAsset);
+  const result = buildLoopFillResultFromEvents(
       order,
       updateId,
       eventsById,
-      deliverLeg.transferKind
-    ),
+      deliverLeg.transferKind,
+      expectedInstrument
+    );
+  return {
+    ...result,
+    counterLegCreatedOffset: result.counterLegPendingAccept ? offset : undefined,
     networkFeeCollected
   };
 }
@@ -346,9 +378,10 @@ export async function settleManagedSwap(
   updateId: string;
   counterLegOfferCid?: string;
   counterLegPendingAccept: boolean;
+  counterLegCreatedOffset?: number;
   networkFeeCollected?: import("./canton-network-fee").NetworkFeeCollection;
 }> {
-  const { userLegOfferCid } = await submitManagedUserLegOffer(order);
+  const { userLegOfferCid } = await ensureManagedUserLegOffer(order);
   const commandId = `canton-swap-${order.id}`;
   const result = await fillFromUserOffer(order, userLegOfferCid, commandId);
   console.log(
@@ -365,6 +398,7 @@ async function buildFillRecoveryFromEvents(
   updateId: string;
   counterLegOfferCid?: string;
   counterLegPendingAccept: boolean;
+  counterLegCreatedOffset?: number;
 }> {
   const asset = getSwapAsset(order.toAsset);
   const expectedInstrument = await resolveSwapInstrumentId(order.toAsset);
@@ -384,12 +418,14 @@ async function buildFillRecoveryFromEvents(
   });
   const deliverKind =
     counterLegOfferCid || !directDelivered ? "offer" : "direct";
-  return buildLoopFillResultFromEvents(
+  const result = buildLoopFillResultFromEvents(
     order,
     updateId,
     eventsById,
-    deliverKind
+    deliverKind,
+    expectedInstrument
   );
+  return { ...result };
 }
 
 /** Recover managed fill from committed ledger when DB lost the outcome (race / in-flight). */
@@ -399,6 +435,7 @@ export async function repairManagedFillFromLedger(
   updateId: string;
   counterLegOfferCid?: string;
   counterLegPendingAccept: boolean;
+  counterLegCreatedOffset?: number;
 } | null> {
   const commandId = `canton-swap-${order.id}`;
   const recovered = await fetchTransactionTreeByCommandId(
@@ -407,11 +444,17 @@ export async function repairManagedFillFromLedger(
     50_000
   );
   if (!recovered?.updateId) return null;
-  return buildFillRecoveryFromEvents(
+  const result = await buildFillRecoveryFromEvents(
     order,
     recovered.updateId,
     recovered.eventsById
   );
+  return {
+    ...result,
+    counterLegCreatedOffset: result.counterLegPendingAccept
+      ? recovered.offset
+      : undefined
+  };
 }
 
 /** Recover Loop fill from committed ledger when DB lost the outcome (race / in-flight). */
@@ -421,6 +464,7 @@ export async function repairLoopFillFromLedger(
   updateId: string;
   counterLegOfferCid?: string;
   counterLegPendingAccept: boolean;
+  counterLegCreatedOffset?: number;
 } | null> {
   const commandId = loopFillCommandId(order.id);
   const recovered = await fetchTransactionTreeByCommandId(
@@ -429,11 +473,17 @@ export async function repairLoopFillFromLedger(
     50_000
   );
   if (!recovered?.updateId) return null;
-  return buildFillRecoveryFromEvents(
+  const result = await buildFillRecoveryFromEvents(
     order,
     recovered.updateId,
     recovered.eventsById
   );
+  return {
+    ...result,
+    counterLegCreatedOffset: result.counterLegPendingAccept
+      ? recovered.offset
+      : undefined
+  };
 }
 
 /** Loop user: vault accepts user sell leg + delivers counter in one submit. */
@@ -441,6 +491,7 @@ export async function fillLoopSwap(order: CantonSwapOrder): Promise<{
   updateId: string;
   counterLegOfferCid?: string;
   counterLegPendingAccept: boolean;
+  counterLegCreatedOffset?: number;
 }> {
   if (!order.userLegOfferCid) {
     throw new Error("user leg offer missing");
@@ -461,6 +512,7 @@ async function recoverCommittedCounterReissue(
   counterLegOfferCid?: string;
   counterLegPendingAccept: boolean;
   counterReissueAttempt: number;
+  counterLegCreatedOffset?: number;
 }> {
   const recovered = await fetchTransactionTreeByCommandId(
     commandId,
@@ -475,7 +527,9 @@ async function recoverCommittedCounterReissue(
   const attempt = (order.counterReissueAttempt ?? 0) + 1;
   const expectedInstrument = await resolveSwapInstrumentId(order.toAsset);
   const asset = getSwapAsset(order.toAsset);
-  const counterLegOfferCid = parseCounterOfferCid(recovered.eventsById, order) || undefined;
+  const counterLegOfferCid =
+    parseCounterOfferCid(recovered.eventsById, order, expectedInstrument) ||
+    undefined;
   const counterLegPendingAccept = Boolean(
     counterLegOfferCid && !isDirectTransferKind(deliverTransferKind)
   );
@@ -496,7 +550,12 @@ async function recoverCommittedCounterReissue(
   if (!counterLegOfferCid) {
     throw new Error("counter reissue did not create pending offer");
   }
-  return { counterLegOfferCid, counterLegPendingAccept: true, counterReissueAttempt: attempt };
+  return {
+    counterLegOfferCid,
+    counterLegPendingAccept: true,
+    counterReissueAttempt: attempt,
+    counterLegCreatedOffset: recovered.offset
+  };
 }
 
 /** Re-deliver counter asset when the prior counter offer expired (user sell leg already taken). */
@@ -504,6 +563,7 @@ export async function reissueLoopCounterLeg(order: CantonSwapOrder): Promise<{
   counterLegOfferCid?: string;
   counterLegPendingAccept: boolean;
   counterReissueAttempt: number;
+  counterLegCreatedOffset?: number;
 }> {
   if (!order.settlementUpdateId) {
     throw new Error("solver fill not completed yet");
@@ -523,8 +583,9 @@ export async function reissueLoopCounterLeg(order: CantonSwapOrder): Promise<{
   const asset = getSwapAsset(order.toAsset);
 
   let eventsById: Record<string, unknown>;
+  let offset: number;
   try {
-    ({ eventsById } = await submitLedgerCommands({
+    ({ eventsById, offset } = await submitLedgerCommands({
       actAs: [swapParty(order)],
       commands: [deliverLeg.command],
       disclosedContracts: deliverLeg.disclosedContracts,
@@ -542,7 +603,8 @@ export async function reissueLoopCounterLeg(order: CantonSwapOrder): Promise<{
     throw e;
   }
 
-  const counterLegOfferCid = parseCounterOfferCid(eventsById, order) || undefined;
+  const counterLegOfferCid =
+    parseCounterOfferCid(eventsById, order, expectedInstrument) || undefined;
   const counterLegPendingAccept = Boolean(
     counterLegOfferCid && !isDirectTransferKind(deliverLeg.transferKind)
   );
@@ -571,7 +633,12 @@ export async function reissueLoopCounterLeg(order: CantonSwapOrder): Promise<{
   console.log(
     `${TAG} counter reissue ok order=${order.id.slice(0, 12)}… attempt=${attempt} cid=${counterLegOfferCid.slice(0, 16)}…`
   );
-  return { counterLegOfferCid, counterLegPendingAccept: true, counterReissueAttempt: attempt };
+  return {
+    counterLegOfferCid,
+    counterLegPendingAccept: true,
+    counterReissueAttempt: attempt,
+    counterLegCreatedOffset: offset
+  };
 }
 
 /**
@@ -727,40 +794,56 @@ export async function verifyUserLegOffer(
   throw new Error("user leg offer not found on settlement receiver ACS");
 }
 
-export type CounterLegReceiptStatus = "received" | "pending" | "not_received";
+export type CounterLegReceiptStatus =
+  | "received"
+  | "pending"
+  | "not_received"
+  | "unknown";
 
-/** Poll user ACS + ledger Accept scan before declaring counter unreceived. */
-export async function verifyCounterLegReceipt(
+/** Poll user ACS + complete ledger Accept scan before declaring counter unreceived. */
+export async function verifyCounterLegReceiptProof(
   order: CantonSwapOrder,
-  opts?: { maxAttempts?: number; pollMs?: number; lookback?: number }
-): Promise<CounterLegReceiptStatus> {
-  if (!order.settlementUpdateId) return "not_received";
-  if (!isPendingCounterAccept(order)) return "received";
-  if (!order.counterLegOfferCid) return "not_received";
+  opts?: { maxAttempts?: number; pollMs?: number }
+): Promise<{ status: CounterLegReceiptStatus; updateId?: string }> {
+  if (!order.settlementUpdateId) return { status: "not_received" };
+  if (!isPendingCounterAccept(order)) return { status: "received" };
+  if (order.counterReceiptUpdateId) {
+    return { status: "received", updateId: order.counterReceiptUpdateId };
+  }
+  if (!order.counterLegOfferCid) return { status: "not_received" };
+  if (order.counterLegCreatedOffset == null) return { status: "unknown" };
 
   const maxAttempts = opts?.maxAttempts ?? 3;
   const pollMs = opts?.pollMs ?? 1000;
-  const lookback = opts?.lookback ?? 50_000;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const pending = await safeListPendingOffers(order.userParty);
     if (pending.some((p) => p.contractId === order.counterLegOfferCid)) {
-      return "pending";
+      return { status: "pending" };
     }
 
-    const acceptTx = await fetchTransactionTreeForOfferAccept(
+    const acceptTx = await fetchOfferAcceptFromOffset(
       order.counterLegOfferCid,
       order.userParty,
-      counterOfferConsumedInEvents,
-      lookback
+      order.counterLegCreatedOffset,
+      counterOfferConsumedInEvents
     );
-    if (acceptTx) return "received";
+    if (acceptTx) {
+      return { status: "received", updateId: acceptTx.updateId };
+    }
 
     if (attempt < maxAttempts - 1) {
       await new Promise((r) => setTimeout(r, pollMs));
     }
   }
-  return "not_received";
+  return { status: "not_received" };
+}
+
+export async function verifyCounterLegReceipt(
+  order: CantonSwapOrder,
+  opts?: { maxAttempts?: number; pollMs?: number }
+): Promise<CounterLegReceiptStatus> {
+  return (await verifyCounterLegReceiptProof(order, opts)).status;
 }
 
 /** True when user received counter asset from this swap's counter leg. */

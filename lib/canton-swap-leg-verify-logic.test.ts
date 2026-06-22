@@ -170,7 +170,53 @@ test("counterOfferConsumedInEvents: detects Accept on counter offer", () => {
   );
 });
 
-test("counterLegDeliveredToUserInEvents: direct holding on user", () => {
+test("counterLegDeliveredToUserInEvents: requires sender-bound direct settlement", () => {
+  assert.equal(
+    counterLegDeliveredToUserInEvents(
+      {
+        "0": {
+          ExercisedTreeEvent: {
+            value: {
+              templateId: "pkg:TransferFactory",
+              choice: "TransferFactory_Transfer",
+              choiceArgument: {
+                transfer: {
+                  sender: "solver::1",
+                  receiver: "user::1",
+                  amount: "10",
+                  instrumentId: { id: "Amulet", admin: "dso::1" }
+                }
+              }
+            }
+          }
+        },
+        "1": {
+          CreatedTreeEvent: {
+            value: {
+              contractId: "holding-user",
+              templateId: "pkg:Utility.Registry.Holding.V0.Holding:Holding",
+              createArgument: {
+                owner: "user::1",
+                amount: "10",
+                instrument: { id: "Amulet", admin: "dso::1" }
+              }
+            }
+          }
+        }
+      },
+      {
+        senderParty: "solver::1",
+        receiverParty: "user::1",
+        amount: "10",
+        amountDecimals: 10,
+        expectedInstrument: { admin: "dso::1", id: "Amulet" }
+      }
+    ),
+    true
+  );
+});
+
+test("counterLegDeliveredToUserInEvents: unrelated holding is not delivery proof", () => {
   assert.equal(
     counterLegDeliveredToUserInEvents(
       {
@@ -196,7 +242,7 @@ test("counterLegDeliveredToUserInEvents: direct holding on user", () => {
         expectedInstrument: { admin: "dso::1", id: "Amulet" }
       }
     ),
-    true
+    false
   );
 });
 

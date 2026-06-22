@@ -16,6 +16,8 @@ export async function POST(req: Request) {
   const failedLoop = await cantonSwapService().reconcileFailedLoop();
   const filling = await cantonSwapService().reconcileFilling();
   const counters = await cantonSwapService().reconcileLoopCounters();
+  const feeAccounting =
+    await cantonSwapService().reconcileNetworkFeeAccounting();
   const expired = await cantonSwapService().expireStale();
   return NextResponse.json({
     reconciled,
@@ -23,6 +25,7 @@ export async function POST(req: Request) {
     failedLoop,
     filling,
     counters,
+    feeAccounting,
     expired
   });
 }

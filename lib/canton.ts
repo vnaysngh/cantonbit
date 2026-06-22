@@ -36,7 +36,7 @@ const TAG = "[canton]";
 
 async function ledgerFetch<T>(
   path: string,
-  init: RequestInit & { jsonBody?: unknown }
+  init: RequestInit & { jsonBody?: unknown; timeoutMs?: number }
 ): Promise<T> {
   const jwt = await getLedgerJwt();
   const url = `${NETWORK.ledgerHost}${path}`;
@@ -57,13 +57,26 @@ async function ledgerFetch<T>(
     );
   }
 
-  const res = await fetch(url, {
-    ...init,
-    headers,
-    body:
-      init.jsonBody !== undefined ? JSON.stringify(init.jsonBody) : init.body,
-    cache: "no-store"
-  });
+  // Bound every ledger call so a stalled-but-connected validator can't hang the
+  // request worker forever. submit-and-wait can legitimately take a while, so the
+  // default is generous and overridable via init.timeoutMs.
+  const timeoutMs = init.timeoutMs ?? 60_000;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...init,
+      headers,
+      body:
+        init.jsonBody !== undefined ? JSON.stringify(init.jsonBody) : init.body,
+      cache: "no-store",
+      signal: init.signal ?? AbortSignal.timeout(timeoutMs)
+    });
+  } catch (e) {
+    if (e instanceof Error && e.name === "TimeoutError") {
+      throw new Error(`Canton ${method} ${path} timed out after ${timeoutMs}ms`);
+    }
+    throw e;
+  }
 
   console.log(`${TAG} response status=${res.status} url=${url}`);
 
@@ -77,7 +90,17 @@ async function ledgerFetch<T>(
     );
   }
 
-  const data = (await res.json()) as T;
+  // Guard the success-path parse: a proxy can return 200 with an HTML/empty body;
+  // surface a clear "not JSON" error instead of an opaque SyntaxError.
+  const raw = await res.text();
+  let data: T;
+  try {
+    data = JSON.parse(raw) as T;
+  } catch {
+    throw new Error(
+      `Canton ${method} ${path} returned non-JSON (${res.status}): ${raw.slice(0, 200)}`
+    );
+  }
   const dataStr = JSON.stringify(data);
   console.log(
     `${TAG} response body (${dataStr.length} chars): ${dataStr.length > 2000 ? dataStr.slice(0, 2000) + "...[truncated]" : dataStr}`

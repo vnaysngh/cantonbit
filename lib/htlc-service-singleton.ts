@@ -25,24 +25,22 @@ import {
   acceptTransfer
 } from "./transfer";
 import { NETWORK } from "./constants";
+import { toBaseUnitsFloor } from "./amount-units";
 import {
   isNetworkFeeEnabled,
   measureAndLogSolverCounterLockTraffic,
   networkFeeReceiverParty,
-  prepareLoopNetworkFeeOnly,
-  revalidateHtlcLoopNetworkFee,
   revalidateHtlcNetworkFee
 } from "./canton-network-fee";
-import { hasNetworkFeeLedgerEntry, NetworkFeeLedgerLookupError, bestEffortRecordNetworkFeeCollected, recordNetworkFeeCollected } from "./network-fee-ledger";
-import { verifyLoopNetworkFeeSettlement } from "./network-fee-verify";
-import { loopHtlcCollectsOranjNetworkFee } from "./loop-htlc-fee-policy";
+import {
+  recordNetworkFeeCollected
+} from "./network-fee-ledger";
 import { isEvmTxHash, reverseZeroLockReconcileOutcome } from "./htlc-order-logic";
 import {
   allocate,
   createHtlcLock,
   claimAsReceiver,
-  refundHtlcLock,
-  prepareWithdrawCommand
+  refundHtlcLock
 } from "./htlc-onledger";
 import { SupabaseSwapStore, type SwapStore } from "./htlc-order-store";
 import { resolveCreateOrder } from "./htlc-order-logic";
@@ -52,16 +50,33 @@ import {
 } from "./htlc-evm-lock-guard";
 import {
   evmTxBlockHex,
+  assertEvmTransactionFinalized,
   hasEvmClaimedForHashLock,
   isReverseEvmCounterLockReady,
+  readErc20Balance,
   readEvmLockMapping,
   verifyForwardRetakeTx,
   verifyReverseClaimTx,
   verifyReverseCounterLockTx
 } from "./htlc-evm-counter-lock";
 import type { SwapOrder, SwapStatus, SwapDirection } from "./htlc-types";
+import { fetchTransactionTreeByCommandId } from "./canton-command-recovery";
+import { recoverHtlcCounterDeliveryFromEvents } from "./htlc-counter-delivery-recovery";
+import {
+  recoverExactAllocationFromEvents,
+  recoverExactHtlcLockFromEvents
+} from "./htlc-ledger-recovery";
+import { matchesInstrument } from "./canton-assets";
+import { assertHtlcSettlementQuoteFresh } from "./htlc-quote";
 
 export type { SwapOrder, SwapStatus, SwapDirection };
+
+function isUniqueConstraintViolation(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  if ((err as { code?: string }).code === "23505") return true;
+  const message = (err as { message?: string }).message ?? "";
+  return message.includes("duplicate key") || message.includes("unique constraint");
+}
 
 function toHexLower(bytes: Uint8Array): string {
   return (
@@ -78,12 +93,29 @@ export { EVM_CLAIM_MARGIN_SECONDS };
 /** Loop-seller custody: if the WBTC counter-lock hasn't happened within this grace,
  *  the sweep returns the custody early (no point holding the user's funds). */
 const LOOP_CUSTODY_GRACE_SECONDS = 30 * 60;
+/** Accepted orders that never produce a main lock must not reserve float forever. */
+const ACCEPTED_DRAFT_TTL_SECONDS = 30 * 60;
+/** Reverse pre-lock reservation TTL: no durable custody/Allocation evidence => release. */
+const REVERSE_PRELOCK_RESERVATION_TTL_SECONDS = Number(
+  process.env.HTLC_REVERSE_PRELOCK_RESERVATION_TTL_SECONDS ?? 30 * 60
+);
 
 /** Marker when Loop transfer auto-settled via solver TransferPreapproval (no pending offer). */
 const LOOP_PREAPPROVAL_SETTLED = "transfer-preapproval-settled";
 
 function cbtcAmountsMatch(a: string, b: string): boolean {
-  return Math.abs(parseFloat(a) - parseFloat(b)) < 1e-9;
+  try {
+    return toBaseUnitsFloor(a, 8) === toBaseUnitsFloor(b, 8);
+  } catch {
+    return false;
+  }
+}
+
+function isSafeReversePrelockReleaseCause(cause: unknown): boolean {
+  const msg = cause instanceof Error ? cause.message : String(cause);
+  return /transfer offer not visible|no input holdings|insufficient|not found|not visible|missing|expired/i.test(
+    msg
+  );
 }
 
 /** Loop sellers: transfer may auto-accept on the solver (preapproval) — custody is a Holding, not an offer. */
@@ -102,7 +134,12 @@ async function detectLoopSellerCustodyHolding(
         !reservedCids.has(h.contractId)
     )
     .sort((a, b) => a.contractId.localeCompare(b.contractId));
-  if (matches.length >= 1) return matches[0].contractId;
+  if (matches.length > 1) {
+    throw new Error(
+      "ambiguous Loop custody deposit — multiple exact new holdings match this order"
+    );
+  }
+  if (matches.length === 1) return matches[0].contractId;
   return null;
 }
 
@@ -165,6 +202,9 @@ async function verifyEvmLock(o: SwapOrder): Promise<void> {
   if (!o.wbtcAmount || !o.solverEvmAddress) {
     throw new Error("EVM leg fields missing on order");
   }
+  if (o.mainLockTx) {
+    await waitForEvmTransactionFinality(o.mainLockTx);
+  }
   const expectedWbtc = SWAP_CHAIN.wbtc?.trim().toLowerCase();
   if (!expectedWbtc) {
     throw new Error("WBTC address not configured — cannot verify EVM lock");
@@ -180,6 +220,29 @@ async function verifyEvmLock(o: SwapOrder): Promise<void> {
   );
 }
 
+async function waitForEvmTransactionFinality(txHash: string): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 12; attempt++) {
+    try {
+      await assertEvmTransactionFinalized(txHash);
+      return;
+    } catch (e) {
+      lastError = e;
+      if (
+        !(e instanceof Error) ||
+        (!e.message.includes("awaiting finality") &&
+          !e.message.includes("not mined yet"))
+      ) {
+        throw e;
+      }
+      if (attempt < 11) {
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+      }
+    }
+  }
+  throw lastError;
+}
+
 /** Reverse refund guard: refuse if user claimed WBTC on EVM (even when counterLockTx missing). */
 async function assertEvmCounterNotClaimed(o: SwapOrder): Promise<void> {
   if (o.direction !== "canton-to-evm") return;
@@ -188,7 +251,11 @@ async function assertEvmCounterNotClaimed(o: SwapOrder): Promise<void> {
   }
   try {
     const lock = await readEvmLock(o.hashLock);
-    if (lock.amount > 0n) return;
+    if (lock.amount > 0n) {
+      throw new Error(
+        "EVM counter is still locked — settlement or solver retake must complete before Canton refund"
+      );
+    }
     const fromBlockHex = o.counterLockTx
       ? await evmTxBlockHex(o.counterLockTx)
       : undefined;
@@ -204,7 +271,8 @@ async function assertEvmCounterNotClaimed(o: SwapOrder): Promise<void> {
     if (
       e instanceof Error &&
       (e.message.includes("refusing Canton refund") ||
-        e.message.includes("swap must settle, not refund"))
+        e.message.includes("swap must settle, not refund") ||
+        e.message.includes("EVM counter is still locked"))
     ) {
       throw e;
     }
@@ -232,6 +300,44 @@ function preimageMatches(preimageHex: string, hashLock: string): boolean {
 class HtlcService {
   constructor(private store: SwapStore) {}
 
+  private async flushNetworkFeeAccounting(
+    o: SwapOrder,
+    estimate?: {
+      feeUsd?: number;
+      trafficBytes?: number;
+      networkFeeSource?: string;
+    }
+  ): Promise<void> {
+    if (
+      !o.networkFeeAccountingPending ||
+      !o.networkFeeSettlementUpdateId ||
+      !o.networkFeeCc
+    ) {
+      return;
+    }
+    try {
+      await recordNetworkFeeCollected({
+        orderId: o.id,
+        orderKind: "htlc",
+        userParty: o.userCantonParty,
+        feeCc: o.networkFeeCc,
+        feeUsd: estimate?.feeUsd,
+        trafficBytes: estimate?.trafficBytes,
+        networkFeeSource: estimate?.networkFeeSource ?? "reconciled",
+        receiverParty: networkFeeReceiverParty(),
+        settlementUpdateId: o.networkFeeSettlementUpdateId
+      });
+      const fresh = await this.must(o.id);
+      fresh.networkFeeAccountingPending = false;
+      await this.store.putIfStatus(fresh, fresh.status);
+    } catch (e) {
+      console.warn(
+        `[htlc] fee accounting deferred ${o.id.slice(0, 12)}:`,
+        e instanceof Error ? e.message : e
+      );
+    }
+  }
+
   async createOrder(
     o: Omit<SwapOrder, "status" | "createdAt">
   ): Promise<SwapOrder> {
@@ -242,8 +348,19 @@ class HtlcService {
       o,
       Math.floor(Date.now() / 1000)
     );
-    if (isNew) await this.store.put(order);
-    return order;
+    if (!isNew) return order;
+    try {
+      await this.store.insert(order);
+      return order;
+    } catch (e) {
+      if (!isUniqueConstraintViolation(e)) throw e;
+      const winner = await this.store.get(o.id);
+      return resolveCreateOrder(
+        winner,
+        o,
+        Math.floor(Date.now() / 1000)
+      ).order;
+    }
   }
   async getOrder(id: string) {
     const o = await this.store.get(id);
@@ -256,6 +373,7 @@ class HtlcService {
     const all = await this.store.active();
     const actionable = new Set([
       "main_locked",
+      "counter_locking",
       "counter_locked",
       "counter_claimed"
     ]);
@@ -324,8 +442,9 @@ class HtlcService {
       }
       if (reverseZeroLockReconcileOutcome(claimed) === "counter_claimed") {
         o.status = "counter_claimed";
-        await this.store.put(o);
-        return o;
+        return (await this.store.putIfStatus(o, "counter_locked"))
+          ? o
+          : this.must(o.id);
       }
       // Lock gone, conclusively NOT claimed → solver retook (or lock never landed).
       // Safe to roll back to main_locked so the swap can re-lock or refund.
@@ -339,8 +458,10 @@ class HtlcService {
       });
       o.status = "main_locked";
       o.counterLockTx = undefined;
-      await this.store.put(o);
-      return o;
+      o.evmFloatReserved = false;
+      return (await this.store.putIfStatus(o, "counter_locked"))
+        ? o
+        : this.must(o.id);
     }
 
     // Lock amount > 0 → still locked. Confirm it matches what we expect; if not, it's
@@ -368,8 +489,10 @@ class HtlcService {
     });
     o.status = "main_locked";
     o.counterLockTx = undefined;
-    await this.store.put(o);
-    return o;
+    o.evmFloatReserved = false;
+    return (await this.store.putIfStatus(o, "counter_locked"))
+      ? o
+      : this.must(o.id);
   }
   /** Order history for one user party (newest first). */
   async historyForParty(party: string): Promise<SwapOrder[]> {
@@ -381,37 +504,58 @@ class HtlcService {
     if (o.status !== "open") throw new Error(`order not open (${o.status})`);
     // SOLVENCY GATE (M1): refuse BEFORE the user locks anything if the solver can't
     // fill its leg. Forward (evm→canton): the solver must have the CBTC float.
-    // Reverse (canton→evm): the solver must have the WBTC — but that check lives in
-    // the daemon (it holds the EVM key) which refuses to lock if its balance is short;
-    // the user's CBTC there auto-refunds, so the worst case is a clean abort.
+    // Reverse (canton→evm): WBTC is reserved atomically before the user's Canton
+    // lock/custody transfer begins, because EVM balance alone is not a reservation.
     if (o.direction === "evm-to-canton") {
       const holdings = await getHoldings(o.solverCantonParty);
       const floatSats = holdings.reduce(
         (s, h) =>
-          s + BigInt(Math.round(parseFloat(h.payload.amount ?? "0") * 1e8)),
+          s + toBaseUnitsFloor(h.payload.amount ?? "0", 8),
         0n
       );
-      const needSats = BigInt(Math.round(parseFloat(o.cbtcAmount ?? "0") * 1e8));
-      if (floatSats < needSats) {
-        o.status = "failed";
-        await this.store.put(o);
+      // The database serializes this decision per solver party and atomically changes
+      // open -> accepted. Only committed in-flight orders reserve float; abandoned
+      // open drafts do not consume inventory.
+      const reservation = await this.store.acceptWithFloatReservation(
+        o.id,
+        o.solverCantonParty,
+        floatSats
+      );
+      if (!reservation.accepted) {
+        if (reservation.status === "accepted") return this.must(id);
+        const availableSats =
+          floatSats > reservation.reservedSats
+            ? floatSats - reservation.reservedSats
+            : 0n;
+        if (reservation.reason !== "insufficient_float") {
+          throw new Error(
+            `order not accepted (${reservation.status ?? reservation.reason ?? "unknown"})`
+          );
+        }
         void alert("error", "Solver CBTC float too low — order rejected", {
           order: o.id.slice(0, 18),
           have: Number(floatSats) / 1e8,
+          reserved: Number(reservation.reservedSats) / 1e8,
+          available: Number(availableSats) / 1e8,
           need: o.cbtcAmount
         });
         throw new Error(
-          `solver CBTC float too low (have ${Number(floatSats) / 1e8}, need ${o.cbtcAmount}) — order rejected before you lock`
+          `solver CBTC float too low (available ${Number(availableSats) / 1e8} of ${Number(floatSats) / 1e8}, need ${o.cbtcAmount}) — order rejected before you lock`
         );
       }
+      return this.must(id);
     }
     o.status = "accepted";
     if (o.direction === "canton-to-evm" && o.counterMode === "loop") {
       const baseline = await getHoldings(o.solverCantonParty);
       o.solverCustodyBaselineCids = baseline.map((h) => h.contractId);
     }
-    await this.store.put(o);
-    return o;
+    if (!(await this.store.putIfStatus(o, "open"))) {
+      const fresh = await this.must(id);
+      if (fresh.status === "accepted") return fresh;
+      throw new Error(`order not open (${fresh.status})`);
+    }
+    return this.must(id);
   }
 
   /** CANCEL — the maker cancels before any HTLC locks (Cancore: no on-chain
@@ -423,8 +567,15 @@ class HtlcService {
         `cannot cancel — already in progress (status ${o.status})`
       );
     }
+    const previous = o.status;
     o.status = "cancelled";
-    await this.store.put(o);
+    if (!(await this.store.putIfStatus(o, previous))) {
+      const fresh = await this.must(id);
+      if (fresh.status === "cancelled") return fresh;
+      throw new Error(
+        `cannot cancel — already in progress (status ${fresh.status})`
+      );
+    }
     return o;
   }
 
@@ -441,30 +592,200 @@ class HtlcService {
       }
       return o;
     }
-    if (o.status !== "accepted") {
+    if (o.status !== "accepted" && o.status !== "main_locking") {
       throw new Error(`order not accepted (${o.status})`);
     }
     if (o.direction !== "evm-to-canton") {
       throw new Error("EVM main lock is only valid for forward swaps");
     }
-    // A receipt timeout only means the transaction may still land. Do not advance
-    // the order until the escrow mapping itself proves the exact expected lock.
-    await verifyEvmLock(o);
+    if (o.status === "accepted") {
+      o.status = "main_locking";
+      if (!(await this.store.putIfStatus(o, "accepted"))) {
+        const fresh = await this.must(id);
+        if (
+          fresh.status === "main_locked" &&
+          fresh.mainLockTx?.toLowerCase() === mainLockTx.toLowerCase()
+        ) {
+          return fresh;
+        }
+        throw new Error(`order not accepted (${fresh.status})`);
+      }
+    }
+    try {
+      // A receipt timeout only means the transaction may still land. Do not advance
+      // the order until the escrow mapping itself proves the exact expected lock.
+      await waitForEvmTransactionFinality(mainLockTx);
+      await verifyEvmLock(o);
+    } catch (e) {
+      const rollback = { ...o, status: "accepted" as const };
+      await this.store.putIfStatus(rollback, "main_locking").catch(() => {});
+      throw e;
+    }
     o.status = "main_locked";
     o.mainLockTx = mainLockTx;
-    await this.store.put(o);
+    if (!(await this.store.putIfStatus(o, "main_locking"))) {
+      return this.must(id);
+    }
+    return o;
+  }
+
+  /** Claim the stage before any solver counter-lock write can begin. */
+  async beginCounterLock(
+    id: string,
+    evmFloatUnits?: bigint
+  ): Promise<SwapOrder> {
+    const o = await this.must(id);
+    if (o.status === "counter_locking" || o.status === "counter_locked") return o;
+    if (o.status !== "main_locked") {
+      throw new Error(`main not locked (${o.status})`);
+    }
+    if (o.direction === "canton-to-evm") {
+      await assertHtlcSettlementQuoteFresh(o);
+      if (evmFloatUnits == null || evmFloatUnits < 0n) {
+        throw new Error("current solver WBTC balance required");
+      }
+      const reservation = await this.store.reserveReverseEvmFloat(
+        id,
+        evmFloatUnits
+      );
+      if (!reservation.reserved) {
+        const available =
+          evmFloatUnits > reservation.reservedUnits
+            ? evmFloatUnits - reservation.reservedUnits
+            : 0n;
+        throw new Error(
+          `solver WBTC float reserved by other swaps (need ${reservation.needUnits}, available ${available})`
+        );
+      }
+      return this.must(id);
+    }
+    o.status = "counter_locking";
+    if (!(await this.store.putIfStatus(o, "main_locked"))) {
+      return this.must(id);
+    }
+    return o;
+  }
+
+  private async reserveReverseFloatBeforeMainLock(
+    order: SwapOrder
+  ): Promise<SwapOrder> {
+    if (order.direction !== "canton-to-evm") return order;
+    if (order.status === "main_locking" && order.evmFloatReserved) return order;
+    if (order.status !== "accepted") {
+      throw new Error(`order not accepted (${order.status})`);
+    }
+    const wbtc = SWAP_CHAIN.wbtc?.trim();
+    const solver = order.solverEvmAddress?.trim();
+    if (!wbtc || !solver) {
+      throw new Error("canonical solver WBTC inventory is not configured");
+    }
+    const balance = await readErc20Balance(wbtc, solver);
+    const reservation =
+      await this.store.reserveReverseEvmFloatBeforeMainLock(order.id, balance);
+    if (!reservation.reserved) {
+      const available =
+        balance > reservation.reservedUnits
+          ? balance - reservation.reservedUnits
+          : 0n;
+      throw new Error(
+        `solver WBTC float reserved by other swaps (need ${reservation.needUnits}, available ${available})`
+      );
+    }
+    return this.must(order.id);
+  }
+
+  private async createOrRecoverReverseMainHtlc(params: {
+    order: SwapOrder;
+    allocationCid: string;
+    networkFeeCc?: string;
+  }): Promise<{
+    htlcCid: string;
+    htlcBlob: string;
+    updateId: string;
+    networkFeeCollected?: boolean;
+  }> {
+    const { order: o, allocationCid, networkFeeCc } = params;
+    const hashLock = o.hashLock.replace(/^0x/, "");
+    const unlockTime = new Date(o.userTimelock * 1000 - 60_000);
+    const commandId = `htlc-lock-main-${o.id}`;
+    try {
+      return await createHtlcLock({
+        solverParty: o.solverCantonParty,
+        receiverParty: o.solverCantonParty,
+        lockerParty: o.userCantonParty,
+        allocationCid,
+        amountBtc: o.cbtcAmount!,
+        hashLock,
+        unlockTime,
+        networkFeeCc,
+        commandId
+      });
+    } catch (e) {
+      if (!(e instanceof Error) || !e.message.includes("duplicate command committed")) {
+        throw e;
+      }
+      const recovered = await fetchTransactionTreeByCommandId(
+        commandId,
+        o.userCantonParty,
+        50_000
+      );
+      if (!recovered) {
+        throw new Error(
+          `duplicate HtlcLock command committed but transaction not found (${commandId})`
+        );
+      }
+      const lock = recoverExactHtlcLockFromEvents(recovered.eventsById, {
+        lockerParty: o.userCantonParty,
+        receiverParty: o.solverCantonParty,
+        executorParty: o.solverCantonParty,
+        allocationCid,
+        amountBtc: o.cbtcAmount!,
+        instrumentId: NETWORK.instrumentId,
+        hashLock,
+        unlockTime
+      });
+      if (!lock) {
+        throw new Error(
+          `committed HtlcLock not found in recovered transaction (${commandId})`
+        );
+      }
+      return {
+        ...lock,
+        updateId: recovered.updateId,
+        networkFeeCollected:
+          !!networkFeeCc && Number.parseFloat(networkFeeCc) > 0
+      };
+    }
+  }
+
+  /** Release the claim only when the daemon knows no EVM transaction was submitted. */
+  async abortCounterLock(id: string): Promise<SwapOrder> {
+    const o = await this.must(id);
+    if (o.status !== "counter_locking") return o;
+    o.status = "main_locked";
+    o.evmFloatReserved = false;
+    if (!(await this.store.putIfStatus(o, "counter_locking"))) {
+      return this.must(id);
+    }
     return o;
   }
   /** STEP 4 — ON-LEDGER lock: allocate the solver's CBTC + wrap it in HtlcLock.
    *  CBTC is genuinely locked on-ledger (Allocation), the hashLock recorded in our
    *  DAR, BEFORE the user reveals. Solver is sender+executor (pre-delegation). */
   async lockCounter(id: string) {
-    const o = await this.must(id);
+    let o = await this.must(id);
     // IDEMPOTENT: if already locked, return — never re-allocate (double-spend guard).
     if (o.status === "counter_locked" && o.allocationCid && o.htlcCid) return o;
+    if (o.status === "main_locked") {
+      o = await this.beginCounterLock(id);
+    }
     // If we already allocated but the HtlcLock create failed, DON'T allocate again —
     // reuse the existing allocation so a retry doesn't double-spend the solver's CBTC.
     if (o.allocationCid && !o.htlcCid) {
+      if (o.direction === "evm-to-canton") {
+        await verifyEvmLock(o);
+        await assertHtlcSettlementQuoteFresh(o);
+      }
       const hashLockHex0 = o.hashLock.startsWith("0x")
         ? o.hashLock.slice(2)
         : o.hashLock;
@@ -479,7 +800,9 @@ class HtlcService {
       o.htlcCid = htlcCid;
       o.htlcBlob = htlcBlob;
       o.status = "counter_locked";
-      await this.store.put(o);
+      if (!(await this.store.putIfStatus(o, "counter_locking"))) {
+        return this.must(id);
+      }
       if (o.direction === "evm-to-canton") {
         void measureAndLogSolverCounterLockTraffic({
           context: "lockCounter-create-retry",
@@ -494,11 +817,13 @@ class HtlcService {
       }
       return o;
     }
-    if (o.status !== "main_locked")
+    if (o.status !== "counter_locking" && o.status !== "main_locked")
       throw new Error(`main not locked (${o.status})`);
+    const expectedStatus = o.status;
 
     if (o.direction === "evm-to-canton") {
       await verifyEvmLock(o);
+      await assertHtlcSettlementQuoteFresh(o);
     }
 
     const holdings = await getHoldings(o.solverCantonParty);
@@ -527,7 +852,9 @@ class HtlcService {
     // PERSIST the allocation immediately so a retry after a createHtlcLock failure
     // reuses it instead of allocating again (double-spend guard).
     o.allocationCid = allocationCid;
-    await this.store.put(o);
+    if (!(await this.store.putIfStatus(o, expectedStatus))) {
+      return this.must(id);
+    }
     const hashLockHex = o.hashLock.startsWith("0x")
       ? o.hashLock.slice(2)
       : o.hashLock;
@@ -544,7 +871,9 @@ class HtlcService {
     o.htlcCid = htlcCid;
     o.htlcBlob = htlcBlob;
     o.status = "counter_locked";
-    await this.store.put(o);
+    if (!(await this.store.putIfStatus(o, "counter_locking"))) {
+      return this.must(id);
+    }
     if (o.direction === "evm-to-canton") {
       void measureAndLogSolverCounterLockTraffic({
         context: "lockCounter",
@@ -578,7 +907,7 @@ class HtlcService {
     id: string,
     preimageHex: string
   ): Promise<{ order: SwapOrder; updateId: string; delivered: boolean }> {
-    const o = await this.must(id);
+    let o = await this.must(id);
     if (o.counterMode !== "loop") {
       throw new Error(
         `claim-counter is the Loop path (mode ${o.counterMode ?? "managed"}); managed users use claim-managed`
@@ -596,44 +925,28 @@ class HtlcService {
     if (!preimageMatches(preimageHex, o.hashLock))
       throw new Error("invalid preimage");
 
-    if (
-      isNetworkFeeEnabled() &&
-      o.direction === "evm-to-canton" &&
-      o.networkFeeCc &&
-      Number.parseFloat(o.networkFeeCc) > 0
-    ) {
-      let paid: boolean;
-      try {
-        paid = await hasNetworkFeeLedgerEntry(id, "htlc");
-      } catch (e) {
-        if (e instanceof NetworkFeeLedgerLookupError) {
-          throw new Error(
-            "Could not verify network fee payment — retry shortly"
-          );
-        }
-        throw e;
-      }
-      if (!paid) {
-        throw new Error(
-          "network fee not collected — pay CC network fee in Loop wallet first"
-        );
-      }
-    }
-
-    // 0. EVM LOCK CHECK — the WBTC must REALLY be locked for our solver with time to
-    // spare. Guards against a faked recordMainLock collecting CBTC for nothing.
-    await verifyEvmLock(o);
-
     // 1. SECRET FIRST — persist the preimage + flip to counter_claimed BEFORE any
     // delivery. From this moment the daemon can claim the WBTC; we are unrobbable.
     // (Only from main_locked — never downgrade counter_claimed/main_claimed.)
     if (o.status === "main_locked") {
+      // 0. EVM LOCK CHECK — the WBTC must REALLY be locked for our solver with time to
+      // spare, and the fresh quote must still satisfy the user's floor. This is a
+      // pre-reveal guard only: once status is counter_claimed/main_claimed the preimage
+      // is already public and retries must remain idempotent even if the market moves.
+      await verifyEvmLock(o);
+      await assertHtlcSettlementQuoteFresh(o);
+
       o.revealedPreimage = ("0x" +
         (preimageHex.startsWith("0x")
           ? preimageHex.slice(2)
           : preimageHex)) as `0x${string}`;
       o.status = "counter_claimed";
-      await this.store.put(o);
+      if (!(await this.store.putIfStatus(o, "main_locked"))) {
+        o = await this.must(id);
+        if (o.status !== "counter_claimed" && o.status !== "main_claimed") {
+          throw new Error(`reveal lost lifecycle race (${o.status})`);
+        }
+      }
     }
 
     // 2. DELIVER the CBTC via a STANDARD transfer (no custom DAR). When the user's
@@ -641,23 +954,80 @@ class HtlcService {
     // registry executes this as a DIRECT transfer — it COMPLETES in one step and
     // there is NO offer to accept (delivered=true). Otherwise an offer is created
     // and the user accepts it with TransferInstruction_Accept (delivered=false).
-    // DOUBLE-SPEND GUARD: the updateId is persisted the instant createTransfer
-    // returns, so a retry never re-sends.
+    // DOUBLE-SPEND GUARD: counterTransferUpdateId is persisted right after
+    // createTransfer returns. To also close the crash-window BETWEEN the on-ledger
+    // commit and that persist, use a DETERMINISTIC commandId so a retry hits the
+    // ledger's duplicate-command dedup instead of sending a second transfer.
     let delivered = false;
     if (!o.counterTransferUpdateId) {
       const holdings = await getHoldings(o.solverCantonParty);
-      const { updateId, offerContractId, transferKind } = await createTransfer({
-        senderParty: o.solverCantonParty,
-        receiverParty: o.userCantonParty, // the Loop party (cross-participant)
-        amountBtc: o.cbtcAmount!,
-        inputHoldings: holdings
-      });
-      o.counterTransferUpdateId = updateId;
-      await this.store.put(o);
-      if (offerContractId) {
-        o.counterTransferOfferCid = offerContractId;
-        await this.store.put(o);
+      const commandId = `htlc-counter-deliver-${id}`;
+      let updateId: string;
+      let offerContractId: string | undefined;
+      let transferKind: string | undefined;
+      try {
+        ({ updateId, offerContractId, transferKind } = await createTransfer({
+          senderParty: o.solverCantonParty,
+          receiverParty: o.userCantonParty, // the Loop party (cross-participant)
+          amountBtc: o.cbtcAmount!,
+          inputHoldings: holdings,
+          commandId
+        }));
+      } catch (e) {
+        // F7: a retry after a committed-but-unpersisted transfer. The deterministic
+        // commandId means the ledger already committed this exact transfer and now
+        // rejects the re-submit as a duplicate — so the user WAS delivered, we just
+        // crashed before persisting. Recover WITHOUT re-sending.
+        if (e instanceof Error && e.message.includes("duplicate command committed")) {
+          const fresh = await this.must(id);
+          if (fresh.counterTransferUpdateId) {
+            return {
+              order: fresh,
+              updateId: fresh.counterTransferUpdateId,
+              delivered: !fresh.counterTransferOfferCid
+            };
+          }
+          const committed = await fetchTransactionTreeByCommandId(
+            commandId,
+            o.solverCantonParty
+          );
+          if (!committed) {
+            throw new Error(
+              `duplicate command committed but counter delivery transaction not found (${commandId})`
+            );
+          }
+          const recovered = recoverHtlcCounterDeliveryFromEvents(
+            committed.eventsById,
+            {
+              senderParty: o.solverCantonParty,
+              receiverParty: o.userCantonParty,
+              amountBtc: o.cbtcAmount ?? "",
+              expectedInstrument: NETWORK.instrumentId
+            }
+          );
+          if (!recovered) {
+            throw new Error(
+              `committed counter delivery lacks receiver evidence (${commandId})`
+            );
+          }
+          const persisted = await this.persistLoopCounterDeliveryEvidence({
+            id,
+            updateId: committed.updateId,
+            offerContractId: recovered.offerCid
+          });
+          return {
+            order: persisted,
+            updateId: committed.updateId,
+            delivered: recovered.delivered
+          };
+        }
+        throw e;
       }
+      o = await this.persistLoopCounterDeliveryEvidence({
+        id,
+        updateId,
+        offerContractId
+      });
       // No offer created = the transfer self-completed (preapproval auto-accept).
       delivered = !offerContractId;
       console.log(
@@ -673,10 +1043,58 @@ class HtlcService {
       );
       if (pending) {
         o.counterTransferOfferCid = pending;
-        await this.store.put(o);
+        if (!(await this.store.putIfStatus(o, o.status))) {
+          throw new Error("counter offer recovery lost lifecycle race");
+        }
       } else delivered = true;
     }
     return { order: o, updateId: o.counterTransferUpdateId ?? "", delivered };
+  }
+
+  private async persistLoopCounterDeliveryEvidence(params: {
+    id: string;
+    updateId: string;
+    offerContractId?: string;
+  }): Promise<SwapOrder> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const fresh = await this.must(params.id);
+      if (
+        fresh.status !== "counter_claimed" &&
+        fresh.status !== "main_claimed"
+      ) {
+        throw new Error(
+          `counter delivery committed but order is no longer reveal-settled (${fresh.status})`
+        );
+      }
+      if (
+        fresh.counterTransferUpdateId &&
+        fresh.counterTransferUpdateId !== params.updateId
+      ) {
+        throw new Error(
+          "counter delivery already recorded with a different update id"
+        );
+      }
+      if (
+        params.offerContractId &&
+        fresh.counterTransferOfferCid &&
+        fresh.counterTransferOfferCid !== params.offerContractId
+      ) {
+        throw new Error(
+          "counter delivery already recorded with a different offer id"
+        );
+      }
+
+      fresh.counterTransferUpdateId =
+        fresh.counterTransferUpdateId ?? params.updateId;
+      fresh.counterTransferOfferCid =
+        fresh.counterTransferOfferCid ?? params.offerContractId;
+      const expectedStatus = fresh.status;
+      if (await this.store.putIfStatus(fresh, expectedStatus)) return fresh;
+    }
+
+    const final = await this.must(params.id);
+    if (final.counterTransferUpdateId === params.updateId) return final;
+    throw new Error("counter delivery evidence persistence lost lifecycle race");
   }
 
   /** PREPARE the standard TransferInstruction_Accept command for the Loop user to
@@ -716,12 +1134,14 @@ class HtlcService {
           "CBTC transfer offer not found on-ledger — it may have expired (24h TTL)"
         );
       o.counterTransferOfferCid = recovered;
-      await this.store.put(o);
+      if (!(await this.store.putIfStatus(o, o.status))) {
+        throw new Error("counter offer recovery lost lifecycle race");
+      }
     }
     return prepareAcceptCommand({ offerContractId: o.counterTransferOfferCid });
   }
 
-  /** Loop forward accept + optional CC network fee metadata (submit primary only; fee is separate). */
+  /** Loop forward accept compatibility wrapper. Loop HTLC CC fees are not separately charged. */
   async prepareLoopAcceptWithFee(
     id: string,
     ccHoldingCids?: string[]
@@ -736,115 +1156,12 @@ class HtlcService {
     const o = await this.must(id);
     const primary = await this.prepareLoopAccept(id);
     void ccHoldingCids;
-    let networkFeeCc: string | undefined;
-    if (isNetworkFeeEnabled()) {
-      const feeEstimate = await revalidateHtlcLoopNetworkFee({
-        order: o,
-        action: "htlc-loop-claim"
-      });
-      networkFeeCc = feeEstimate.feeCc;
-    }
     return {
       ...primary,
       commands: [primary.command],
       actAs: [o.userCantonParty],
-      networkFeeCc
+      networkFeeCc: undefined
     };
-  }
-
-  /** Loop forward when CBTC auto-delivered — fee-only Loop submit before reveal. */
-  async prepareLoopNetworkFee(
-    id: string,
-    ccHoldingCids: string[]
-  ): Promise<{
-    command: unknown;
-    commands: unknown[];
-    disclosedContracts: unknown[];
-    synchronizerId: string;
-    actAs: string[];
-    networkFeeCc: string;
-    networkFeePreapprovalCid: string;
-  }> {
-    const o = await this.must(id);
-    if (o.counterMode !== "loop") {
-      throw new Error("prepare-network-fee is loop only");
-    }
-    if (o.direction !== "evm-to-canton") {
-      throw new Error("network fee applies to forward Loop HTLC only");
-    }
-    if (!loopHtlcCollectsOranjNetworkFee(o.direction)) {
-      throw new Error("network fee not enabled for this flow");
-    }
-    const feeEstimate = await revalidateHtlcLoopNetworkFee({
-      order: o,
-      action: "htlc-loop-claim"
-    });
-    const prep = await prepareLoopNetworkFeeOnly({
-      userParty: o.userCantonParty,
-      networkFeeCc: feeEstimate.feeCc,
-      ccHoldingCids
-    });
-    o.networkFeeCc = feeEstimate.feeCc;
-    o.networkFeePreapprovalCid = prep.networkFeePreapprovalCid;
-    await this.store.put(o);
-    return { ...prep, networkFeeCc: feeEstimate.feeCc };
-  }
-
-  // L-02: prepareLoopSellerNetworkFee removed — reverse Loop HTLC charges NO Oranj
-  // network fee (loopHtlcCollectsOranjNetworkFee is forward-only), so the method
-  // always threw and its route (prepare-seller-network-fee) was deleted.
-
-  /** Record Loop HTLC network fee after a successful Loop wallet submit. */
-  async recordLoopNetworkFeeCollected(
-    id: string,
-    settlementUpdateId: string
-  ): Promise<SwapOrder> {
-    const o = await this.must(id);
-    if (o.counterMode !== "loop") {
-      throw new Error("record-network-fee is loop only");
-    }
-    if (o.direction !== "evm-to-canton") {
-      throw new Error("network fee applies to forward Loop HTLC only");
-    }
-    const updateId = settlementUpdateId.trim();
-    if (!updateId || updateId.startsWith("loop-fee-recovery")) {
-      throw new Error("valid settlementUpdateId required");
-    }
-    const feeEstimate = await revalidateHtlcLoopNetworkFee({
-      order: o,
-      action: "htlc-loop-claim"
-    });
-    const receiverParty = networkFeeReceiverParty();
-    // The fee amount is server-bound on the order. Never accept a browser-supplied
-    // amount here: the update tree must prove payment of this minimum.
-    const minFeeCc =
-      (o.networkFeeCc && o.networkFeeCc.trim()) ||
-      feeEstimate.feeCc;
-    const expectedPreapprovalCid = o.networkFeePreapprovalCid?.trim();
-    if (!expectedPreapprovalCid) {
-      throw new Error(
-        "network fee preapproval binding missing — prepare the fee again"
-      );
-    }
-    await verifyLoopNetworkFeeSettlement({
-      updateId,
-      userParty: o.userCantonParty,
-      receiverParty,
-      minFeeCc,
-      expectedPreapprovalCid
-    });
-    await recordNetworkFeeCollected({
-      orderId: o.id,
-      orderKind: "htlc",
-      userParty: o.userCantonParty,
-      feeCc: minFeeCc,
-      feeUsd: feeEstimate.feeUsd,
-      trafficBytes: feeEstimate.trafficBytes,
-      networkFeeSource: feeEstimate.networkFeeSource,
-      receiverParty,
-      settlementUpdateId: updateId
-    });
-    return o;
   }
 
   /** STEP 6 (PARTICIPANT-MANAGED) — the BACKEND claims the CBTC AS the hosted
@@ -905,13 +1222,27 @@ class HtlcService {
         }
         // C-04: ledger committed but DB never advanced — heal durable state.
         if (fresh.status === "counter_locked") {
+          const commandId = `htlc-claim-managed-${id}`;
+          const recovered = await fetchTransactionTreeByCommandId(
+            commandId,
+            o.userCantonParty,
+            50_000
+          );
+          if (!recovered) {
+            throw new Error(
+              `duplicate claim committed but transaction not found (${commandId})`
+            );
+          }
           fresh.revealedPreimage = ("0x" +
             (preimageHex.startsWith("0x")
               ? preimageHex.slice(2)
               : preimageHex)) as `0x${string}`;
+          fresh.counterClaimUpdateId = recovered.updateId;
           fresh.status = "counter_claimed";
-          await this.store.put(fresh);
-          return { order: fresh, updateId: fresh.counterClaimUpdateId ?? "" };
+          if (!(await this.store.putIfStatus(fresh, "counter_locked"))) {
+            return { order: await this.must(id), updateId: recovered.updateId };
+          }
+          return { order: fresh, updateId: recovered.updateId };
         }
       }
       throw e;
@@ -923,19 +1254,20 @@ class HtlcService {
         : preimageHex)) as `0x${string}`;
     o.counterClaimUpdateId = updateId;
     o.status = "counter_claimed";
-    await this.store.put(o);
+    if (networkFeeCollected && networkFeeCc) {
+      o.networkFeeCc = networkFeeCc;
+      o.networkFeeSettlementUpdateId = updateId;
+      o.networkFeeAccountingPending = true;
+    }
+    if (!(await this.store.putIfStatus(o, "counter_locked"))) {
+      return { order: await this.must(id), updateId };
+    }
 
     if (networkFeeCollected && feeEstimate && networkFeeCc) {
-      await bestEffortRecordNetworkFeeCollected({
-        orderId: o.id,
-        orderKind: "htlc",
-        userParty: o.userCantonParty,
-        feeCc: networkFeeCc,
+      await this.flushNetworkFeeAccounting(o, {
         feeUsd: feeEstimate.feeUsd,
         trafficBytes: feeEstimate.trafficBytes,
-        networkFeeSource: feeEstimate.networkFeeSource,
-        receiverParty: networkFeeReceiverParty(),
-        settlementUpdateId: updateId
+        networkFeeSource: feeEstimate.networkFeeSource
       });
     }
 
@@ -953,7 +1285,7 @@ class HtlcService {
    *  "platform auto-locks"): Allocation sender=user, receiver=solver, executor=
    *  solver + HtlcLock locker=user. Idempotent (allocation persisted first). */
   async lockMainCanton(id: string): Promise<SwapOrder> {
-    const o = await this.must(id);
+    let o = await this.must(id);
     if (o.direction !== "canton-to-evm")
       throw new Error(`lock-main is canton-to-evm only`);
     if (o.counterMode !== "managed")
@@ -961,9 +1293,9 @@ class HtlcService {
         "canton-to-evm requires a participant-managed (email) user in v1"
       );
     if (o.status === "main_locked" && o.allocationCid && o.htlcCid) return o;
-    const hashLockHex = o.hashLock.startsWith("0x")
-      ? o.hashLock.slice(2)
-      : o.hashLock;
+    if (o.status === "accepted") {
+      o = await this.reserveReverseFloatBeforeMainLock(o);
+    }
     // Retry after a partial run: allocation exists, HtlcLock create failed.
     if (o.allocationCid && !o.htlcCid) {
       let networkFeeCc: string | undefined;
@@ -982,37 +1314,32 @@ class HtlcService {
         htlcBlob,
         updateId: createUpdateId,
         networkFeeCollected
-      } = await createHtlcLock({
-        solverParty: o.solverCantonParty,
-        receiverParty: o.solverCantonParty,
-        lockerParty: o.userCantonParty,
+      } = await this.createOrRecoverReverseMainHtlc({
+        order: o,
         allocationCid: o.allocationCid,
-        amountBtc: o.cbtcAmount!,
-        hashLock: hashLockHex,
-        unlockTime: new Date(o.userTimelock * 1000 - 60_000),
-        networkFeeCc,
-        commandId: `htlc-lock-main-${id}`
+        networkFeeCc
       });
       o.htlcCid = htlcCid;
       o.htlcBlob = htlcBlob;
       o.status = "main_locked";
-      await this.store.put(o);
+      if (networkFeeCollected && networkFeeCc) {
+        o.networkFeeCc = networkFeeCc;
+        o.networkFeeSettlementUpdateId = createUpdateId;
+        o.networkFeeAccountingPending = true;
+      }
+      if (!(await this.store.putIfStatus(o, "main_locking"))) {
+        return this.must(id);
+      }
       if (networkFeeCollected && feeEstimate && networkFeeCc) {
-        await bestEffortRecordNetworkFeeCollected({
-          orderId: o.id,
-          orderKind: "htlc",
-          userParty: o.userCantonParty,
-          feeCc: networkFeeCc,
+        await this.flushNetworkFeeAccounting(o, {
           feeUsd: feeEstimate.feeUsd,
           trafficBytes: feeEstimate.trafficBytes,
-          networkFeeSource: feeEstimate.networkFeeSource,
-          receiverParty: networkFeeReceiverParty(),
-          settlementUpdateId: createUpdateId
+          networkFeeSource: feeEstimate.networkFeeSource
         });
       }
       return o;
     }
-    if (o.status !== "accepted")
+    if (o.status !== "main_locking")
       throw new Error(`order not accepted (${o.status})`);
 
     let networkFeeCc: string | undefined;
@@ -1030,53 +1357,91 @@ class HtlcService {
     const holdings = await getHoldings(o.userCantonParty); // the USER's CBTC
     const now = Date.now();
     const settleBeforeMs = o.userTimelock * 1000; // LONG leg
-    const { allocationCid } = await allocate({
-      solverParty: o.solverCantonParty, // executor
-      senderParty: o.userCantonParty, // the user locks THEIR holdings
-      receiverParty: o.solverCantonParty, // solver receives on claim
-      amountBtc: o.cbtcAmount!,
-      inputHoldings: holdings,
-      inputHoldingCids: holdings.map((h) => h.contractId),
-      settlementId: `htlc-rev-${o.id.slice(0, 18)}-${now}`,
-      settleBefore: new Date(settleBeforeMs),
-      allocateBefore: new Date(
-        Math.min(now + 10 * 60 * 1000, settleBeforeMs - 30_000)
-      ),
-      commandId: `htlc-lock-alloc-${id}`
-    });
+    const settlementId = `htlc-rev-${o.id.slice(0, 18)}`;
+    const allocationCommandId = `htlc-lock-alloc-${id}`;
+    const settleBefore = new Date(settleBeforeMs);
+    let allocationCid: string;
+    try {
+      ({ allocationCid } = await allocate({
+        solverParty: o.solverCantonParty, // executor
+        senderParty: o.userCantonParty, // the user locks THEIR holdings
+        receiverParty: o.solverCantonParty, // solver receives on claim
+        amountBtc: o.cbtcAmount!,
+        inputHoldings: holdings,
+        inputHoldingCids: holdings.map((h) => h.contractId),
+        settlementId,
+        settleBefore,
+        allocateBefore: new Date(
+          Math.min(now + 10 * 60 * 1000, settleBeforeMs - 30_000)
+        ),
+        commandId: allocationCommandId
+      }));
+    } catch (e) {
+      if (
+        !(e instanceof Error) ||
+        !e.message.includes("duplicate command committed")
+      ) {
+        throw e;
+      }
+      const recovered = await fetchTransactionTreeByCommandId(
+        allocationCommandId,
+        o.userCantonParty,
+        50_000
+      );
+      if (!recovered) {
+        throw new Error(
+          `duplicate Allocation command committed but transaction not found (${allocationCommandId})`
+        );
+      }
+      const allocation = recoverExactAllocationFromEvents(
+        recovered.eventsById,
+        {
+          settlementId,
+          senderParty: o.userCantonParty,
+          receiverParty: o.solverCantonParty,
+          executorParty: o.solverCantonParty,
+          amountBtc: o.cbtcAmount!,
+          instrumentId: NETWORK.instrumentId,
+          settleBefore
+        }
+      );
+      if (!allocation) {
+        throw new Error(
+          `committed Allocation not found in recovered transaction (${allocationCommandId})`
+        );
+      }
+      allocationCid = allocation.allocationCid;
+    }
     o.allocationCid = allocationCid;
-    await this.store.put(o); // double-spend guard
+    if (!(await this.store.putIfStatus(o, "main_locking"))) {
+      return this.must(id);
+    }
     const {
       htlcCid,
       htlcBlob,
       updateId: createUpdateId,
       networkFeeCollected
-    } = await createHtlcLock({
-      solverParty: o.solverCantonParty,
-      receiverParty: o.solverCantonParty,
-      lockerParty: o.userCantonParty,
+    } = await this.createOrRecoverReverseMainHtlc({
+      order: o,
       allocationCid,
-      amountBtc: o.cbtcAmount!,
-      hashLock: hashLockHex,
-      unlockTime: new Date(settleBeforeMs - 60_000),
-      networkFeeCc,
-      commandId: `htlc-lock-main-${id}`
+      networkFeeCc
     });
     o.htlcCid = htlcCid;
     o.htlcBlob = htlcBlob;
     o.status = "main_locked";
-    await this.store.put(o);
+    if (networkFeeCollected && networkFeeCc) {
+      o.networkFeeCc = networkFeeCc;
+      o.networkFeeSettlementUpdateId = createUpdateId;
+      o.networkFeeAccountingPending = true;
+    }
+    if (!(await this.store.putIfStatus(o, "main_locking"))) {
+      return this.must(id);
+    }
     if (networkFeeCollected && feeEstimate && networkFeeCc) {
-      await bestEffortRecordNetworkFeeCollected({
-        orderId: o.id,
-        orderKind: "htlc",
-        userParty: o.userCantonParty,
-        feeCc: networkFeeCc,
+      await this.flushNetworkFeeAccounting(o, {
         feeUsd: feeEstimate.feeUsd,
         trafficBytes: feeEstimate.trafficBytes,
-        networkFeeSource: feeEstimate.networkFeeSource,
-        receiverParty: networkFeeReceiverParty(),
-        settlementUpdateId: createUpdateId
+        networkFeeSource: feeEstimate.networkFeeSource
       });
     }
     return o;
@@ -1095,8 +1460,9 @@ class HtlcService {
       if (reconciled.status === "counter_locked") return reconciled;
       o = reconciled;
     }
-    if (o.status !== "main_locked")
+    if (o.status !== "counter_locking" && o.status !== "main_locked")
       throw new Error(`main not locked (${o.status})`);
+    const expectedStatus = o.status;
     if (!o.wbtcAmount || !o.userEvmAddress || o.solverTimelock == null) {
       throw new Error("order missing EVM counter-lock fields");
     }
@@ -1113,7 +1479,10 @@ class HtlcService {
     });
     o.counterLockTx = counterLockTx;
     o.status = "counter_locked";
-    await this.store.put(o);
+    o.evmFloatReserved = false;
+    if (!(await this.store.putIfStatus(o, expectedStatus))) {
+      return this.must(id);
+    }
     return o;
   }
 
@@ -1133,6 +1502,7 @@ class HtlcService {
     if (o.status !== "counter_claimed" && o.status !== "counter_locked") {
       throw new Error(`unexpected status ${o.status}`);
     }
+    const expectedStatus = o.status;
     const preimage =
       preimageHex ??
       (o.revealedPreimage ? o.revealedPreimage.slice(2) : undefined);
@@ -1150,21 +1520,46 @@ class HtlcService {
     } else {
       if (!o.htlcCid || !o.allocationCid)
         throw new Error("on-ledger HtlcLock not present");
-      ({ updateId } = await claimAsReceiver({
-        receiverParty: o.solverCantonParty, // the solver IS the receiver here
-        solverParty: o.solverCantonParty,
-        htlcCid: o.htlcCid,
-        htlcBlob: o.htlcBlob,
-        allocationCid: o.allocationCid,
-        preimageHex: preimage
-      }));
+      const commandId = `htlc-claim-main-${id}`;
+      try {
+        ({ updateId } = await claimAsReceiver({
+          receiverParty: o.solverCantonParty, // the solver IS the receiver here
+          solverParty: o.solverCantonParty,
+          htlcCid: o.htlcCid,
+          htlcBlob: o.htlcBlob,
+          allocationCid: o.allocationCid,
+          preimageHex: preimage,
+          commandId
+        }));
+      } catch (e) {
+        if (
+          !(e instanceof Error) ||
+          !e.message.includes("duplicate command committed")
+        ) {
+          throw e;
+        }
+        const recovered = await fetchTransactionTreeByCommandId(
+          commandId,
+          o.solverCantonParty,
+          50_000
+        );
+        if (!recovered) {
+          throw new Error(
+            `duplicate main claim committed but transaction not found (${commandId})`
+          );
+        }
+        updateId = recovered.updateId;
+      }
     }
     o.revealedPreimage = ("0x" +
       (preimage.startsWith("0x")
         ? preimage.slice(2)
         : preimage)) as `0x${string}`;
     o.status = "main_claimed";
-    await this.store.put(o);
+    o.evmFloatReserved = false;
+    if (!(await this.store.putIfStatus(o, expectedStatus))) {
+      return { order: await this.must(id), updateId };
+    }
     return { order: o, updateId };
   }
 
@@ -1192,13 +1587,16 @@ class HtlcService {
     disclosedContracts: unknown[];
     synchronizerId: string;
   }> {
-    const o = await this.must(id);
+    let o = await this.must(id);
     if (o.direction !== "canton-to-evm" || o.counterMode !== "loop") {
       throw new Error(
         "prepare-lock-loop is for Loop-seller (canton-to-evm) orders only"
       );
     }
-    if (o.status !== "accepted")
+    if (o.status === "accepted") {
+      o = await this.reserveReverseFloatBeforeMainLock(o);
+    }
+    if (o.status !== "main_locking")
       throw new Error(`order not accepted (${o.status})`);
     if (!holdingCids?.length) throw new Error("no input holdings supplied");
     return prepareTransferCommand({
@@ -1239,21 +1637,25 @@ class HtlcService {
     id: string,
     opts?: { maxAttempts?: number; pollMs?: number }
   ): Promise<SwapOrder> {
-    const o = await this.must(id);
+    let o = await this.must(id);
     if (o.direction !== "canton-to-evm" || o.counterMode !== "loop") {
       throw new Error("confirm-lock-loop is for Loop-seller orders only");
     }
     if (o.status === "main_locked") return o; // idempotent
-    if (o.status !== "accepted")
+    if (o.status === "accepted") {
+      o = await this.reserveReverseFloatBeforeMainLock(o);
+    }
+    if (o.status !== "main_locking")
       throw new Error(`order not accepted (${o.status})`);
 
     const maxAttempts = opts?.maxAttempts ?? 15;
     const pollMs = opts?.pollMs ?? 2000;
-    const targetAmount = parseFloat(o.cbtcAmount!);
-    const baselineCids = new Set(
-      o.solverCustodyBaselineCids ??
-        (await getHoldings(o.solverCantonParty)).map((h) => h.contractId)
-    );
+    if (!o.solverCustodyBaselineCids) {
+      throw new Error(
+        "custody baseline missing — refusing to infer a Loop deposit from current vault holdings"
+      );
+    }
+    const baselineCids = new Set(o.solverCustodyBaselineCids);
 
     // Holdings already linked to other in-flight loop-seller orders (same amount).
     const active = await this.store.active();
@@ -1274,11 +1676,20 @@ class HtlcService {
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const offers = await listPendingOffers(o.solverCantonParty);
-      const offer = offers.find(
+      const matchingOffers = offers.filter(
         (x) =>
           x.sender === o.userCantonParty &&
-          parseFloat(x.amountBtc) + 1e-9 >= targetAmount
+          x.receiver === o.solverCantonParty &&
+          cbtcAmountsMatch(x.amountBtc, o.cbtcAmount!) &&
+          !!x.instrumentId &&
+          matchesInstrument(x.instrumentId, NETWORK.instrumentId)
       );
+      if (matchingOffers.length > 1) {
+        throw new Error(
+          "ambiguous Loop custody transfer — multiple exact offers match this order"
+        );
+      }
+      const offer = matchingOffers[0];
       if (offer) {
         const { updateId } = await acceptTransfer({
           receiverParty: o.solverCantonParty,
@@ -1287,7 +1698,9 @@ class HtlcService {
         o.counterTransferOfferCid = offer.contractId;
         o.counterTransferUpdateId = updateId;
         o.status = "main_locked";
-        await this.store.put(o);
+        if (!(await this.store.putIfStatus(o, "main_locking"))) {
+          return this.must(id);
+        }
         return o;
       }
 
@@ -1303,7 +1716,9 @@ class HtlcService {
         o.counterTransferOfferCid = custodyHolding;
         o.counterTransferUpdateId = LOOP_PREAPPROVAL_SETTLED;
         o.status = "main_locked";
-        await this.store.put(o);
+        if (!(await this.store.putIfStatus(o, "main_locking"))) {
+          return this.must(id);
+        }
         return o;
       }
 
@@ -1312,25 +1727,16 @@ class HtlcService {
       }
     }
 
+    const rollback = {
+      ...o,
+      status: "accepted" as const,
+      evmFloatReserved: false
+    };
+    await this.store.putIfStatus(rollback, "main_locking").catch(() => {});
     throw new Error(
       "transfer offer not visible on-ledger yet — connect Loop and use Retry lock, or wait a moment and confirm again. " +
         "If you already signed in Loop, tap Confirm CBTC lock on Orders (custody may have auto-settled)."
     );
-  }
-
-  /** LOOP-SELLER refund prep — the user's unilateral exit: standard
-   *  Allocation_Withdraw signed in their wallet. */
-  async prepareLoopSellerWithdraw(
-    id: string
-  ): Promise<{
-    command: unknown;
-    disclosedContracts: unknown[];
-    synchronizerId: string;
-  }> {
-    const o = await this.must(id);
-    if (o.counterMode !== "loop" || !o.allocationCid)
-      throw new Error("no loop allocation to withdraw");
-    return prepareWithdrawCommand({ allocationCid: o.allocationCid });
   }
 
   /** REVERSE refund — after the LONG (Canton) timelock, return the CBTC to the
@@ -1342,7 +1748,14 @@ class HtlcService {
     if (o.direction !== "canton-to-evm") {
       throw new Error("refund-main is canton-to-evm only");
     }
-    if (o.status !== "main_locked" && o.status !== "counter_locked") {
+    // `refunding` is accepted for recovery re-entry (a prior attempt crashed between
+    // the on-ledger transfer and the `refunded` write — finish it idempotently).
+    if (
+      o.status !== "main_locked" &&
+      o.status !== "counter_locking" &&
+      o.status !== "counter_locked" &&
+      o.status !== "refunding"
+    ) {
       throw new Error(`not refundable (${o.status})`);
     }
     if (Date.now() / 1000 < o.userTimelock)
@@ -1354,32 +1767,88 @@ class HtlcService {
     if (o.revealedPreimage)
       throw new Error("preimage revealed — swap must settle, not refund");
     await assertEvmCounterNotClaimed(o);
+
+    // CONCURRENCY + CRASH GUARD (F2). The Loop branch issues a fresh createTransfer
+    // from the solver's float — NOT idempotent on its own — and the sweep runs from
+    // two triggers (daemon POST + cron GET). We use a DURABLE transient `refunding`
+    // status (not a jump straight to `refunded`):
+    //   1. CAS-claim `refunding` from the current status. Losing = someone else owns
+    //      the refund → return their result, never send a 2nd transfer.
+    //   2. Do the on-ledger return with a DETERMINISTIC commandId so a retry after a
+    //      commit/crash hits the ledger's duplicate dedup instead of paying twice.
+    //   3. Mark `refunded`. A crash between (2) and (3) leaves the order `refunding`
+    //      (recoverable) rather than terminal-unpaid — a later sweep re-runs the
+    //      idempotent transfer and advances to `refunded`. (refundMainCanton itself
+    //      accepts `refunding` as a re-entry status below.)
+    const prevStatus = o.status;
+    o.status = "refunding";
+    o.evmFloatReserved = false;
+    const wonRefund = await this.store.putIfStatus(o, prevStatus);
+    if (!wonRefund) {
+      const fresh = await this.must(id);
+      // Another worker may still be mid-refund (status 'refunding'); return its state.
+      return { order: fresh, updateId: fresh.counterTransferUpdateId ?? "" };
+    }
+
     let updateId: string;
-    if (o.counterMode === "loop") {
-      // LOOP SELLER custody refund — fully automatable on OUR side: send the
-      // custodied CBTC straight back (direct transfer; the user's preapproval
-      // auto-accepts).
-      if (!o.counterTransferUpdateId)
-        throw new Error("no custody transfer recorded — nothing to refund");
-      const holdings = await getHoldings(o.solverCantonParty);
-      ({ updateId } = await createTransfer({
-        senderParty: o.solverCantonParty,
-        receiverParty: o.userCantonParty,
-        amountBtc: o.cbtcAmount!,
-        inputHoldings: holdings
-      }));
-    } else {
-      if (!o.htlcCid || !o.allocationCid)
-        throw new Error("on-ledger HtlcLock not present");
-      ({ updateId } = await refundHtlcLock({
-        solverParty: o.solverCantonParty,
-        lockerParty: o.userCantonParty,
-        htlcCid: o.htlcCid,
-        allocationCid: o.allocationCid
-      }));
+    try {
+      if (o.counterMode === "loop") {
+        // LOOP SELLER custody refund — send the custodied CBTC straight back (direct
+        // transfer; the user's preapproval auto-accepts). Deterministic commandId so
+        // a retry after a committed-but-unrecorded transfer dedups at the ledger.
+        if (!o.counterTransferUpdateId)
+          throw new Error("no custody transfer recorded — nothing to refund");
+        const holdings = await getHoldings(o.solverCantonParty);
+        ({ updateId } = await createTransfer({
+          senderParty: o.solverCantonParty,
+          receiverParty: o.userCantonParty,
+          amountBtc: o.cbtcAmount!,
+          inputHoldings: holdings,
+          commandId: `htlc-refund-main-${id}`
+        }));
+      } else {
+        if (!o.htlcCid || !o.allocationCid)
+          throw new Error("on-ledger HtlcLock not present");
+        ({ updateId } = await refundHtlcLock({
+          solverParty: o.solverCantonParty,
+          lockerParty: o.userCantonParty,
+          htlcCid: o.htlcCid,
+          allocationCid: o.allocationCid,
+          commandId: `htlc-refund-main-${id}`
+        }));
+      }
+    } catch (e) {
+      // Transfer failed AFTER claiming `refunding`. If the ledger says the refund
+      // already committed (duplicate command), the user WAS paid — fall through to
+      // mark refunded. Otherwise roll back to the prior status so a sweep retries —
+      // but ONLY if the row is still `refunding` (CAS, not an unconditional put), so
+      // we never clobber a concurrent sweep that already advanced it to `refunded`.
+      if (e instanceof Error && e.message.includes("duplicate command committed")) {
+        const commandId = `htlc-refund-main-${id}`;
+        const recovered = await fetchTransactionTreeByCommandId(
+          commandId,
+          o.counterMode === "loop"
+            ? o.solverCantonParty
+            : o.userCantonParty,
+          50_000
+        );
+        if (!recovered) {
+          throw new Error(
+            `duplicate refund committed but transaction not found (${commandId})`
+          );
+        }
+        updateId = recovered.updateId;
+      } else {
+        const rollback = { ...o, status: prevStatus };
+        await this.store.putIfStatus(rollback, "refunding").catch(() => {});
+        throw e;
+      }
     }
     o.status = "refunded";
-    await this.store.put(o);
+    o.counterClaimUpdateId = updateId;
+    if (!(await this.store.putIfStatus(o, "refunding"))) {
+      return { order: await this.must(id), updateId };
+    }
     return { order: o, updateId };
   }
 
@@ -1404,6 +1873,7 @@ class HtlcService {
     if (o.status !== "counter_locked" && o.status !== "counter_claimed") {
       throw new Error(`unexpected status ${o.status}`);
     }
+    if (o.status === "counter_claimed") return o;
     // DEFENSE-IN-DEPTH (solver-robbery guard): for ANY forward order, re-verify the
     // EVM WBTC lock has enough margin BEFORE we record the reveal — same guard as
     // claimCounter/claimCounterAsBackend. Today no forward order reaches this path
@@ -1445,7 +1915,9 @@ class HtlcService {
       o.counterClaimUpdateId = claimRef;
     }
     o.status = "counter_claimed";
-    await this.store.put(o);
+    if (!(await this.store.putIfStatus(o, "counter_locked"))) {
+      return this.must(id);
+    }
     return o;
   }
 
@@ -1460,9 +1932,12 @@ class HtlcService {
       );
     if (o.status !== "counter_claimed")
       throw new Error(`counter not claimed (${o.status})`);
+    await verifyReverseClaimTx(mainClaimTx, o.hashLock);
     o.status = "main_claimed";
     o.mainClaimTx = mainClaimTx;
-    await this.store.put(o);
+    if (!(await this.store.putIfStatus(o, "counter_claimed"))) {
+      return this.must(id);
+    }
     return o;
   }
   async getRevealedPreimage(id: string) {
@@ -1477,7 +1952,7 @@ class HtlcService {
     id: string
   ): Promise<{ order: SwapOrder; updateId: string }> {
     const o = await this.must(id);
-    if (o.status !== "counter_locked")
+    if (o.status !== "counter_locked" && o.status !== "refunding")
       throw new Error(`nothing to refund (status ${o.status})`);
     const htlcCid = o.htlcCid;
     const allocationCid = o.allocationCid;
@@ -1489,13 +1964,45 @@ class HtlcService {
         `too early — refund allowed after ${new Date(o.solverTimelock * 1000).toISOString()}`
       );
     }
-    const { updateId } = await refundHtlcLock({
-      solverParty: o.solverCantonParty,
-      htlcCid,
-      allocationCid
-    });
+    const previous = o.status;
+    o.status = "refunding";
+    if (!(await this.store.putIfStatus(o, previous))) {
+      const fresh = await this.must(id);
+      return { order: fresh, updateId: fresh.counterClaimUpdateId ?? "" };
+    }
+    const commandId = `htlc-refund-counter-${id}`;
+    let updateId: string;
+    try {
+      ({ updateId } = await refundHtlcLock({
+        solverParty: o.solverCantonParty,
+        htlcCid,
+        allocationCid,
+        commandId
+      }));
+    } catch (e) {
+      if (e instanceof Error && e.message.includes("duplicate command committed")) {
+        const recovered = await fetchTransactionTreeByCommandId(
+          commandId,
+          o.solverCantonParty,
+          50_000
+        );
+        if (!recovered) {
+          throw new Error(
+            `duplicate refund committed but transaction not found (${commandId})`
+          );
+        }
+        updateId = recovered.updateId;
+      } else {
+        const rollback = { ...o, status: "counter_locked" as const };
+        await this.store.putIfStatus(rollback, "refunding").catch(() => {});
+        throw e;
+      }
+    }
     o.status = "refunded";
-    await this.store.put(o);
+    o.counterClaimUpdateId = updateId;
+    if (!(await this.store.putIfStatus(o, "refunding"))) {
+      return { order: await this.must(id), updateId };
+    }
     return { order: o, updateId };
   }
 
@@ -1515,9 +2022,25 @@ class HtlcService {
       throw new Error(`order already terminal (${o.status})`);
     }
     await verifyForwardRetakeTx(retakeTx, o.hashLock);
-    o.status = "refunded";
+    // STRANDED-FLOAT GUARD: if the order is still counter_locked, the SOLVER's CBTC
+    // is locked on-ledger. Marking 'refunded' here would drop it from refundableOrders()
+    // (which scans counter_locked) and the auto-refund sweep would never free it. So
+    // refund the solver's CBTC HtlcLock NOW (the user retaking WBTC means userTimelock
+    // passed, and the ladder guarantees solverTimelock < userTimelock, so the counter
+    // refund window is open). If the on-ledger refund fails, leave the order in
+    // counter_locked so the sweep retries — do NOT mark refunded with float stranded.
+    const previousStatus = o.status;
     o.mainClaimTx = retakeTx;
-    await this.store.put(o);
+    if (previousStatus === "counter_locked" && o.htlcCid && o.allocationCid) {
+      if (!(await this.store.putIfStatus(o, "counter_locked"))) {
+        return this.must(id);
+      }
+      return (await this.refundCounter(id)).order;
+    }
+    o.status = previousStatus === "counter_claimed" ? "failed" : "refunded";
+    if (!(await this.store.putIfStatus(o, previousStatus))) {
+      return this.must(id);
+    }
     return o;
   }
 
@@ -1539,6 +2062,7 @@ class HtlcService {
    *    timelock — nothing of OURS is locked (the user retakes their WBTC on EVM
    *    with their own key); mark refunded so the active list drains. */
   async expiredOrders(): Promise<{
+    abandonedAccepted: SwapOrder[];
     forwardCounter: SwapOrder[];
     reverseMain: SwapOrder[];
     staleForwardMain: SwapOrder[];
@@ -1546,12 +2070,22 @@ class HtlcService {
     loopCustodyStalled: SwapOrder[];
   }> {
     const now = Math.floor(Date.now() / 1000);
-    const [counterLocked, mainLocked] = await Promise.all([
+    const [accepted, counterLocked, counterLocking, mainLocked, refunding] = await Promise.all([
+      this.store.byStatus("accepted"),
       this.store.byStatus("counter_locked"),
-      this.store.byStatus("main_locked")
+      this.store.byStatus("counter_locking"),
+      this.store.byStatus("main_locked"),
+      // F2 recovery: orders stuck mid-refund (crashed between the on-ledger transfer
+      // and the `refunded` write) must be re-swept so the idempotent refund finishes.
+      this.store.byStatus("refunding")
     ]);
     return {
-      forwardCounter: counterLocked.filter(
+      abandonedAccepted: accepted.filter(
+        (o) =>
+          now >=
+          (o.updatedAt ?? o.createdAt) + ACCEPTED_DRAFT_TTL_SECONDS
+      ),
+      forwardCounter: [...counterLocked, ...refunding].filter(
         (o) =>
           o.direction === "evm-to-canton" &&
           o.counterMode !== "loop" &&
@@ -1559,8 +2093,8 @@ class HtlcService {
           now >= o.solverTimelock
       ),
       // Exclude revealed orders — once the secret is public the swap settles, never
-      // refunds (refund-vs-claim race guard).
-      reverseMain: [...mainLocked, ...counterLocked].filter(
+      // refunds (refund-vs-claim race guard). Include `refunding` for crash recovery.
+      reverseMain: [...mainLocked, ...counterLocking, ...counterLocked, ...refunding].filter(
         (o) =>
           o.direction === "canton-to-evm" &&
           o.counterMode !== "loop" &&
@@ -1573,8 +2107,8 @@ class HtlcService {
       ),
       // LOOP SELLERS (Variant A custody): WE hold the CBTC → the sweep sends it
       // straight back after the timelock (refundMainCanton, fully automated). Skip
-      // revealed (settled) orders.
-      staleLoopSeller: [...mainLocked, ...counterLocked].filter(
+      // revealed (settled) orders. Include `refunding` for crash recovery.
+      staleLoopSeller: [...mainLocked, ...counterLocking, ...counterLocked, ...refunding].filter(
         (o) =>
           o.direction === "canton-to-evm" &&
           o.counterMode === "loop" &&
@@ -1585,7 +2119,10 @@ class HtlcService {
       // happened within the grace window — return the custody NOW instead of
       // making the user wait out the full timelock. Verified safe in
       // earlyRefundLoopCustody (on-chain check that NO WBTC lock exists).
-      loopCustodyStalled: mainLocked.filter(
+      // Include `refunding` so an EARLY refund that crashed mid-transfer (now
+      // `refunding`, still before userTimelock) is re-swept and finished idempotently —
+      // otherwise no bucket would re-select it until userTimelock passed.
+      loopCustodyStalled: [...mainLocked, ...refunding].filter(
         (o) =>
           o.direction === "canton-to-evm" &&
           o.counterMode === "loop" &&
@@ -1593,6 +2130,144 @@ class HtlcService {
           now < o.userTimelock
       )
     };
+  }
+
+  /** Recover or release stale reverse pre-lock reservations. */
+  async reconcileReverseMainLocking(): Promise<number> {
+    const now = Math.floor(Date.now() / 1000);
+    const orders = await this.store.byStatus("main_locking");
+    let reconciled = 0;
+    for (const order of orders) {
+      if (
+        order.direction !== "canton-to-evm" ||
+        now <
+          (order.updatedAt ?? order.createdAt) +
+            REVERSE_PRELOCK_RESERVATION_TTL_SECONDS
+      ) {
+        continue;
+      }
+      try {
+        const result =
+          order.counterMode === "loop"
+            ? await this.confirmLoopSellerLock(order.id, {
+                maxAttempts: 1,
+                pollMs: 0
+              })
+            : await this.lockMainCanton(order.id);
+        if (result.status !== "main_locking") reconciled++;
+      } catch (e) {
+        const fresh = await this.must(order.id);
+        if (fresh.status !== "main_locking") {
+          reconciled++;
+          continue;
+        }
+        if (await this.releaseStaleReversePrelockReservation(fresh, e)) {
+          reconciled++;
+        }
+      }
+    }
+    return reconciled;
+  }
+
+  private async releaseStaleReversePrelockReservation(
+    order: SwapOrder,
+    cause: unknown
+  ): Promise<boolean> {
+    if (
+      order.status !== "main_locking" ||
+      order.direction !== "canton-to-evm" ||
+      order.allocationCid ||
+      order.htlcCid ||
+      order.counterTransferUpdateId
+    ) {
+      return false;
+    }
+
+    const commandId = `htlc-lock-alloc-${order.id}`;
+    let recovered: Awaited<ReturnType<typeof fetchTransactionTreeByCommandId>>;
+    try {
+      recovered = await fetchTransactionTreeByCommandId(
+        commandId,
+        order.userCantonParty,
+        50_000
+      );
+    } catch (e) {
+      void alert("warn", "Kept stale reverse HTLC WBTC reservation after recovery scan failure", {
+        order: order.id.slice(0, 18),
+        reason: (e instanceof Error ? e.message : String(e)).slice(0, 180)
+      });
+      return false;
+    }
+    if (recovered?.eventsById) {
+      const settlementId = `htlc-rev-${order.id.slice(0, 18)}`;
+      const allocation = recoverExactAllocationFromEvents(recovered.eventsById, {
+        settlementId,
+        senderParty: order.userCantonParty,
+        receiverParty: order.solverCantonParty,
+        executorParty: order.solverCantonParty,
+        amountBtc: order.cbtcAmount!,
+        instrumentId: NETWORK.instrumentId,
+        settleBefore: new Date(order.userTimelock * 1000)
+      });
+      if (allocation) {
+        order.allocationCid = allocation.allocationCid;
+        return this.store.putIfStatus(order, "main_locking");
+      }
+    }
+
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    if (!isSafeReversePrelockReleaseCause(cause)) {
+      void alert("warn", "Kept stale reverse HTLC WBTC reservation after ambiguous failure", {
+        order: order.id.slice(0, 18),
+        reason: detail.slice(0, 180)
+      });
+      return false;
+    }
+
+    void alert("warn", "Released stale reverse HTLC WBTC reservation", {
+      order: order.id.slice(0, 18),
+      reason: detail.slice(0, 180)
+    });
+    order.status = "failed";
+    order.evmFloatReserved = false;
+    return this.store.putIfStatus(order, "main_locking");
+  }
+
+  /** Release stale accepted exposure, but recover a forward EVM lock if it landed. */
+  async expireAbandonedAccepted(id: string): Promise<SwapOrder> {
+    const o = await this.must(id);
+    if (o.status !== "accepted") return o;
+    if (
+      Math.floor(Date.now() / 1000) <
+      (o.updatedAt ?? o.createdAt) + ACCEPTED_DRAFT_TTL_SECONDS
+    ) {
+      throw new Error("accepted-order grace period has not elapsed");
+    }
+
+    if (o.direction === "evm-to-canton") {
+      let lock: Awaited<ReturnType<typeof readEvmLock>>;
+      try {
+        lock = await readEvmLock(o.hashLock);
+      } catch (e) {
+        throw new Error(
+          `could not verify stale accepted EVM lock: ${e instanceof Error ? e.message : e}`
+        );
+      }
+      if (lock.amount > 0n) {
+        await verifyEvmLock(o);
+        o.status = "main_locked";
+        if (!(await this.store.putIfStatus(o, "accepted"))) {
+          return this.must(id);
+        }
+        return o;
+      }
+    }
+
+    o.status = "cancelled";
+    if (!(await this.store.putIfStatus(o, "accepted"))) {
+      return this.must(id);
+    }
+    return o;
   }
 
   /** EARLY custody return for a stalled Loop-seller swap (no WBTC counter-lock).
@@ -1605,7 +2280,8 @@ class HtlcService {
     const o = await this.must(id);
     if (o.direction !== "canton-to-evm" || o.counterMode !== "loop")
       throw new Error("early refund is loop-seller only");
-    if (o.status !== "main_locked")
+    // Accept `refunding` for recovery re-entry (a prior attempt crashed mid-refund).
+    if (o.status !== "main_locked" && o.status !== "refunding")
       throw new Error(`not stalled (${o.status})`);
     if (o.revealedPreimage)
       throw new Error("preimage revealed — swap must settle, not refund");
@@ -1614,15 +2290,53 @@ class HtlcService {
     const lock = await readEvmLock(o.hashLock);
     if (lock.amount > 0n)
       throw new Error("WBTC lock exists on-chain — not stalled, do not refund");
-    const holdings = await getHoldings(o.solverCantonParty);
-    const { updateId } = await createTransfer({
-      senderParty: o.solverCantonParty,
-      receiverParty: o.userCantonParty,
-      amountBtc: o.cbtcAmount!,
-      inputHoldings: holdings
-    });
+    // CONCURRENCY + CRASH GUARD (F2): durable `refunding` CAS + deterministic
+    // commandId, identical to refundMainCanton. The shared commandId
+    // (htlc-refund-main-${id}) makes the two refund entry points mutually idempotent
+    // at the ledger — whichever runs second dedups instead of double-paying.
+    const prevStatus = o.status;
+    o.status = "refunding";
+    if (!(await this.store.putIfStatus(o, prevStatus))) {
+      const fresh = await this.must(id);
+      return { order: fresh, updateId: fresh.counterTransferUpdateId ?? "" };
+    }
+    let updateId: string;
+    try {
+      const holdings = await getHoldings(o.solverCantonParty);
+      ({ updateId } = await createTransfer({
+        senderParty: o.solverCantonParty,
+        receiverParty: o.userCantonParty,
+        amountBtc: o.cbtcAmount!,
+        inputHoldings: holdings,
+        commandId: `htlc-refund-main-${id}`
+      }));
+    } catch (e) {
+      if (e instanceof Error && e.message.includes("duplicate command committed")) {
+        const commandId = `htlc-refund-main-${id}`;
+        const recovered = await fetchTransactionTreeByCommandId(
+          commandId,
+          o.solverCantonParty,
+          50_000
+        );
+        if (!recovered) {
+          throw new Error(
+            `duplicate refund committed but transaction not found (${commandId})`
+          );
+        }
+        updateId = recovered.updateId;
+      } else {
+        // CAS rollback (not an unconditional put) — don't clobber a concurrent
+        // sweep that already advanced this order to `refunded`.
+        const rollback = { ...o, status: prevStatus };
+        await this.store.putIfStatus(rollback, "refunding").catch(() => {});
+        throw e;
+      }
+    }
     o.status = "refunded";
-    await this.store.put(o);
+    o.counterClaimUpdateId = updateId;
+    if (!(await this.store.putIfStatus(o, "refunding"))) {
+      return { order: await this.must(id), updateId };
+    }
     return { order: o, updateId };
   }
 
@@ -1633,9 +2347,26 @@ class HtlcService {
     const o = await this.must(id);
     if (o.status !== "main_locked" && o.status !== "counter_locked")
       throw new Error(`not stale (${o.status})`);
+    const previousStatus = o.status;
     o.status = "refunded";
-    await this.store.put(o);
-    return o;
+    o.evmFloatReserved = false;
+    return (await this.store.putIfStatus(o, previousStatus))
+      ? o
+      : this.must(id);
+  }
+
+  async reconcileNetworkFeeAccounting(): Promise<number> {
+    const pending = await this.store.pendingNetworkFeeAccounting();
+    let completed = 0;
+    for (const o of pending) {
+      const before = o.networkFeeAccountingPending;
+      await this.flushNetworkFeeAccounting(o);
+      if (before) {
+        const fresh = await this.must(o.id);
+        if (!fresh.networkFeeAccountingPending) completed++;
+      }
+    }
+    return completed;
   }
 
   private async must(id: string): Promise<SwapOrder> {

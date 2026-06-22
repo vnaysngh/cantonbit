@@ -33,10 +33,16 @@ export interface CantonSwapOrder {
   /** Vault party for user sell receiver (no preapproval). Same id as solverParty for C2C. */
   settlementParty?: string;
   walletMode: CantonSwapWalletMode;
+  /** Durable vault-float reservation held before any ledger settlement submit. */
+  floatReserved?: boolean;
   userLegOfferCid?: string;
   /** Loop submit update id proving user signed sell leg. */
   userLegSubmitUpdateId?: string;
   counterLegOfferCid?: string;
+  /** Ledger offset where the current counter offer was created. */
+  counterLegCreatedOffset?: number;
+  /** Immutable ledger update proving the current counter offer was accepted. */
+  counterReceiptUpdateId?: string;
   settlementUpdateId?: string;
   /** Incremented on each successful counter reissue submit (deterministic command id). */
   counterReissueAttempt?: number;
@@ -48,6 +54,9 @@ export interface CantonSwapOrder {
   networkFeeCc?: string;
   /** Unix seconds — network fee estimate valid until (matches quote expiry). */
   networkFeeExpiresAt?: number;
+  /** Durable outbox marker: fee was collected in this Canton update but not booked yet. */
+  networkFeeSettlementUpdateId?: string;
+  networkFeeAccountingPending?: boolean;
 }
 
 export function isCantonSwapMvpPair(

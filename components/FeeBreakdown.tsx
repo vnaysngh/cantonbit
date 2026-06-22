@@ -1,6 +1,5 @@
 "use client";
 
-import { isNetworkFeeUiEnabled } from "@/lib/constants";
 import type { NetworkFeeTxLeg } from "@/lib/canton-network-fee-math";
 
 export interface FeeBreakdownProps {
@@ -15,7 +14,6 @@ export interface FeeBreakdownProps {
   networkFeePreview?: boolean;
   /** Loop wallet paths where Canton traffic is Loop-billed, not an Oranj CC line item. */
   hideCantonNetworkFee?: boolean;
-  loopNetworkFeeCc?: string;
   loading?: boolean;
   evmGasLabel?: string;
 }
@@ -42,7 +40,6 @@ export function FeeBreakdown({
   networkFeeSource,
   networkFeePreview,
   hideCantonNetworkFee,
-  loopNetworkFeeCc,
   loading,
   evmGasLabel
 }: FeeBreakdownProps) {
@@ -50,11 +47,7 @@ export function FeeBreakdown({
     !!networkFeeSource && networkFeeSource !== "disabled";
   const showCantonNetworkFee =
     !hideCantonNetworkFee &&
-    (isNetworkFeeUiEnabled() ||
-      serverQuotedFee ||
-      networkFeePreview === true ||
-      (!!loopNetworkFeeCc && Number.parseFloat(loopNetworkFeeCc) > 0) ||
-      loading);
+    (serverQuotedFee || networkFeePreview === true || loading);
 
   if (!showCantonNetworkFee) {
     return (
@@ -70,11 +63,6 @@ export function FeeBreakdown({
   let networkLabel = "—";
   if (loading) {
     networkLabel = "Estimating…";
-  } else if (loopNetworkFeeCc && Number.parseFloat(loopNetworkFeeCc) > 0) {
-    networkLabel = formatCantonNetworkFee(
-      loopNetworkFeeCc,
-      SHOW_NETWORK_FEE_USD ? networkFeeUsd : undefined
-    );
   } else {
     networkLabel = formatCantonNetworkFee(
       networkFeeCc,

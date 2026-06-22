@@ -22,7 +22,13 @@ export async function quoteMvpCantonSwap(
   fromAsset: CantonSwapMvpAssetId,
   toAsset: CantonSwapMvpAssetId,
   inAmount: string
-): Promise<CantonQuoteResult & { inAmount: string; outAmount: string }> {
+): Promise<
+  CantonQuoteResult & {
+    inAmount: string;
+    grossOutAmount: string;
+    outAmount: string;
+  }
+> {
   if (!isMvpSwapPair(fromAsset, toAsset)) {
     throw new Error(`unsupported pair ${fromAsset}/${toAsset}`);
   }
@@ -33,6 +39,7 @@ export async function quoteMvpCantonSwap(
   return {
     ...q,
     inAmount: fromBaseUnits(q.inUnits, from.decimals),
+    grossOutAmount: fromBaseUnits(q.grossOutUnits, to.decimals),
     outAmount: fromBaseUnits(q.outUnits, to.decimals)
   };
 }

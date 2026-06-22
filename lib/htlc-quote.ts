@@ -17,16 +17,37 @@
  */
 import "server-only";
 
-import { alert } from "./alert";
+import { toBaseUnits } from "./amount-units";
 import { DEFAULT_PLATFORM_FEE_BPS } from "./constants";
-import { quoteGrossOutUnits, applyOutputFee } from "./htlc-quote-math";
+import {
+  quoteGrossOutUnits,
+  applyOutputFee,
+  parsePlatformFeeBps
+} from "./htlc-quote-math";
+import {
+  fetchWithFreshness,
+  type PriceCacheEntry
+} from "./price-cache";
 
 /** Output-side platform fee (bps). Override with PLATFORM_FEE_BPS env. */
-export const BRIDGE_FEE_BPS = Number(
-  process.env.PLATFORM_FEE_BPS ?? DEFAULT_PLATFORM_FEE_BPS
+export const BRIDGE_FEE_BPS = parsePlatformFeeBps(
+  process.env.PLATFORM_FEE_BPS,
+  DEFAULT_PLATFORM_FEE_BPS
 );
 export const QUOTE_TTL_SECONDS = 60; // RFQ-style short validity (NOT the order window)
 const DEPEG_LIMIT_BPS = 200; // 2% — refuse to quote beyond this
+const WBTC_BTC_SOURCE_SANITY_BPS = Number(
+  process.env.HTLC_WBTC_BTC_SOURCE_SANITY_BPS ?? "100"
+);
+if (
+  !Number.isInteger(WBTC_BTC_SOURCE_SANITY_BPS) ||
+  WBTC_BTC_SOURCE_SANITY_BPS <= 0 ||
+  WBTC_BTC_SOURCE_SANITY_BPS > DEPEG_LIMIT_BPS
+) {
+  throw new Error(
+    `HTLC_WBTC_BTC_SOURCE_SANITY_BPS must be an integer from 1 to ${DEPEG_LIMIT_BPS}`
+  );
+}
 const CACHE_FRESH_MS = 30_000;
 /** Max age we'll serve a cached price when the source is down. Kept SHORT (90s) so
  *  a fast depeg starting right after a fetch failure can't be missed by the peg
@@ -34,7 +55,11 @@ const CACHE_FRESH_MS = 30_000;
  *  this we refuse to quote rather than risk filling through a move. */
 const CACHE_MAX_STALE_MS = 90_000;
 /** P scaled to 8dp (1e8 = exactly 1 BTC per WBTC). */
-let cached: { price8: bigint; at: number } | null = null;
+interface WbtcBtcPrice {
+  price8: bigint;
+  source: string;
+}
+let cached: PriceCacheEntry<WbtcBtcPrice> | null = null;
 
 export class QuoteUnavailableError extends Error {}
 export class DepegError extends Error {}
@@ -87,45 +112,102 @@ async function tryBinanceWbtcBtc(): Promise<number | null> {
   return wbtc / btc;
 }
 
-async function fetchWbtcBtcLive(): Promise<number> {
+async function fetchWbtcBtcLiveChecked(): Promise<WbtcBtcPrice> {
   const sources: Array<{ name: string; fn: () => Promise<number | null> }> = [
     { name: "coingecko", fn: tryCoinGeckoWbtcBtc },
     { name: "binance", fn: tryBinanceWbtcBtc }
   ];
+  const settled = await Promise.allSettled(
+    sources.map(async ({ name, fn }) => ({ name, price: await fn() }))
+  );
+  const valid: Array<{ name: string; price: number }> = [];
   const errors: string[] = [];
-  for (const { name, fn } of sources) {
-    try {
-      const p = await fn();
-      if (p != null) return p;
+  for (const result of settled) {
+    if (result.status === "rejected") {
+      errors.push(
+        result.reason instanceof Error
+          ? result.reason.message
+          : String(result.reason)
+      );
+      continue;
+    }
+    const { name, price } = result.value;
+    if (price == null) {
       errors.push(`${name}: invalid payload`);
-    } catch (e) {
-      errors.push(`${name}: ${e instanceof Error ? e.message : String(e)}`);
+      continue;
+    }
+    valid.push({ name, price });
+  }
+  if (valid.length < 2) {
+    throw new Error(
+      `need two independent WBTC/BTC sources, got ${valid.length} (${errors.join("; ")})`
+    );
+  }
+
+  const primary = valid.find((v) => v.name === "coingecko") ?? valid[0];
+  for (const other of valid) {
+    if (other.name === primary.name) continue;
+    const diffBps =
+      (Math.abs(other.price - primary.price) / primary.price) * 10000;
+    if (diffBps > WBTC_BTC_SOURCE_SANITY_BPS) {
+      throw new Error(
+        `WBTC/BTC sources disagree: ${primary.name}=${primary.price}, ${other.name}=${other.price} (${diffBps.toFixed(1)}bps > ${WBTC_BTC_SOURCE_SANITY_BPS}bps)`
+      );
     }
   }
-  throw new Error(errors.join("; "));
+  return {
+    price8: BigInt(Math.round(primary.price * 1e8)),
+    source: valid.map((v) => v.name).sort().join("+")
+  };
+}
+
+function checkPegPrice(value: WbtcBtcPrice): WbtcBtcPrice {
+  return { ...value, price8: checkPeg(value.price8) };
+}
+
+/** Live WBTC/BTC price with source/freshness metadata. */
+export async function getWbtcBtcPrice(): Promise<{
+  price8: bigint;
+  source: string;
+  ageMs: number;
+  stale: boolean;
+}> {
+  try {
+    const result = await fetchWithFreshness<WbtcBtcPrice>({
+      cached,
+      setCached: (entry) => {
+        cached = entry;
+      },
+      sources: [
+        {
+          name: "coingecko+binance",
+          fetch: fetchWbtcBtcLiveChecked
+        }
+      ],
+      freshMs: CACHE_FRESH_MS,
+      maxStaleMs: CACHE_MAX_STALE_MS,
+      alertTitle: "WBTC/BTC price source down — serving stale checked price",
+      unavailableMessage: (reason) =>
+        `WBTC/BTC price unavailable (${reason}) — refusing to quote`,
+      validate: checkPegPrice
+    });
+    return {
+      price8: result.value.price8,
+      source: result.value.source,
+      ageMs: result.ageMs,
+      stale: result.stale
+    };
+  } catch (e) {
+    if (e instanceof DepegError) throw e;
+    throw new QuoteUnavailableError(
+      e instanceof Error ? e.message : String(e)
+    );
+  }
 }
 
 /** Live WBTC/BTC price, 8dp-scaled bigint. Throws QuoteUnavailableError/DepegError. */
 export async function getWbtcBtcPrice8(): Promise<bigint> {
-  const now = Date.now();
-  if (cached && now - cached.at < CACHE_FRESH_MS)
-    return checkPeg(cached.price8);
-  try {
-    const p = await fetchWbtcBtcLive();
-    cached = { price8: BigInt(Math.round(p * 1e8)), at: now };
-    return checkPeg(cached.price8);
-  } catch (e) {
-    if (cached && now - cached.at < CACHE_MAX_STALE_MS) {
-      void alert("warn", "WBTC/BTC price source down — serving stale price", {
-        ageMs: now - cached.at,
-        reason: e instanceof Error ? e.message : String(e),
-      });
-      return checkPeg(cached.price8);
-    }
-    throw new QuoteUnavailableError(
-      `WBTC/BTC price unavailable (${e instanceof Error ? e.message : e}) — refusing to quote`
-    );
-  }
+  return (await getWbtcBtcPrice()).price8;
 }
 
 function checkPeg(price8: bigint): bigint {
@@ -143,30 +225,40 @@ export interface QuoteResult {
   inUnits: bigint; // input, 8dp base units
   outUnits: bigint; // output after price + fee, 8dp base units
   price8: bigint; // WBTC/BTC used, 8dp
+  source: string;
+  ageMs: number;
+  stale: boolean;
   feeBps: number;
   expiresAt: number; // unix seconds — quote validity (TTL), not the order window
 }
 
 /** wbtc → cbtc : out = in × P × (1 − fee). */
 export async function quoteWbtcToCbtc(wbtcUnits: bigint): Promise<QuoteResult> {
-  const price8 = await getWbtcBtcPrice8();
-  const gross = quoteGrossOutUnits("evm-to-canton", wbtcUnits, price8);
-  return finish(wbtcUnits, gross, price8);
+  const price = await getWbtcBtcPrice();
+  const gross = quoteGrossOutUnits("evm-to-canton", wbtcUnits, price.price8);
+  return finish(wbtcUnits, gross, price);
 }
 
 /** cbtc → wbtc : out = in ÷ P × (1 − fee). */
 export async function quoteCbtcToWbtc(cbtcUnits: bigint): Promise<QuoteResult> {
-  const price8 = await getWbtcBtcPrice8();
-  const gross = quoteGrossOutUnits("canton-to-evm", cbtcUnits, price8);
-  return finish(cbtcUnits, gross, price8);
+  const price = await getWbtcBtcPrice();
+  const gross = quoteGrossOutUnits("canton-to-evm", cbtcUnits, price.price8);
+  return finish(cbtcUnits, gross, price);
 }
 
-function finish(inUnits: bigint, gross: bigint, price8: bigint): QuoteResult {
+function finish(
+  inUnits: bigint,
+  gross: bigint,
+  price: Awaited<ReturnType<typeof getWbtcBtcPrice>>
+): QuoteResult {
   const outUnits = applyOutputFee(gross, BRIDGE_FEE_BPS);
   return {
     inUnits,
     outUnits,
-    price8,
+    price8: price.price8,
+    source: price.source,
+    ageMs: price.ageMs,
+    stale: price.stale,
     feeBps: BRIDGE_FEE_BPS,
     expiresAt: Math.floor(Date.now() / 1000) + QUOTE_TTL_SECONDS
   };
@@ -180,6 +272,7 @@ function finish(inUnits: bigint, gross: bigint, price8: bigint): QuoteResult {
  *  reclaim the fee as a standing skim against solver float. 30bps comfortably
  *  covers 60s of normal drift while keeping that skim near zero. */
 const ORDER_AMOUNT_TOLERANCE_BPS = 30;
+export const HTLC_SETTLEMENT_SLIPPAGE_BPS = 50;
 
 /**
  * SERVER-SIDE order-amount validation (SECURITY): the user submits cbtcAmount +
@@ -211,6 +304,49 @@ export async function assertOrderAmounts(
   if (claimedOut > maxOut) {
     throw new Error(
       `order output ${claimedOut} exceeds a fresh quote ${fresh.outUnits} (+${ORDER_AMOUNT_TOLERANCE_BPS}bps) — re-quote and retry`
+    );
+  }
+}
+
+/**
+ * Re-quote immediately before any solver value leg is locked or delivered. The
+ * persisted quoted output amount is the user's floor. If the live checked quote is
+ * below that floor, the order must not progress; existing timelock refund paths
+ * unwind the user's locked leg instead of filling an unsafe stale quote.
+ */
+export async function assertHtlcSettlementQuoteFresh(params: {
+  direction: "evm-to-canton" | "canton-to-evm";
+  wbtcAmount?: string;
+  cbtcAmount?: string;
+  minOutUnits?: bigint;
+}): Promise<void> {
+  if (!params.wbtcAmount || !params.cbtcAmount) {
+    throw new Error("order missing HTLC quote amounts");
+  }
+  const wbtcUnits = BigInt(params.wbtcAmount);
+  const cbtcUnits = toBaseUnits(params.cbtcAmount, 8);
+  const reverse = params.direction === "canton-to-evm";
+  const inUnits = reverse ? cbtcUnits : wbtcUnits;
+  const promisedOut = reverse ? wbtcUnits : cbtcUnits;
+  if (inUnits <= 0n || promisedOut <= 0n) {
+    throw new Error("order amounts must be > 0");
+  }
+
+  const fresh = reverse
+    ? await quoteCbtcToWbtc(inUnits)
+    : await quoteWbtcToCbtc(inUnits);
+  const minOut = params.minOutUnits ?? promisedOut;
+  if (fresh.outUnits < minOut) {
+    throw new Error(
+      `fresh HTLC quote ${fresh.outUnits} below minOut ${minOut} — quote expired, refund instead`
+    );
+  }
+  const settlementFloor =
+    promisedOut -
+    (promisedOut * BigInt(HTLC_SETTLEMENT_SLIPPAGE_BPS)) / 10000n;
+  if (fresh.outUnits < settlementFloor) {
+    throw new Error(
+      `fresh HTLC quote ${fresh.outUnits} below settlement floor ${settlementFloor}`
     );
   }
 }

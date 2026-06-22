@@ -23,12 +23,15 @@ import {
   networkFeeReceiverParty,
   revalidateOrderNetworkFee
 } from "./canton-network-fee";
-import { bestEffortRecordNetworkFeeCollected } from "./network-fee-ledger";
+import {
+  recordNetworkFeeCollected
+} from "./network-fee-ledger";
 import {
   holdingsForSwapAsset
 } from "./canton-swap-holdings";
 import {
   fillLoopSwap,
+  ensureManagedUserLegOffer,
   prepareLoopUserLeg,
   prepareLoopUserLegWithCids,
   rejectUserLegOffer,
@@ -38,8 +41,7 @@ import {
   resolveUserLegEvidence,
   settleManagedSwap,
   listPendingOffersStrict,
-  userReceivedCounterLeg,
-  verifyCounterLegReceipt
+  verifyCounterLegReceiptProof
 } from "./canton-swap-settle";
 import { formatSettlementError } from "./swap-settlement-messages";
 import {
@@ -56,6 +58,7 @@ import { isCantonSwapActive } from "./canton-swap-types";
 import { expectedCantonSwapParty } from "./htlc-auth";
 import { swapParty } from "./canton-swap-types";
 import { NETWORK } from "./constants";
+import { assertSwapPayAmountLimit } from "./swap-amount-limits";
 import { randomUUID } from "crypto";
 
 function isUniqueConstraintViolation(err: unknown): boolean {
@@ -84,6 +87,7 @@ export class CantonSwapService {
         "CANTON_SWAP_SETTLEMENT_PARTY not configured — required for C2C swaps"
       );
     }
+    assertSwapPayAmountLimit(params.fromAsset, params.inAmount);
     await assertMvpOrderAmounts(
       params.fromAsset,
       params.toAsset,
@@ -118,7 +122,8 @@ export class CantonSwapService {
       userParty: params.userParty,
       solverParty: vaultParty,
       settlementParty: vaultParty,
-      walletMode: params.walletMode
+      walletMode: params.walletMode,
+      floatReserved: false
     };
     let incoming: Omit<CantonSwapOrder, "status" | "createdAt"> = baseIncoming;
     if (isNetworkFeeEnabled() && params.walletMode === "managed") {
@@ -163,13 +168,18 @@ export class CantonSwapService {
       }
       return order;
     }
-    await this.assertSwapFloat(
-      incoming.solverParty,
-      incoming.toAsset,
-      incoming.outAmount
-    );
-    await this.store.put(order);
-    return order;
+    try {
+      await this.store.insert(order);
+      return order;
+    } catch (e) {
+      if (!isUniqueConstraintViolation(e)) throw e;
+      const winner = await this.store.get(order.id);
+      const resolved = resolveCreateCantonSwapOrder(winner, incoming, now);
+      if (!resolved.isNew && isCantonSwapActive(resolved.order)) {
+        return resolved.order;
+      }
+      throw new Error("order id already exists with different or inactive terms");
+    }
   }
 
   /** Managed only: create intent + vault settle in one server request (no client race window). */
@@ -185,29 +195,53 @@ export class CantonSwapService {
     return this.settleManaged(order.id);
   }
 
-  private async assertSwapFloat(
+  private async currentSwapFloatUnits(
     vault: string,
-    toAsset: CantonSwapMvpAssetId,
-    outAmount: string
-  ): Promise<void> {
+    toAsset: CantonSwapMvpAssetId
+  ): Promise<bigint> {
     const counterHoldings = await holdingsForSwapAsset(vault, toAsset);
     const counterAsset = getSwapAsset(toAsset);
-    const need = toBaseUnits(outAmount, counterAsset.decimals);
     let float = 0n;
     for (const h of counterHoldings) {
       const amt = h.payload?.amount ?? "0";
       float += toBaseUnitsFloor(String(amt), counterAsset.decimals);
     }
+    return float;
+  }
 
-    const reservedStr = await this.store.sumReservedOut(vault, toAsset);
-    const reserved = toBaseUnitsFloor(reservedStr, counterAsset.decimals);
-    const available = float > reserved ? float - reserved : 0n;
-
-    if (available < need) {
+  private async assertCurrentSwapFloat(
+    o: CantonSwapOrder
+  ): Promise<void> {
+    const asset = getSwapAsset(o.toAsset);
+    const need = toBaseUnits(o.outAmount, asset.decimals);
+    const current = await this.currentSwapFloatUnits(swapParty(o), o.toAsset);
+    if (current < need) {
       throw new Error(
-        `swap vault insufficient ${toAsset} float (need ${outAmount}, ${fromBaseUnits(available, counterAsset.decimals)} available after reservations)`
+        `swap vault insufficient ${o.toAsset} float (need ${o.outAmount}, ` +
+          `${fromBaseUnits(current, asset.decimals)} currently spendable)`
       );
     }
+  }
+
+  private async reserveSwapFloat(
+    o: CantonSwapOrder,
+    expectedStatus: CantonSwapStatus,
+    nextStatus: CantonSwapStatus,
+    evidence?: { userLegOfferCid?: string; userLegSubmitUpdateId?: string }
+  ): Promise<CantonSwapOrder> {
+    const floatUnits = await this.currentSwapFloatUnits(swapParty(o), o.toAsset);
+    await this.store.reserveFloat({
+      orderId: o.id,
+      expectedStatus,
+      nextStatus,
+      floatUnits,
+      ...evidence
+    });
+    const reserved = await this.must(o.id);
+    if (reserved.status !== nextStatus || !reserved.floatReserved) {
+      throw new Error("swap float reservation committed without expected order state");
+    }
+    return reserved;
   }
 
   private async enforceSettlementQuote(o: CantonSwapOrder): Promise<void> {
@@ -253,6 +287,9 @@ export class CantonSwapService {
     }
     if (o.status === "filled") return o;
     if (o.status === "settling") {
+      if (!o.floatReserved && !o.settlementUpdateId) {
+        o = await this.reserveSwapFloat(o, "settling", "settling");
+      }
       return this.completeSettling(o);
     }
     if (o.status !== "open") {
@@ -260,14 +297,13 @@ export class CantonSwapService {
     }
 
     await this.enforceSettlementQuote(o);
-    await this.assertSwapFloat(swapParty(o), o.toAsset, o.outAmount);
-    o.status = "settling";
-    const moved = await this.transition(o, "open");
-    if (!moved) {
+    try {
+      o = await this.reserveSwapFloat(o, "open", "settling");
+    } catch (e) {
       o = await this.must(id);
       if (o.status === "filled") return o;
       if (o.status === "settling") return this.completeSettling(o);
-      throw new Error(`cannot settle from status ${o.status}`);
+      throw e;
     }
 
     return this.completeSettling(o);
@@ -287,30 +323,57 @@ export class CantonSwapService {
         feeEstimate = await revalidateOrderNetworkFee(o);
         o.networkFeeCc = feeEstimate.feeCc;
         o.networkFeeExpiresAt = o.quoteExpiresAt;
-        await this.store.put(o);
+        if (!(await this.store.putIfStatus(o, "settling"))) {
+          o = await this.must(o.id);
+        }
+      }
+      if (!o.userLegOfferCid) {
+        const created = await ensureManagedUserLegOffer(o);
+        o.userLegOfferCid = created.userLegOfferCid;
+        if (!(await this.transition(o, "settling"))) {
+          o = await this.must(o.id);
+          if (!o.userLegOfferCid) {
+            throw new Error("managed user offer created but could not be persisted");
+          }
+        }
       }
       const result = await settleManagedSwap(o);
+      if (result.networkFeeCollected) {
+        o.networkFeeSettlementUpdateId = result.updateId;
+        o.networkFeeAccountingPending = true;
+      }
       this.applyManagedFillResult(o, result);
       if (!(await this.transition(o, "settling"))) {
         const fresh = await this.must(o.id);
         if (fresh.status === "filled") return fresh;
-        if (o.status === "filled") {
-          await this.store.put(o);
-          return o;
-        }
+        return fresh;
       }
       if (result.networkFeeCollected && feeEstimate) {
-        await bestEffortRecordNetworkFeeCollected({
-          orderId: o.id,
-          orderKind: "c2c",
-          userParty: o.userParty,
-          feeCc: result.networkFeeCollected.feeCc,
-          feeUsd: feeEstimate.feeUsd,
-          trafficBytes: feeEstimate.trafficBytes,
-          networkFeeSource: feeEstimate.networkFeeSource,
-          receiverParty: networkFeeReceiverParty(),
-          settlementUpdateId: result.updateId
-        });
+        try {
+          await recordNetworkFeeCollected({
+            orderId: o.id,
+            orderKind: "c2c",
+            userParty: o.userParty,
+            feeCc: result.networkFeeCollected.feeCc,
+            feeUsd: feeEstimate.feeUsd,
+            trafficBytes: feeEstimate.trafficBytes,
+            networkFeeSource: feeEstimate.networkFeeSource,
+            receiverParty: networkFeeReceiverParty(),
+            settlementUpdateId: result.updateId
+          });
+          const fresh = await this.must(o.id);
+          if (fresh.networkFeeAccountingPending) {
+            fresh.networkFeeAccountingPending = false;
+            await this.store.putIfStatus(fresh, fresh.status);
+          }
+        } catch (accountingError) {
+          console.warn(
+            `[canton-swap] fee accounting deferred ${o.id.slice(0, 12)}:`,
+            accountingError instanceof Error
+              ? accountingError.message
+              : accountingError
+          );
+        }
       }
       return o;
     } catch (e) {
@@ -325,10 +388,26 @@ export class CantonSwapService {
       if (msg.includes("submission in flight")) {
         o.status = "settling";
         o.failureReason = "Settle still processing on ledger — retry shortly";
-        await this.store.put(o);
+        await this.store.putIfStatus(o, "settling");
         throw e;
       }
+      if (o.userLegOfferCid && !o.settlementUpdateId) {
+        try {
+          await rejectUserLegOffer(o);
+        } catch (rejectError) {
+          o.status = "settling";
+          o.failureReason =
+            `Settle failed and user sell offer rejection failed: ${
+              rejectError instanceof Error
+                ? rejectError.message
+                : String(rejectError)
+            }`;
+          await this.store.putIfStatus(o, "settling");
+          throw e;
+        }
+      }
       o.status = "failed";
+      o.floatReserved = false;
       o.failureReason = msg;
       await this.transition(o, "settling");
       throw e;
@@ -343,7 +422,7 @@ export class CantonSwapService {
     const priorStatus = o.status;
     this.applyManagedFillResult(o, result);
     if (!(await this.transition(o, priorStatus))) {
-      await this.store.put(o);
+      return this.must(o.id);
     }
     // P2a: do NOT record fee collection on the repair path. repairManagedFillFromLedger
     // verifies only the SWAP legs of the recovered tx — it does NOT prove a fee leg was
@@ -435,26 +514,33 @@ export class CantonSwapService {
       offerCidHint: params?.offerCid,
       submitUpdateId: params?.submitUpdateId
     });
-    await this.assertSwapFloat(swapParty(o), o.toAsset, o.outAmount);
-    o.userLegOfferCid = resolved.userLegOfferCid;
-    o.userLegSubmitUpdateId = resolved.userLegSubmitUpdateId ?? params?.submitUpdateId;
-    o.status = "user_locked";
-    o.failureReason = undefined;
     try {
-      if (!(await this.transition(o, fromStatus))) {
-        const fresh = await this.must(id);
-        if (fresh.status === "user_locked") {
-          return fresh;
-        }
-        throw new Error(`cannot confirm user leg from status ${fresh.status}`);
-      }
+      return await this.reserveSwapFloat(o, fromStatus, "user_locked", {
+        userLegOfferCid: resolved.userLegOfferCid,
+        userLegSubmitUpdateId:
+          resolved.userLegSubmitUpdateId ?? params?.submitUpdateId
+      });
     } catch (e) {
       if (isUniqueConstraintViolation(e)) {
         throw new Error("user leg offer already reserved by another order");
       }
+      const fresh = await this.must(id);
+      if (fresh.status === "user_locked") return fresh;
+      try {
+        await rejectUserLegOffer({
+          ...o,
+          userLegOfferCid: resolved.userLegOfferCid,
+          userLegSubmitUpdateId:
+            resolved.userLegSubmitUpdateId ?? params?.submitUpdateId
+        });
+      } catch (rejectError) {
+        console.warn(
+          `[canton-swap] failed to reject unreserved user offer ${resolved.userLegOfferCid.slice(0, 16)}…:`,
+          rejectError instanceof Error ? rejectError.message : rejectError
+        );
+      }
       throw e;
     }
-    return o;
   }
 
   private async reservedUserLegCids(excludeOrderId: string): Promise<Set<string>> {
@@ -508,7 +594,10 @@ export class CantonSwapService {
       return o;
     }
     await this.enforceSettlementQuote(o);
-    await this.assertSwapFloat(swapParty(o), o.toAsset, o.outAmount);
+    if (!o.floatReserved && !o.settlementUpdateId) {
+      o = await this.reserveSwapFloat(o, o.status, o.status);
+    }
+    await this.assertCurrentSwapFloat(o);
 
     if (o.status === "user_locked") {
       o.status = "filling";
@@ -578,6 +667,7 @@ export class CantonSwapService {
         }
       }
       o.status = "failed";
+      o.floatReserved = false;
       o.failureReason = formatSettlementError(msg);
       await this.transition(o, "filling");
       throw e;
@@ -590,6 +680,7 @@ export class CantonSwapService {
       updateId: string;
       counterLegOfferCid?: string;
       counterLegPendingAccept: boolean;
+      counterLegCreatedOffset?: number;
     }
   ): void {
     if (!result.updateId) {
@@ -597,7 +688,12 @@ export class CantonSwapService {
     }
     o.settlementUpdateId = result.updateId;
     o.counterLegOfferCid = result.counterLegOfferCid ?? o.counterLegOfferCid;
+    o.counterLegCreatedOffset = result.counterLegPendingAccept
+      ? result.counterLegCreatedOffset
+      : undefined;
+    o.counterReceiptUpdateId = undefined;
     o.counterPendingClearedAt = undefined;
+    o.floatReserved = false;
     o.status = result.counterLegPendingAccept ? "user_locked" : "filled";
     if (result.counterLegPendingAccept) {
       o.failureReason =
@@ -613,6 +709,7 @@ export class CantonSwapService {
       updateId: string;
       counterLegOfferCid?: string;
       counterLegPendingAccept: boolean;
+      counterLegCreatedOffset?: number;
     }
   ): void {
     if (!result.updateId) {
@@ -620,6 +717,11 @@ export class CantonSwapService {
     }
     o.settlementUpdateId = result.updateId;
     o.counterLegOfferCid = result.counterLegOfferCid ?? o.counterLegOfferCid;
+    o.counterLegCreatedOffset = result.counterLegPendingAccept
+      ? result.counterLegCreatedOffset
+      : undefined;
+    o.counterReceiptUpdateId = undefined;
+    o.floatReserved = false;
     if (result.counterLegPendingAccept) {
       o.status = "settling";
       o.failureReason =
@@ -699,13 +801,17 @@ export class CantonSwapService {
           if (
             o.status === "settling" &&
             o.settlementUpdateId &&
-            o.counterLegOfferCid &&
-            (await userReceivedCounterLeg(o))
+            o.counterLegOfferCid
           ) {
-            o.status = "filled";
-            o.failureReason = undefined;
-            if (await this.transition(o, "settling")) {
-              n++;
+            const proof = await verifyCounterLegReceiptProof(o);
+            if (proof.status === "received") {
+              o.counterReceiptUpdateId =
+                proof.updateId ?? o.counterReceiptUpdateId;
+              o.status = "filled";
+              o.failureReason = undefined;
+              if (await this.transition(o, "settling")) {
+                n++;
+              }
             }
           }
         } catch {
@@ -728,16 +834,18 @@ export class CantonSwapService {
       if (pending.some((p) => p.contractId === o.counterLegOfferCid)) {
         if (o.counterPendingClearedAt !== undefined) {
           o.counterPendingClearedAt = undefined;
-          await this.store.put(o);
+          await this.store.putIfStatus(o, "user_locked");
         }
         continue;
       }
 
-      const receipt = await verifyCounterLegReceipt(o, {
+      const receiptProof = await verifyCounterLegReceiptProof(o, {
         maxAttempts: 8,
         pollMs: 1500
       });
-      if (receipt === "received") {
+      if (receiptProof.status === "received") {
+        o.counterReceiptUpdateId =
+          receiptProof.updateId ?? o.counterReceiptUpdateId;
         o.status = "filled";
         o.failureReason = undefined;
         o.counterPendingClearedAt = undefined;
@@ -746,11 +854,17 @@ export class CantonSwapService {
         }
         continue;
       }
-      if (receipt === "pending") {
+      if (receiptProof.status === "pending") {
         if (o.counterPendingClearedAt !== undefined) {
           o.counterPendingClearedAt = undefined;
-          await this.store.put(o);
+          await this.store.putIfStatus(o, "user_locked");
         }
+        continue;
+      }
+      if (receiptProof.status === "unknown") {
+        o.failureReason =
+          "Counter receipt proof incomplete — reissue blocked until creation offset is recovered";
+        await this.store.putIfStatus(o, "user_locked");
         continue;
       }
 
@@ -759,7 +873,7 @@ export class CantonSwapService {
         o.counterPendingClearedAt = now;
         o.failureReason =
           "Verifying counter accept on ledger — wait before reissue";
-        await this.store.put(o);
+        await this.store.putIfStatus(o, "user_locked");
         continue;
       }
       if (!counterReissueCooldownElapsed(o.counterPendingClearedAt, now)) {
@@ -776,11 +890,13 @@ export class CantonSwapService {
         continue;
       }
 
-      const recheck = await verifyCounterLegReceipt(fresh, {
+      const recheck = await verifyCounterLegReceiptProof(fresh, {
         maxAttempts: 4,
         pollMs: 1000
       });
-      if (recheck === "received") {
+      if (recheck.status === "received") {
+        fresh.counterReceiptUpdateId =
+          recheck.updateId ?? fresh.counterReceiptUpdateId;
         fresh.status = "filled";
         fresh.failureReason = undefined;
         fresh.counterPendingClearedAt = undefined;
@@ -789,9 +905,15 @@ export class CantonSwapService {
         }
         continue;
       }
-      if (recheck === "pending") {
+      if (recheck.status === "pending") {
         fresh.counterPendingClearedAt = undefined;
-        await this.store.put(fresh);
+        await this.store.putIfStatus(fresh, "user_locked");
+        continue;
+      }
+      if (recheck.status === "unknown") {
+        fresh.failureReason =
+          "Counter receipt proof incomplete — refusing unsafe reissue";
+        await this.store.putIfStatus(fresh, "user_locked");
         continue;
       }
 
@@ -805,6 +927,10 @@ export class CantonSwapService {
         const result = await reissueLoopCounterLeg(fresh);
         fresh.counterReissueAttempt = result.counterReissueAttempt;
         fresh.counterLegOfferCid = result.counterLegOfferCid ?? fresh.counterLegOfferCid;
+        fresh.counterLegCreatedOffset = result.counterLegPendingAccept
+          ? result.counterLegCreatedOffset
+          : undefined;
+        fresh.counterReceiptUpdateId = undefined;
         fresh.counterPendingClearedAt = undefined;
         if (result.counterLegPendingAccept) {
           fresh.failureReason =
@@ -854,9 +980,13 @@ export class CantonSwapService {
               `[canton-swap] reject on vault migration failed ${o.id.slice(0, 12)}:`,
               e instanceof Error ? e.message : e
             );
+            // Keep the order active so the next sweep retries. Marking it terminal
+            // here would strand the user's still-pending sell offer.
+            continue;
           }
           const priorStatus = o.status;
           o.status = "expired";
+          o.floatReserved = false;
           o.failureReason = "order superseded — settlement vault migration";
           if (await this.transition(o, priorStatus)) {
             n++;
@@ -866,11 +996,7 @@ export class CantonSwapService {
         if (isLoopFillPendingCounterAccept(o)) continue;
         if (isLoopFillInFlight(o)) continue;
         if (o.status === "failed") {
-          if (
-            o.walletMode === "loop" &&
-            o.userLegOfferCid &&
-            !o.settlementUpdateId
-          ) {
+          if (o.userLegOfferCid && !o.settlementUpdateId) {
             try {
               await rejectUserLegOffer(o);
             } catch (e) {
@@ -878,6 +1004,7 @@ export class CantonSwapService {
                 `[canton-swap] reject on failed expire ${o.id.slice(0, 12)}:`,
                 e instanceof Error ? e.message : e
               );
+              continue;
             }
           }
           if (!isOrderExpired(o, now)) continue;
@@ -925,8 +1052,9 @@ export class CantonSwapService {
 
         try {
           if (
-            (priorStatus === "user_locked" || priorStatus === "filling") &&
-            o.walletMode === "loop" &&
+            (priorStatus === "user_locked" ||
+              priorStatus === "filling" ||
+              priorStatus === "settling") &&
             o.userLegOfferCid &&
             !o.settlementUpdateId
           ) {
@@ -937,9 +1065,11 @@ export class CantonSwapService {
             `[canton-swap] reject on expire failed ${o.id.slice(0, 12)}:`,
             e instanceof Error ? e.message : e
           );
+          continue;
         }
 
         o.status = "expired";
+        o.floatReserved = false;
         o.failureReason =
           o.walletMode === "loop" ? "order expired" : "quote expired";
         if (await this.transition(o, priorStatus)) {
@@ -956,6 +1086,7 @@ export class CantonSwapService {
       throw new Error(`cannot cancel from status ${o.status}`);
     }
     o.status = "cancelled";
+    o.floatReserved = false;
     o.failureReason = undefined;
     if (!(await this.transition(o, "open"))) {
       const fresh = await this.must(id);
@@ -1030,10 +1161,39 @@ export class CantonSwapService {
       );
     }
 
-    if (!(await userReceivedCounterLeg(o))) {
+    const receiptProof = await verifyCounterLegReceiptProof(o, {
+      maxAttempts: 5,
+      pollMs: 1500
+    });
+    if (receiptProof.status !== "received") {
       throw new Error(
         "Counter leg accept not verified — complete Loop accept or wait for settlement"
       );
+    }
+    o.counterReceiptUpdateId =
+      receiptProof.updateId ?? o.counterReceiptUpdateId;
+
+    // Record before the terminal transition. This write is deliberately strict:
+    // if accounting storage is unavailable, leave the order re-entrant so the next
+    // markCounterAccepted retry performs the idempotent write before setting filled.
+    if (
+      o.walletMode === "managed" &&
+      isNetworkFeeEnabled() &&
+      o.networkFeeCc &&
+      Number.parseFloat(o.networkFeeCc) > 0 &&
+      o.settlementUpdateId
+    ) {
+      await recordNetworkFeeCollected({
+        orderId: o.id,
+        orderKind: "c2c",
+        userParty: o.userParty,
+        feeCc: o.networkFeeCc,
+        networkFeeSource: "settle",
+        receiverParty: networkFeeReceiverParty(),
+        settlementUpdateId: o.settlementUpdateId
+      });
+      o.networkFeeAccountingPending = false;
+      o.networkFeeSettlementUpdateId = o.settlementUpdateId;
     }
 
     o.status = "filled";
@@ -1045,6 +1205,37 @@ export class CantonSwapService {
       throw new Error(`cannot mark filled from status ${fresh.status}`);
     }
     return o;
+  }
+
+  /** Durable fee-accounting outbox reconciliation. */
+  async reconcileNetworkFeeAccounting(): Promise<number> {
+    const pending = await this.store.pendingNetworkFeeAccounting();
+    let count = 0;
+    for (const o of pending) {
+      if (
+        !o.networkFeeCc ||
+        !o.networkFeeSettlementUpdateId ||
+        Number.parseFloat(o.networkFeeCc) <= 0
+      ) {
+        continue;
+      }
+      try {
+        await recordNetworkFeeCollected({
+          orderId: o.id,
+          orderKind: "c2c",
+          userParty: o.userParty,
+          feeCc: o.networkFeeCc,
+          networkFeeSource: "reconciled",
+          receiverParty: networkFeeReceiverParty(),
+          settlementUpdateId: o.networkFeeSettlementUpdateId
+        });
+        o.networkFeeAccountingPending = false;
+        if (await this.store.putIfStatus(o, o.status)) count++;
+      } catch {
+        // Keep pending for the next daemon pass.
+      }
+    }
+    return count;
   }
 
   async listByStatus(status: CantonSwapOrder["status"]): Promise<CantonSwapOrder[]> {

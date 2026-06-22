@@ -11,7 +11,6 @@ import {
   encodeClaim,
   encodeRetake
 } from "./htlc-evm-encode";
-import { payLoopHtlcNetworkFeeIfNeeded } from "./loop-htlc-fee-client";
 import { getBrowserEvmProvider, waitForEvmReceipt } from "./evm-wait-receipt";
 
 export interface HtlcOrderInput {
@@ -149,29 +148,7 @@ export const htlcApi = {
     disclosedContracts: unknown[];
     synchronizerId: string;
   }> => jpost(`/api/htlc/${id}/prepare-lock-loop`, { holdingCids }),
-  /** Loop forward — fee-only CC submit before claim-counter. */
-  prepareNetworkFee: (
-    id: string,
-    ccHoldingCids: string[]
-  ): Promise<{
-    command: unknown;
-    disclosedContracts: unknown[];
-    synchronizerId: string;
-    networkFeeCc: string;
-    networkFeePreapprovalCid: string;
-  }> => jpost(`/api/htlc/${id}/prepare-network-fee`, { ccHoldingCids }),
-  recordNetworkFee: (id: string, settlementUpdateId: string) =>
-    jpost(`/api/htlc/${id}/record-network-fee`, {
-      settlementUpdateId
-    }),
   confirmLockLoop: (id: string) => jpost(`/api/htlc/${id}/confirm-lock-loop`),
-  prepareWithdrawLoop: (
-    id: string
-  ): Promise<{
-    command: unknown;
-    disclosedContracts: unknown[];
-    synchronizerId: string;
-  }> => jpost(`/api/htlc/${id}/prepare-withdraw-loop`),
   lockCounter: (id: string) => jpost(`/api/htlc/${id}/lock-counter`),
   // Loop reveal+deliver. delivered=true → the CBTC auto-accepted (preapproval) and
   // there is NOTHING to accept — skip the wallet popup entirely.
@@ -348,23 +325,29 @@ export async function claimSwap(opts: {
     await htlcApi.claimManaged(order.id, preimage);
     return {};
   }
-  // loop buyer: fee → reveal-first → deliver (auto-accept) or sign a standard accept.
+  // Loop buyer: reveal-first → deliver (auto-accept) or sign a standard accept.
   const loop = opts.loop;
   if (!loop) throw new Error("Connect your Loop wallet to accept your CBTC.");
-  const { order: feeOrder } = await htlcApi.getOrder(order.id);
-  await payLoopHtlcNetworkFeeIfNeeded({
-    orderId: order.id,
-    direction: "evm-to-canton",
-    provider: loop,
-    networkFeeCollected: (
-      feeOrder as { networkFeeCollected?: boolean } | undefined
-    )?.networkFeeCollected
-  });
   const reveal = await htlcApi.claimCounter(order.id, preimage);
   if (reveal.delivered) {
-    await htlcApi
-      .recordClaim(order.id, preimage, reveal.updateId)
-      .catch(() => {});
+    // CBTC delivered + secret revealed on-ledger. Persist the preimage so the
+    // solver's daemon can claim its WBTC. Don't silently swallow a failure — retry
+    // with backoff; the daemon also reads revealedPreimage server-side, but a dropped
+    // record shouldn't be invisible. (Idempotent: recordClaim re-records the same id.)
+    let recorded = false;
+    for (let i = 0; i < 4 && !recorded; i++) {
+      try {
+        await htlcApi.recordClaim(order.id, preimage, reveal.updateId);
+        recorded = true;
+      } catch {
+        await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+      }
+    }
+    if (!recorded) {
+      console.error(
+        `[htlc] claim ${order.id}: CBTC delivered but recordClaim failed after retries — solver will recover from on-ledger revealedPreimage; check Orders.`
+      );
+    }
     return {};
   }
   const { command, disclosedContracts, synchronizerId } =

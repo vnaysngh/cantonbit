@@ -36,13 +36,23 @@ function rowToOrder(r: Record<string, unknown>): SwapOrder {
     htlcBlob: (r.htlc_blob as string) ?? undefined,
     counterTransferOfferCid: (r.counter_transfer_offer_cid as string) ?? undefined,
     counterTransferUpdateId: (r.counter_transfer_update_id as string) ?? undefined,
+    solverCustodyBaselineCids: Array.isArray(r.solver_custody_baseline_cids)
+      ? (r.solver_custody_baseline_cids as string[])
+      : undefined,
+    evmFloatReserved: Boolean(r.evm_float_reserved),
     networkFeeCc: (r.network_fee_cc as string) ?? undefined,
     networkFeeExpiresAt: r.network_fee_expires_at
       ? Math.floor(new Date(r.network_fee_expires_at as string).getTime() / 1000)
       : undefined,
     networkFeePreapprovalCid:
       (r.network_fee_preapproval_cid as string) ?? undefined,
+    networkFeeSettlementUpdateId:
+      (r.network_fee_settlement_update_id as string) ?? undefined,
+    networkFeeAccountingPending: Boolean(r.network_fee_accounting_pending),
     createdAt: r.created_at ? Math.floor(new Date(r.created_at as string).getTime() / 1000) : 0,
+    updatedAt: r.updated_at
+      ? Math.floor(new Date(r.updated_at as string).getTime() / 1000)
+      : undefined,
   };
 }
 
@@ -71,22 +81,68 @@ function orderToRow(o: SwapOrder): Record<string, unknown> {
     htlc_blob: o.htlcBlob ?? null,
     counter_transfer_offer_cid: o.counterTransferOfferCid ?? null,
     counter_transfer_update_id: o.counterTransferUpdateId ?? null,
+    solver_custody_baseline_cids: o.solverCustodyBaselineCids ?? null,
+    evm_float_reserved: o.evmFloatReserved ?? false,
     network_fee_cc: o.networkFeeCc ?? null,
     network_fee_expires_at: o.networkFeeExpiresAt
       ? new Date(o.networkFeeExpiresAt * 1000).toISOString()
       : null,
     network_fee_preapproval_cid: o.networkFeePreapprovalCid ?? null,
+    network_fee_settlement_update_id:
+      o.networkFeeSettlementUpdateId ?? null,
+    network_fee_accounting_pending: o.networkFeeAccountingPending ?? false,
     updated_at: new Date().toISOString(),
   };
 }
 
 export interface SwapStore {
   get(id: string): Promise<SwapOrder | undefined>;
-  put(o: SwapOrder): Promise<void>;
+  insert(o: SwapOrder): Promise<void>;
+  /**
+   * Compare-and-swap on status: persist `o` only if the row's CURRENT status still
+   * equals `expectedStatus`. Returns true iff this call won (updated a row). Used as
+   * an idempotency/concurrency gate before an irreversible action (e.g. a refund
+   * transfer) so two concurrent sweeps can't both proceed.
+   */
+  putIfStatus(o: SwapOrder, expectedStatus: SwapStatus): Promise<boolean>;
   byStatus(s: SwapStatus): Promise<SwapOrder[]>;
   active(): Promise<SwapOrder[]>;
   /** Order history for one user party, newest first. */
   byParty(party: string, limit?: number): Promise<SwapOrder[]>;
+  pendingNetworkFeeAccounting(): Promise<SwapOrder[]>;
+  /** Atomically reserve forward CBTC float and transition open -> accepted. */
+  acceptWithFloatReservation(
+    orderId: string,
+    solverCantonParty: string,
+    floatSats: bigint
+  ): Promise<{
+    accepted: boolean;
+    reason?: string;
+    status?: SwapStatus;
+    reservedSats: bigint;
+    needSats: bigint;
+  }>;
+  reserveReverseEvmFloat(
+    orderId: string,
+    floatUnits: bigint
+  ): Promise<{
+    reserved: boolean;
+    reason?: string;
+    status?: SwapStatus;
+    reservedUnits: bigint;
+    needUnits: bigint;
+  }>;
+  /** Reserve reverse WBTC before locking the user's Canton leg. */
+  reserveReverseEvmFloatBeforeMainLock(
+    orderId: string,
+    floatUnits: bigint
+  ): Promise<{
+    reserved: boolean;
+    reason?: string;
+    status?: SwapStatus;
+    reservedUnits: bigint;
+    needUnits: bigint;
+  }>;
 }
 
 export class SupabaseSwapStore implements SwapStore {
@@ -96,16 +152,145 @@ export class SupabaseSwapStore implements SwapStore {
     if (error) throw new Error(`htlc_orders get: ${error.message}`);
     return data ? rowToOrder(data) : undefined;
   }
-  async put(o: SwapOrder): Promise<void> {
+  async insert(o: SwapOrder): Promise<void> {
     const sb = await createSupabaseServiceClient();
-    const { error } = await sb.from(TABLE).upsert(orderToRow(o), { onConflict: "id" });
-    if (error) throw new Error(`htlc_orders put: ${error.message}`);
+    const { error } = await sb.from(TABLE).insert(orderToRow(o));
+    if (error) {
+      const err = new Error(`htlc_orders insert: ${error.message}`) as Error & {
+        code?: string;
+      };
+      err.code = error.code;
+      throw err;
+    }
+  }
+  async putIfStatus(o: SwapOrder, expectedStatus: SwapStatus): Promise<boolean> {
+    const sb = await createSupabaseServiceClient();
+    const { data, error } = await sb
+      .from(TABLE)
+      .update(orderToRow(o))
+      .eq("id", o.id)
+      .eq("status", expectedStatus)
+      .select("id")
+      .maybeSingle();
+    if (error) throw new Error(`htlc_orders putIfStatus: ${error.message}`);
+    return !!data; // a row matched the expected status → we won the CAS
   }
   async byStatus(s: SwapStatus): Promise<SwapOrder[]> {
     const sb = await createSupabaseServiceClient();
     const { data, error } = await sb.from(TABLE).select("*").eq("status", s);
     if (error) throw new Error(`htlc_orders byStatus: ${error.message}`);
     return (data ?? []).map(rowToOrder);
+  }
+  async acceptWithFloatReservation(
+    orderId: string,
+    solverCantonParty: string,
+    floatSats: bigint
+  ): Promise<{
+    accepted: boolean;
+    reason?: string;
+    status?: SwapStatus;
+    reservedSats: bigint;
+    needSats: bigint;
+  }> {
+    const sb = await createSupabaseServiceClient();
+    const { data, error } = await sb.rpc(
+      "accept_htlc_order_with_float_reservation",
+      {
+        p_order_id: orderId,
+        p_solver_canton_party: solverCantonParty,
+        p_float_sats: floatSats.toString()
+      }
+    );
+    if (error) {
+      throw new Error(
+        `htlc_orders acceptWithFloatReservation: ${error.message}`
+      );
+    }
+    const result = (data ?? {}) as {
+      accepted?: boolean;
+      reason?: string;
+      status?: SwapStatus;
+      reservedSats?: string;
+      needSats?: string;
+    };
+    return {
+      accepted: result.accepted === true,
+      reason: result.reason,
+      status: result.status,
+      reservedSats: BigInt(result.reservedSats ?? "0"),
+      needSats: BigInt(result.needSats ?? "0")
+    };
+  }
+  async reserveReverseEvmFloat(
+    orderId: string,
+    floatUnits: bigint
+  ): Promise<{
+    reserved: boolean;
+    reason?: string;
+    status?: SwapStatus;
+    reservedUnits: bigint;
+    needUnits: bigint;
+  }> {
+    const sb = await createSupabaseServiceClient();
+    const { data, error } = await sb.rpc("reserve_reverse_htlc_evm_float", {
+      p_order_id: orderId,
+      p_float_units: floatUnits.toString()
+    });
+    if (error) {
+      throw new Error(`htlc_orders reserveReverseEvmFloat: ${error.message}`);
+    }
+    const result = (data ?? {}) as {
+      reserved?: boolean;
+      reason?: string;
+      status?: SwapStatus;
+      reservedUnits?: string;
+      needUnits?: string;
+    };
+    return {
+      reserved: result.reserved === true,
+      reason: result.reason,
+      status: result.status,
+      reservedUnits: BigInt(result.reservedUnits ?? "0"),
+      needUnits: BigInt(result.needUnits ?? "0")
+    };
+  }
+  async reserveReverseEvmFloatBeforeMainLock(
+    orderId: string,
+    floatUnits: bigint
+  ): Promise<{
+    reserved: boolean;
+    reason?: string;
+    status?: SwapStatus;
+    reservedUnits: bigint;
+    needUnits: bigint;
+  }> {
+    const sb = await createSupabaseServiceClient();
+    const { data, error } = await sb.rpc(
+      "reserve_reverse_htlc_evm_float_before_main_lock",
+      {
+        p_order_id: orderId,
+        p_float_units: floatUnits.toString()
+      }
+    );
+    if (error) {
+      throw new Error(
+        `htlc_orders reserveReverseEvmFloatBeforeMainLock: ${error.message}`
+      );
+    }
+    const result = (data ?? {}) as {
+      reserved?: boolean;
+      reason?: string;
+      status?: SwapStatus;
+      reservedUnits?: string;
+      needUnits?: string;
+    };
+    return {
+      reserved: result.reserved === true,
+      reason: result.reason,
+      status: result.status,
+      reservedUnits: BigInt(result.reservedUnits ?? "0"),
+      needUnits: BigInt(result.needUnits ?? "0")
+    };
   }
   async byParty(party: string, limit = 50): Promise<SwapOrder[]> {
     const sb = await createSupabaseServiceClient();
@@ -114,6 +299,17 @@ export class SupabaseSwapStore implements SwapStore {
       .order("created_at", { ascending: false })
       .limit(limit);
     if (error) throw new Error(`htlc_orders byParty: ${error.message}`);
+    return (data ?? []).map(rowToOrder);
+  }
+  async pendingNetworkFeeAccounting(): Promise<SwapOrder[]> {
+    const sb = await createSupabaseServiceClient();
+    const { data, error } = await sb
+      .from(TABLE)
+      .select("*")
+      .eq("network_fee_accounting_pending", true);
+    if (error) {
+      throw new Error(`htlc_orders pendingNetworkFeeAccounting: ${error.message}`);
+    }
     return (data ?? []).map(rowToOrder);
   }
   async active(): Promise<SwapOrder[]> {

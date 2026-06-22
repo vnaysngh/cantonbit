@@ -12,7 +12,16 @@ import { createServerClient } from "@supabase/ssr";
 import { type NextRequest, NextResponse } from "next/server";
 
 export async function proxy(request: NextRequest) {
-  let supabaseResponse = NextResponse.next({ request });
+  const nonce = crypto.randomUUID().replaceAll("-", "");
+  const requestHeaders = new Headers(request.headers);
+  requestHeaders.set("x-nonce", nonce);
+  requestHeaders.set(
+    "Content-Security-Policy",
+    buildContentSecurityPolicy(nonce)
+  );
+  const nextResponse = () =>
+    NextResponse.next({ request: { headers: requestHeaders } });
+  let supabaseResponse = nextResponse();
 
   // Refresh the Supabase session cookie if present (no redirect either way).
   // Wrapped defensively: a missing/invalid session must never block a request.
@@ -29,7 +38,7 @@ export async function proxy(request: NextRequest) {
             cookiesToSet.forEach(({ name, value }) =>
               request.cookies.set(name, value),
             );
-            supabaseResponse = NextResponse.next({ request });
+            supabaseResponse = nextResponse();
             cookiesToSet.forEach(({ name, value, options }) =>
               supabaseResponse.cookies.set(name, value, options),
             );
@@ -42,7 +51,49 @@ export async function proxy(request: NextRequest) {
     // No/invalid session — fine; the app is open and gates on Loop connect.
   }
 
+  applySecurityHeaders(supabaseResponse, nonce);
   return supabaseResponse;
+}
+
+function buildContentSecurityPolicy(nonce: string): string {
+  const production = process.env.NODE_ENV === "production";
+  const directives = [
+    "default-src 'self'",
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${production ? "" : " 'unsafe-eval'"}`,
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' data: https://fonts.gstatic.com",
+    "img-src 'self' data: blob: https:",
+    "connect-src 'self' https: wss:",
+    "frame-src 'self' https:",
+    "worker-src 'self' blob:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'"
+  ];
+  if (production) {
+    directives.push(
+      "trusted-types nextjs nextjs#bundler",
+      "require-trusted-types-for 'script'",
+      "upgrade-insecure-requests"
+    );
+  }
+  return directives.join("; ");
+}
+
+function applySecurityHeaders(response: NextResponse, nonce: string): void {
+  response.headers.set(
+    "Content-Security-Policy",
+    buildContentSecurityPolicy(nonce)
+  );
+  response.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
+  response.headers.set("X-Content-Type-Options", "nosniff");
+  response.headers.set("X-Frame-Options", "DENY");
+  response.headers.set(
+    "Permissions-Policy",
+    "camera=(), microphone=(), geolocation=(), payment=()"
+  );
+  response.headers.set("Cross-Origin-Opener-Policy", "same-origin");
 }
 
 export const config = {

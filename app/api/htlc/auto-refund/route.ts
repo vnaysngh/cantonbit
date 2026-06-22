@@ -12,17 +12,25 @@ import { NextResponse, type NextRequest } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
 import { alert } from "@/lib/alert";
 import { requireDaemon } from "@/lib/htlc-auth";
+import { isBearerAuthorized } from "@/lib/htlc-auth-logic";
 
 function cronAuthorized(req: NextRequest): boolean {
-  const secret = process.env.CRON_SECRET?.trim();
-  if (!secret) return false;
-  const header = req.headers.get("authorization") ?? "";
-  return header === `Bearer ${secret}`;
+  // Reuse the project's timing-safe bearer check (constant-time compare) rather
+  // than a plain `===`, which leaks CRON_SECRET byte-by-byte via response timing.
+  // CRON_SECRET also backs daemonSecret(), so this gates the whole daemon surface.
+  return isBearerAuthorized({
+    header: req.headers.get("authorization"),
+    secret: process.env.CRON_SECRET?.trim() ?? "",
+    nodeEnv: process.env.NODE_ENV
+  });
 }
 
 async function sweep() {
   const svc = htlcService();
+  const feeAccounting = await svc.reconcileNetworkFeeAccounting();
+  const mainLockingReconciled = await svc.reconcileReverseMainLocking();
   const {
+    abandonedAccepted,
     forwardCounter,
     reverseMain,
     staleForwardMain,
@@ -45,6 +53,8 @@ async function sweep() {
       });
     }
   };
+  for (const o of abandonedAccepted)
+    await run(o.id, "expire-accepted", () => svc.expireAbandonedAccepted(o.id));
   for (const o of forwardCounter)
     await run(o.id, "refund-counter", () => svc.refundCounter(o.id));
   for (const o of reverseMain)
@@ -58,12 +68,19 @@ async function sweep() {
       svc.earlyRefundLoopCustody(o.id)
     );
   const due =
+    abandonedAccepted.length +
     forwardCounter.length +
     reverseMain.length +
     staleForwardMain.length +
     staleLoopSeller.length +
     loopCustodyStalled.length;
-  return { due, refunded: results.filter((r) => r.ok).length, results };
+  return {
+    due,
+    refunded: results.filter((r) => r.ok).length,
+    feeAccounting,
+    mainLockingReconciled,
+    results
+  };
 }
 
 export async function POST(req: Request) {

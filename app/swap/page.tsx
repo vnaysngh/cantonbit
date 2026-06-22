@@ -39,8 +39,7 @@ import {
 } from "@/lib/swap-amount-limits";
 import {
   loopSettingsUrl,
-  DEFAULT_PLATFORM_FEE_BPS,
-  isNetworkFeeUiEnabled
+  DEFAULT_PLATFORM_FEE_BPS
 } from "@/lib/constants";
 import { FeeBreakdown } from "@/components/FeeBreakdown";
 import { cn } from "@/lib/utils";
@@ -91,7 +90,6 @@ import {
   listLoopInstrumentHoldingCids
 } from "@/lib/loop-holdings";
 import { findLoopOutgoingTransferOffer } from "@/lib/loop-transfer-offers";
-import { payLoopHtlcNetworkFeeIfNeeded } from "@/lib/loop-htlc-fee-client";
 import { cantonSwapApi } from "@/lib/canton-swap-client";
 import { logNetworkFeeInBrowser } from "@/lib/network-fee-client-log";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
@@ -134,7 +132,10 @@ import {
   loopC2cSteps,
   reverseLoopHtlcSteps
 } from "@/lib/swap-stepper-state";
-import { quoteOutUnits, quoteGrossOutUnits } from "@/lib/htlc-quote-math";
+import {
+  quoteOutUnits,
+  quoteGrossOutUnits
+} from "@/lib/htlc-quote-math";
 import {
   extractCreatedOfferCid,
   extractEventsByIdFromSubmitResult,
@@ -268,12 +269,8 @@ type Stage =
     }
   | { kind: "error"; message: string };
 
-/** Bridge fee in basis points for the pre-quote "You receive" estimate. Must
- *  match the server's PLATFORM_FEE_BPS (default 100 = 1%). The review modal shows
- *  the exact fee from the server quote. */
-const FEE_BPS = Number(
-  process.env.NEXT_PUBLIC_FEE_BPS ?? DEFAULT_PLATFORM_FEE_BPS
-);
+/** Temporary estimate until the authoritative server price response arrives. */
+const FEE_BPS = DEFAULT_PLATFORM_FEE_BPS;
 
 export default function SwapPage() {
   const evm = useEvmWallet();
@@ -903,6 +900,7 @@ export default function SwapPage() {
           fromAsset?: string;
           toAsset?: string;
           inAmount?: string;
+          grossOutAmount?: string;
           outAmount?: string;
           networkFeeCc?: string;
           networkFeeUsd?: number;
@@ -911,6 +909,15 @@ export default function SwapPage() {
           trafficBytes?: number;
           networkFeeCharged?: boolean;
           networkFeePreview?: boolean;
+          quoteSource?: string;
+          quoteAgeMs?: number;
+          quoteStale?: boolean;
+          midPrice?: string;
+          minReceived?: string;
+          minReceivedToken?: string;
+          expiresAt?: number;
+          quoteIndicative?: boolean;
+          quoteNote?: string;
         };
         if (!r.ok) throw new Error(formatCantonQuoteError(q.error));
         logNetworkFeeInBrowser("c2c quote", {
@@ -934,6 +941,7 @@ export default function SwapPage() {
             fromAsset: q.fromAsset,
             toAsset: q.toAsset,
             inAmount: q.inAmount,
+            grossOutAmount: q.grossOutAmount,
             outAmount: q.outAmount,
             networkFeeCc: q.networkFeeCc,
             networkFeeUsd: q.networkFeeUsd,
@@ -941,7 +949,16 @@ export default function SwapPage() {
             networkFeeSource: q.networkFeeSource,
             trafficBytes: q.trafficBytes,
             networkFeeCharged: q.networkFeeCharged,
-            networkFeePreview: q.networkFeePreview
+            networkFeePreview: q.networkFeePreview,
+            quoteSource: q.quoteSource,
+            quoteAgeMs: q.quoteAgeMs,
+            quoteStale: q.quoteStale,
+            midPrice: q.midPrice,
+            minReceived: q.minReceived,
+            minReceivedToken: q.minReceivedToken,
+            expiresAt: q.expiresAt,
+            quoteIndicative: q.quoteIndicative,
+            quoteNote: q.quoteNote
           }
         });
       } catch (e) {
@@ -1498,16 +1515,6 @@ export default function SwapPage() {
         const provider = wallet.provider;
         if (!provider)
           throw new Error("Connect your Loop wallet to accept your CBTC.");
-        await payLoopHtlcNetworkFeeIfNeeded({
-          orderId: swapId,
-          direction: "evm-to-canton",
-          provider: provider as Parameters<
-            typeof payLoopHtlcNetworkFeeIfNeeded
-          >[0]["provider"],
-          networkFeeCollected: (
-            claimOrder as { networkFeeCollected?: boolean } | undefined
-          )?.networkFeeCollected
-        });
         const reveal = await htlcApi.claimCounter(swapId, preimage); // reveal → verify → deliver
         if (reveal.delivered) {
           // Preapproval auto-accepted the transfer — the CBTC is ALREADY in the
@@ -2929,8 +2936,7 @@ export default function SwapPage() {
             <SwapStepper
               steps={forwardLoopHtlcSteps({
                 phase: "solver",
-                networkFeeEnabled:
-                  isNetworkFeeUiEnabled() && !isParticipantManaged
+                networkFeeEnabled: false
               })}
             />
             {stage.recordError ? (
@@ -2966,7 +2972,7 @@ export default function SwapPage() {
               </div>
               <div className="flex items-center justify-between gap-3 px-4 py-3">
                 <span className="text-sm text-muted-foreground">
-                  You receive
+                  You receive at least
                 </span>
                 <span className="text-sm font-semibold tabular-nums">
                   {formatWbtc(BigInt(stage.quote.order.outputs[0].amount))} CBTC
@@ -3105,9 +3111,9 @@ export default function SwapPage() {
               Both legs locked — claim your CBTC
             </h3>
             <p className="mt-1 text-sm text-foreground/60">
-              {isNetworkFeeUiEnabled() && !isParticipantManaged
-                ? "You'll sign in Loop twice if needed: pay the network fee (CC), then accept your CBTC. Revealing lets the solver claim your WBTC — that's the atomic link."
-                : "Press Claim to reveal your secret and receive your CBTC. Revealing it lets the solver claim the WBTC you locked — this is what makes the swap atomic."}
+              {!isParticipantManaged
+                ? "Loop settlement is trust-minimized: reveal authorizes the venue to claim WBTC and creates a durable CBTC delivery obligation. No separate CC fee payment is required."
+                : "Press Claim to reveal your secret and receive your CBTC. The on-ledger Canton hashlock and EVM hashlock bind the managed-wallet swap atomically."}
             </p>
             {stage.kind === "htlc-claimable" && stage.claimError && (
               <p className="mt-2 text-sm text-red-500">⚠️ {stage.claimError}</p>
@@ -3226,9 +3232,9 @@ export default function SwapPage() {
               Both legs locked — claim your WBTC
             </h3>
             <p className="mt-1 text-sm text-foreground/60">
-              Claim the WBTC in MetaMask. The on-chain claim reveals your
-              secret, which lets the solver claim the CBTC you locked —
-              that&apos;s the atomic link.
+              {isParticipantManaged
+                ? "Claim the WBTC in MetaMask. The on-chain claim reveals the secret that atomically unlocks the managed Canton HTLC."
+                : "Claim the WBTC in MetaMask. Loop reverse settlement uses temporary venue custody; your on-chain reveal finalizes the venue's right to the deposited CBTC."}
             </p>
             {stage.kind === "rev-claimable" && stage.claimError && (
               <p className="mt-2 text-sm text-red-500">⚠️ {stage.claimError}</p>
@@ -3253,9 +3259,8 @@ export default function SwapPage() {
             >
               {stage.kind === "rev-claiming" ? "Claiming…" : "Claim WBTC"}
             </button>
-            {/* Stuck-swap escape: refund the locked CBTC (after the Canton timelock).
-                Email: backend HtlcLock.Refund. Loop seller: the user signs the
-                standard Allocation_Withdraw in their wallet (their unilateral exit). */}
+            {/* Stuck-swap escape after the Canton timelock.
+                Managed: HtlcLock.Refund. Loop: venue custody-return service. */}
             {stage.kind === "rev-claimable" && stage.claimError && (
               <button
                 onClick={() =>
@@ -3886,10 +3891,6 @@ function ReviewModal({
   const [networkFeeTransactions, setNetworkFeeTransactions] = useState<
     import("@/lib/canton-network-fee-math").NetworkFeeTxLeg[] | undefined
   >(quote?.networkFeeTransactions);
-  const [loopNetworkFeeCc, setLoopNetworkFeeCc] = useState<
-    string | undefined
-  >();
-
   useEffect(() => {
     if (!quote) return;
 
@@ -4005,42 +4006,6 @@ function ReviewModal({
       };
     }
 
-    if (
-      !isParticipantManaged &&
-      isLoopWallet &&
-      destinationParty &&
-      quote.direction === "evm-to-canton"
-    ) {
-      let cancelled = false;
-      setNetworkFeeLoading(true);
-      void cantonSwapApi
-        .estimateNetworkFee({
-          action: "htlc-loop-claim",
-          userParty: destinationParty,
-          cbtcAmount: (Number(quote.cbtcAmount) / 1e8).toFixed(8)
-        })
-        .then((est) => {
-          if (cancelled) return;
-          applyNetworkFeeFields({
-            feeCc: est.feeCc,
-            feeUsd: est.feeUsd,
-            networkFeeSource: est.networkFeeSource,
-            trafficBytes: est.trafficBytes,
-            networkFeePreview: est.networkFeePreview,
-            networkFeeTransactions: est.networkFeeTransactions
-          });
-          logNetworkFeeInBrowser("review modal estimate htlc-loop-claim", est);
-        })
-        .catch((e) => {
-          console.warn("[OranjSwap network-fee] loop htlc estimate failed", e);
-        })
-        .finally(() => {
-          if (!cancelled) setNetworkFeeLoading(false);
-        });
-      return () => {
-        cancelled = true;
-      };
-    }
   }, [
     quote,
     isParticipantManaged,
@@ -4071,7 +4036,7 @@ function ReviewModal({
   const isC2c = quote.direction === "canton-to-canton";
   const reverse = quote.direction === "canton-to-evm";
   const hideCantonNetworkFee =
-    !!isLoopWallet && !isParticipantManaged && (isC2c || reverse);
+    !!isLoopWallet && !isParticipantManaged;
   const feeBps = quote.feeBps ?? 0;
 
   let payAmount: string;
@@ -4186,6 +4151,32 @@ function ReviewModal({
   }
 
   const blockingError = retryError ?? setupError;
+  const quoteAgeLabel =
+    typeof quote.quoteAgeMs === "number"
+      ? quote.quoteAgeMs < 1000
+        ? "fresh"
+        : quote.quoteAgeMs < 60_000
+          ? `${Math.round(quote.quoteAgeMs / 1000)}s old`
+          : `${Math.round(quote.quoteAgeMs / 60_000)}m old`
+      : undefined;
+  const quoteSourceLabel = quote.quoteSource
+    ? [
+        quote.quoteSource,
+        quoteAgeLabel,
+        quote.quoteStale ? "stale" : undefined,
+        quote.quoteIndicative ? "indicative" : undefined
+      ]
+        .filter(Boolean)
+        .join(" • ")
+    : undefined;
+  const quoteExpiresAt = quote.expiresAt ?? quote.expires;
+  const quoteExpiryLabel = quoteExpiresAt
+    ? new Date(quoteExpiresAt * 1000).toLocaleTimeString(undefined, {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit"
+      })
+    : undefined;
 
   let actionLabel = "Confirm swap";
   let actionDisabled = !!busy;
@@ -4265,6 +4256,12 @@ function ReviewModal({
         <div className="mt-5 border-t border-foreground/10 pt-4">
           <div className="flex flex-col gap-1.5 text-sm">
             <DetailRow label="Rate" value={rateLabel} />
+            {quoteSourceLabel && (
+              <DetailRow label="Quote source" value={quoteSourceLabel} />
+            )}
+            {quoteExpiryLabel && (
+              <DetailRow label="Quote expires" value={quoteExpiryLabel} />
+            )}
           </div>
           <FeeBreakdown
             platformFeeLabel={feeLabel}
@@ -4275,18 +4272,23 @@ function ReviewModal({
             networkFeeTransactions={networkFeeTransactions}
             networkFeePreview={networkFeePreview}
             hideCantonNetworkFee={hideCantonNetworkFee}
-            loopNetworkFeeCc={loopNetworkFeeCc}
             loading={networkFeeLoading}
           />
           <div className="mt-1.5 flex flex-col gap-1.5 text-sm">
             <DetailRow
-              label="You receive"
+              label="You receive at least"
               value={`${receiveAmount} ${receiveToken}`}
             />
             <DetailRow label="Recipient" value={recipientLabel} />
           </div>
           {!isC2c && <DetailRow label="Refundable after" value={refundAt} />}
         </div>
+
+        {quote.quoteNote && !busy && (
+          <div className="mt-4 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-foreground">
+            {quote.quoteNote}
+          </div>
+        )}
 
         {blockingError && !busy && (
           <div className="mt-4 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-foreground">

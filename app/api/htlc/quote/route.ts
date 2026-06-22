@@ -4,8 +4,7 @@
 import { NextResponse } from "next/server";
 import {
   authorizeQuoteParty,
-  expectedSettlementParty,
-  isParticipantManagedParty
+  expectedSettlementParty
 } from "@/lib/htlc-auth";
 import {
   quoteWbtcToCbtc,
@@ -17,7 +16,6 @@ import {
 import { NETWORK } from "@/lib/constants";
 import {
   computeHtlcSwapNotionalUsd,
-  estimateHtlcLoopFee,
   estimateHtlcManagedFee,
   estimateToQuoteFields,
   logNetworkFeeEstimate,
@@ -25,6 +23,8 @@ import {
   NetworkFeePrepareError,
   shouldQuoteNetworkFee
 } from "@/lib/canton-network-fee";
+import { distributedRateLimitOk } from "@/lib/api-rate-limit";
+import { clientIpFromRequest } from "@/lib/canton-swap-rate-limit";
 
 export async function POST(req: Request) {
   try {
@@ -39,8 +39,26 @@ export async function POST(req: Request) {
         { status: 400 }
       );
     }
+    if (
+      !(await distributedRateLimitOk({
+        scope: "htlc-quote-ip",
+        key: clientIpFromRequest(req),
+        limit: 30
+      }))
+    ) {
+      return NextResponse.json({ error: "rate limit exceeded" }, { status: 429 });
+    }
     const partyAuth = await authorizeQuoteParty(String(cantonParty));
     if (partyAuth.error) return partyAuth.error;
+    if (
+      !(await distributedRateLimitOk({
+        scope: "htlc-quote-party",
+        key: partyAuth.partyId,
+        limit: 30
+      }))
+    ) {
+      return NextResponse.json({ error: "rate limit exceeded" }, { status: 429 });
+    }
     const inUnits = BigInt(inRaw);
     if (inUnits <= 0n) {
       return NextResponse.json({ error: "amount must be > 0" }, { status: 400 });
@@ -86,18 +104,6 @@ export async function POST(req: Request) {
               cbtcAmount: cbtcDec
             });
           }
-        } else if (!(await isParticipantManagedParty(String(cantonParty)))) {
-          if (!reverse) {
-            const notionalUsd = await computeHtlcSwapNotionalUsd(cbtcDec);
-            const nf = await estimateHtlcLoopFee({
-              action: "htlc-loop-claim",
-              userParty: String(cantonParty),
-              cbtcAmount: cbtcDec,
-              notionalUsd
-            });
-            logNetworkFeeEstimate("htlc-quote htlc-loop-claim", nf);
-            networkFeeFields = estimateToQuoteFields(nf);
-          }
         }
       } catch (e) {
         if (shouldQuoteNetworkFee()) {
@@ -127,6 +133,13 @@ export async function POST(req: Request) {
       wbtcPriceRaw: q.price8.toString(),
       wbtcPriceDecimals: 8,
       expires: q.expiresAt,
+      expiresAt: q.expiresAt,
+      quoteSource: q.source,
+      quoteAgeMs: q.ageMs,
+      quoteStale: q.stale,
+      midPrice: (Number(q.price8) / 1e8).toFixed(8),
+      minReceived: q.outUnits.toString(),
+      minReceivedToken: reverse ? "WBTC" : "CBTC",
       feeBps: q.feeBps,
       bridgeFeeBps: q.feeBps,
       instrument: NETWORK.instrumentId,

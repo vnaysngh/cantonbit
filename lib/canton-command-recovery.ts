@@ -12,22 +12,29 @@ const DEFAULT_LOOKBACK = 10_000;
 type TransactionTreeValue = {
   updateId?: string;
   commandId?: string;
+  offset?: number;
   eventsById?: Record<string, unknown>;
 };
 
 function unwrapTransactionTree(item: unknown): TransactionTreeValue | null {
   if (!item || typeof item !== "object") return null;
   const u = item as {
+    offset?: number;
     update?: {
+      offset?: number;
       TransactionTree?: { value?: TransactionTreeValue };
       transactionTree?: TransactionTreeValue;
     };
   };
-  return (
+  const tree =
     u.update?.TransactionTree?.value ??
     u.update?.transactionTree ??
-    null
-  );
+    null;
+  if (!tree) return null;
+  return {
+    ...tree,
+    offset: tree.offset ?? u.update?.offset ?? u.offset
+  };
 }
 
 function eventsFromTree(
@@ -42,20 +49,27 @@ function eventsFromTree(
 
 async function scanPartyUpdateTrees(
   partyId: string,
-  lookback: number,
+  range: { lookback?: number; beginExclusive?: number },
   match: (tree: TransactionTreeValue) => boolean
-): Promise<{ updateId: string; eventsById: Record<string, unknown> } | null> {
+): Promise<{
+  updateId: string;
+  offset: number;
+  eventsById: Record<string, unknown>;
+} | null> {
   const jwt = await getLedgerJwt();
   const endRes = await fetch(`${NETWORK.ledgerHost}/v2/state/ledger-end`, {
     headers: { Authorization: `Bearer ${jwt}` },
     cache: "no-store"
   });
   if (!endRes.ok) {
-    console.warn(`${TAG} ledger-end failed (${endRes.status})`);
+    const message = `${TAG} ledger-end failed (${endRes.status})`;
+    if (range.beginExclusive !== undefined) throw new Error(message);
+    console.warn(message);
     return null;
   }
   const { offset } = (await endRes.json()) as { offset: number };
-  const beginExclusive = Math.max(0, offset - lookback);
+  const beginExclusive =
+    range.beginExclusive ?? Math.max(0, offset - (range.lookback ?? DEFAULT_LOOKBACK));
 
   const res = await fetch(`${NETWORK.ledgerHost}/v2/updates/trees`, {
     method: "POST",
@@ -72,7 +86,7 @@ async function scanPartyUpdateTrees(
             cumulative: [
               {
                 identifierFilter: {
-                  WildcardFilter: { value: { includeCreatedEventBlob: false } }
+                  WildcardFilter: { value: { includeCreatedEventBlob: true } }
                 }
               }
             ]
@@ -85,7 +99,11 @@ async function scanPartyUpdateTrees(
   });
 
   if (!res.ok) {
-    console.warn(`${TAG} updates/trees failed (${res.status}) party=${partyId.slice(0, 20)}…`);
+    const message =
+      `${TAG} updates/trees failed (${res.status}) ` +
+      `party=${partyId.slice(0, 20)}…`;
+    if (range.beginExclusive !== undefined) throw new Error(message);
+    console.warn(message);
     return null;
   }
 
@@ -97,7 +115,11 @@ async function scanPartyUpdateTrees(
   for (let i = items.length - 1; i >= 0; i--) {
     const tree = unwrapTransactionTree(items[i]);
     if (!tree || !tree.updateId || !match(tree)) continue;
-    return { updateId: tree.updateId, eventsById: eventsFromTree(tree) };
+    return {
+      updateId: tree.updateId,
+      offset: Number(tree.offset ?? 0),
+      eventsById: eventsFromTree(tree)
+    };
   }
 
   return null;
@@ -111,12 +133,12 @@ export async function fetchTransactionTreeByCommandId(
   commandId: string,
   partyId: string,
   lookback = DEFAULT_LOOKBACK
-): Promise<{ updateId: string; eventsById: Record<string, unknown> } | null> {
-  return scanPartyUpdateTrees(
-    partyId,
-    lookback,
-    (tree) => tree.commandId === commandId
-  );
+): Promise<{
+  updateId: string;
+  offset: number;
+  eventsById: Record<string, unknown>;
+} | null> {
+  return scanPartyUpdateTrees(partyId, { lookback }, (tree) => tree.commandId === commandId);
 }
 
 /**
@@ -127,14 +149,14 @@ export async function fetchTransactionTreeByUpdateId(
   updateId: string,
   partyIds: string[],
   lookback = DEFAULT_LOOKBACK
-): Promise<{ updateId: string; eventsById: Record<string, unknown> } | null> {
+): Promise<{
+  updateId: string;
+  offset: number;
+  eventsById: Record<string, unknown>;
+} | null> {
   for (const partyId of partyIds) {
     if (!partyId) continue;
-    const hit = await scanPartyUpdateTrees(
-      partyId,
-      lookback,
-      (tree) => tree.updateId === updateId
-    );
+    const hit = await scanPartyUpdateTrees(partyId, { lookback }, (tree) => tree.updateId === updateId);
     if (hit) return hit;
   }
   return null;
@@ -149,8 +171,35 @@ export async function fetchTransactionTreeForOfferAccept(
     offerCid: string
   ) => boolean,
   lookback = DEFAULT_LOOKBACK
-): Promise<{ updateId: string; eventsById: Record<string, unknown> } | null> {
-  return scanPartyUpdateTrees(partyId, lookback, (tree) =>
+): Promise<{
+  updateId: string;
+  offset: number;
+  eventsById: Record<string, unknown>;
+} | null> {
+  return scanPartyUpdateTrees(partyId, { lookback }, (tree) =>
+    matchEvents(eventsFromTree(tree), offerCid)
+  );
+}
+
+/**
+ * Strict offer-accept scan from the offer's persisted creation offset.
+ * Infrastructure failures throw; "not found" means the complete ledger range was
+ * successfully searched, so callers may safely consider reissue.
+ */
+export async function fetchOfferAcceptFromOffset(
+  offerCid: string,
+  partyId: string,
+  beginExclusive: number,
+  matchEvents: (
+    eventsById: Record<string, unknown>,
+    offerCid: string
+  ) => boolean
+): Promise<{
+  updateId: string;
+  offset: number;
+  eventsById: Record<string, unknown>;
+} | null> {
+  return scanPartyUpdateTrees(partyId, { beginExclusive }, (tree) =>
     matchEvents(eventsFromTree(tree), offerCid)
   );
 }

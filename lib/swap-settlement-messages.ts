@@ -14,7 +14,7 @@ export function formatSettlementError(raw: string | undefined): string {
     return "Canton registry is temporarily unavailable. Your locked funds are safe — we're retrying automatically. Check Orders for status.";
   }
   if (m.includes("network fee not collected")) {
-    return "Pay the Canton network fee in Loop first, then try again.";
+    return "The Canton network fee was not collected in the settlement transaction. Refresh the quote and try again.";
   }
   if (m.includes("insufficient cc") && m.includes("network fee")) {
     return raw.trim();

@@ -114,6 +114,28 @@ export function resolveCreateOrder(
     if (existing.userCantonParty !== incoming.userCantonParty) {
       throw new Error("order id already exists for another party");
     }
+    const immutableFields: Array<keyof typeof incoming> = [
+      "direction",
+      "hashLock",
+      "userEvmAddress",
+      "solverEvmAddress",
+      "wbtcAmount",
+      "userTimelock",
+      "userCantonParty",
+      "solverCantonParty",
+      "cbtcAmount",
+      "solverTimelock",
+      "counterMode"
+    ];
+    for (const field of immutableFields) {
+      const current = existing[field as keyof SwapOrder];
+      const requested = incoming[field];
+      const normalize = (value: unknown) =>
+        typeof value === "string" ? value.toLowerCase() : value;
+      if (normalize(current) !== normalize(requested)) {
+        throw new Error(`order id already exists with different ${String(field)}`);
+      }
+    }
     return { order: existing, isNew: false };
   }
   return { order: { ...incoming, status: "open", createdAt: nowSeconds }, isNew: true };
