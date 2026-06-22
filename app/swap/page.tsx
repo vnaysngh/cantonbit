@@ -203,9 +203,9 @@ type Stage =
       userCantonParty: string;
       userEvmAddress: string;
       waitStartedAt: number;
-      /** P1a: set when the lock submitted but recording mainLockTx failed — the swap
-       *  is recoverable from Orders; shown as a warning so the user doesn't restart. */
-      recordError?: string;
+      /** Set when the lock submitted but recording mainLockTx failed. This is
+       *  recovery state only; do not show noisy internal recovery copy in the UI. */
+      recordingRecovery?: true;
     }
   // HTLC: a submitted EVM lock is being confirmed and durably recorded.
   | {
@@ -215,7 +215,6 @@ type Stage =
       userCantonParty: string;
       userEvmAddress: string;
       waitStartedAt: number;
-      recordError?: string;
     }
   // HTLC: both legs locked — the USER can now claim (press to reveal).
   | {
@@ -468,6 +467,7 @@ export default function SwapPage() {
     }
     prevAmountRef.current = amount;
   }, [amount, stage.kind]);
+  const activeMainLockRecordingRef = useRef<string | null>(null);
 
   const [wbtcBalance, setWbtcBalance] = useState<bigint | null>(null);
   /** Live WBTC/BTC from GET /api/htlc/price — same cache as server quotes. */
@@ -475,13 +475,25 @@ export default function SwapPage() {
     raw: bigint;
     feeBps: number;
   } | null>(null);
+  const [wbtcPriceError, setWbtcPriceError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     const loadPrice = async () => {
       try {
         const res = await fetch("/api/htlc/price", { cache: "no-store" });
-        if (!res.ok) return;
+        if (!res.ok) {
+          const body = (await res.json().catch(() => ({}))) as {
+            error?: string;
+          };
+          if (!cancelled) {
+            setWbtcPriceError(
+              body.error ||
+                `WBTC/BTC price unavailable (HTTP ${res.status}). Try again shortly.`
+            );
+          }
+          return;
+        }
         const body = (await res.json()) as {
           wbtcPriceRaw?: string;
           feeBps?: number;
@@ -491,8 +503,11 @@ export default function SwapPage() {
           raw: BigInt(body.wbtcPriceRaw),
           feeBps: body.feeBps ?? FEE_BPS
         });
+        setWbtcPriceError(null);
       } catch {
-        /* keep last price or fee-only fallback */
+        if (!cancelled) {
+          setWbtcPriceError("WBTC/BTC price unavailable. Try again shortly.");
+        }
       }
     };
     void loadPrice();
@@ -1433,6 +1448,7 @@ export default function SwapPage() {
             receiver: SOLVER_EVM
           }
         );
+        activeMainLockRecordingRef.current = id;
         setStage({
           kind: "htlc-recording",
           swapId: id,
@@ -1448,9 +1464,15 @@ export default function SwapPage() {
           userEvmAddress: evm.account,
           expiresAt: userTimelock + 3600
         });
-        await evm.waitForReceipt(lockTx);
-        await htlcApi.recordMainLock(id, lockTx);
-        forgetPendingMainLock(id);
+        try {
+          await evm.waitForReceipt(lockTx);
+          await htlcApi.recordMainLock(id, lockTx);
+          forgetPendingMainLock(id);
+        } finally {
+          if (activeMainLockRecordingRef.current === id) {
+            activeMainLockRecordingRef.current = null;
+          }
+        }
       } catch (e) {
         // P1a: once evmApproveAndLock returned a tx hash, the WBTC lock may have been
         // (or may still get) mined — DO NOT retry() into a fresh order/hash, which
@@ -1473,8 +1495,7 @@ export default function SwapPage() {
             userCantonParty: quote.cantonParty,
             userEvmAddress: evm.account.toLowerCase(),
             waitStartedAt: Date.now(),
-            recordError:
-              "Your WBTC lock was submitted. Waiting for confirmation and automatically reconnecting it to this swap — do not start another swap."
+            recordingRecovery: true
           });
           return;
         }
@@ -1919,7 +1940,7 @@ export default function SwapPage() {
 
       const stagePending =
         stage.kind === "htlc-locking" &&
-        stage.recordError &&
+        stage.recordingRecovery &&
         stage.userCantonParty === destinationParty &&
         stage.userEvmAddress === recoveryEvmAddress
           ? {
@@ -1946,6 +1967,7 @@ export default function SwapPage() {
       });
       const pending = stagePending ?? storedPending;
       if (!pending) return;
+      if (activeMainLockRecordingRef.current === pending.swapId) return;
 
       pendingLockRecoveryInFlightRef.current = true;
       if (
@@ -1961,9 +1983,7 @@ export default function SwapPage() {
           waitStartedAt:
             "createdAt" in pending && typeof pending.createdAt === "number"
               ? pending.createdAt
-              : Date.now(),
-          recordError:
-            "Recovering your submitted WBTC lock and reconnecting it to this swap."
+              : Date.now()
         });
       }
 
@@ -2029,7 +2049,10 @@ export default function SwapPage() {
           setStage((prev) =>
             prev.kind === "htlc-locking" &&
             prev.swapId === pending.swapId
-              ? { ...prev, recordError: undefined }
+              ? {
+                  ...prev,
+                  recordingRecovery: undefined
+                }
               : {
                   kind: "htlc-resume",
                   swapId: pending.swapId,
@@ -2038,29 +2061,8 @@ export default function SwapPage() {
           );
         }
       } catch {
-        if (!cancelled) {
-          setStage((prev) => {
-            const recordError =
-              "Your WBTC lock is submitted. Waiting for on-chain confirmation and server acknowledgement; recovery retries automatically.";
-            if (
-              prev.kind === "htlc-locking" &&
-              prev.swapId === pending.swapId
-            ) {
-              return prev.recordError === recordError
-                ? prev
-                : { ...prev, recordError };
-            }
-            if (
-              prev.kind === "htlc-recording" &&
-              prev.swapId === pending.swapId
-            ) {
-              return prev.recordError === recordError
-                ? prev
-                : { ...prev, recordError };
-            }
-            return prev;
-          });
-        }
+        // Keep retrying silently. The stage itself already says the lock is being
+        // confirmed; surfacing this transient API race made healthy swaps look broken.
       } finally {
         pendingLockRecoveryInFlightRef.current = false;
       }
@@ -2087,7 +2089,7 @@ export default function SwapPage() {
   useEffect(() => {
     if (
       (stage.kind === "htlc-recording" ||
-        (stage.kind === "htlc-locking" && !!stage.recordError)) &&
+        (stage.kind === "htlc-locking" && !!stage.recordingRecovery)) &&
       ((destinationParty && stage.userCantonParty !== destinationParty) ||
         (evm.account &&
           stage.userEvmAddress !== evm.account.trim().toLowerCase()))
@@ -2709,7 +2711,8 @@ export default function SwapPage() {
   const fetchingQuote =
     stage.kind === "quoting" ||
     (amountState === "ok" &&
-      ((isC2c && c2cQuoteLoading) || (!isC2c && !wbtcPrice)));
+      ((isC2c && c2cQuoteLoading) ||
+        (!isC2c && !wbtcPrice && !wbtcPriceError)));
 
   // Single context-aware primary action.
   let primary: {
@@ -2732,6 +2735,12 @@ export default function SwapPage() {
         onClick: () => {},
         disabled: true,
         busy: true
+      };
+    } else if (!isC2c && amountState === "ok" && !wbtcPrice && wbtcPriceError) {
+      primary = {
+        label: "Quote unavailable",
+        onClick: () => {},
+        disabled: true
       };
     } else if (swapKind === "invalid-evm-evm") {
       primary = {
@@ -2924,6 +2933,18 @@ export default function SwapPage() {
                   {stage.message}
                 </div>
               ))}
+            {!isC2c &&
+              stage.kind !== "error" &&
+              !wbtcPrice &&
+              wbtcPriceError &&
+              amountState === "ok" && (
+                <div className="mb-2 flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-foreground">
+                  <span className="material-symbols-outlined mt-0.5 shrink-0 text-[18px] text-amber-500">
+                    info
+                  </span>
+                  <span>{wbtcPriceError}</span>
+                </div>
+              )}
             {isC2c &&
               c2cQuoteIsError &&
               !c2cQuoteLoading &&
@@ -2980,11 +3001,6 @@ export default function SwapPage() {
                 networkFeeEnabled: false
               })}
             />
-            {stage.recordError ? (
-              <div className="mb-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-700">
-                {stage.recordError}
-              </div>
-            ) : null}
             <div className="mb-4 flex items-center gap-3">
               <div className="flex size-12 items-center justify-center rounded-2xl bg-primary/10">
                 <span className="inline-block size-5 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
@@ -3041,15 +3057,8 @@ export default function SwapPage() {
               The transaction was submitted. WarpX is waiting for the on-chain
               receipt and verifying the escrow state before the solver locks CBTC.
             </p>
-            {stage.recordError && (
-              <p className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-left text-sm text-amber-700">
-                {stage.recordError}
-              </p>
-            )}
             <p className="mt-3 text-xs text-foreground/50">
-              {stage.recordError
-                ? `Recovery has been running for ${waitElapsedSec}s. Do not start a second swap with the same funds.`
-                : `Verification has been running for ${waitElapsedSec}s. Do not start a second swap with the same funds.`}
+              Verification has been running for {waitElapsedSec}s.
             </p>
             <Link
               href={`/orders?id=${encodeURIComponent(stage.swapId)}`}

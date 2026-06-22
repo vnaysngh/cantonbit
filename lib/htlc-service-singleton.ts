@@ -611,8 +611,10 @@ class HtlcService {
       o.status = "main_locking";
       if (!(await this.store.putIfStatus(o, "accepted"))) {
         const fresh = await this.must(id);
+        if (!fresh.mainLockTx && fresh.status === "main_locking") {
+          return fresh;
+        }
         if (
-          fresh.status === "main_locked" &&
           fresh.mainLockTx?.toLowerCase() === mainLockTx.toLowerCase()
         ) {
           return fresh;
@@ -797,7 +799,6 @@ class HtlcService {
     if (o.allocationCid && !o.htlcCid) {
       if (o.direction === "evm-to-canton") {
         await verifyEvmLock(o);
-        await assertHtlcSettlementQuoteFresh(o);
       }
       const hashLockHex0 = o.hashLock.startsWith("0x")
         ? o.hashLock.slice(2)
@@ -835,8 +836,11 @@ class HtlcService {
     const expectedStatus = o.status;
 
     if (o.direction === "evm-to-canton") {
+      // Do NOT re-price after the user's WBTC is already locked. Quote freshness is
+      // enforced before the user commits funds; after main_locked the solver must
+      // either fulfill the committed minOut or wait for the protocol refund path.
+      // A flaky price feed must never strand a funded order in counter_locking.
       await verifyEvmLock(o);
-      await assertHtlcSettlementQuoteFresh(o);
     }
 
     const holdings = await getHoldings(o.solverCantonParty);
@@ -943,11 +947,9 @@ class HtlcService {
     // (Only from main_locked — never downgrade counter_claimed/main_claimed.)
     if (o.status === "main_locked") {
       // 0. EVM LOCK CHECK — the WBTC must REALLY be locked for our solver with time to
-      // spare, and the fresh quote must still satisfy the user's floor. This is a
-      // pre-reveal guard only: once status is counter_claimed/main_claimed the preimage
-      // is already public and retries must remain idempotent even if the market moves.
+      // spare. Do not re-price here: the user has already locked WBTC, and a price
+      // source outage must not block reveal/delivery of the committed quote.
       await verifyEvmLock(o);
-      await assertHtlcSettlementQuoteFresh(o);
 
       o.revealedPreimage = ("0x" +
         (preimageHex.startsWith("0x")

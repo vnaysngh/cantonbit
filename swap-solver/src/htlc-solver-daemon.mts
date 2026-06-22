@@ -731,8 +731,13 @@ async function main() {
           continue; // reverse orders never fall through to the forward branches
         }
 
-        // STEP 4 — order is main_locked: verify the WBTC lock on-chain, lock counter.
-        if (o.status === "main_locked" && !lockedCounter.has(o.id)) {
+        // STEP 4 — order is main_locked/counter_locking: verify the WBTC lock
+        // on-chain, then lock/recover the Canton counter. Include counter_locking
+        // so a crash or transient API failure after the lifecycle CAS is retried.
+        if (
+          (o.status === "main_locked" || o.status === "counter_locking") &&
+          !lockedCounter.has(o.id)
+        ) {
           const lock = (await escrow.read.locks([o.hashLock])) as readonly [
             bigint,
             bigint,

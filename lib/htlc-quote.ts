@@ -10,10 +10,11 @@
  *   wbtc → cbtc : cbtcOut = wbtcIn × P × (1 − fee)     (P = BTC per 1 WBTC)
  *   cbtc → wbtc : wbtcOut = cbtcIn ÷ P × (1 − fee)
  *
- * Price source: CoinGecko WBTC-in-BTC (no API key). Cached 30s server-side; served
- * up to 90s stale on source failure (ops alert); beyond that we REFUSE to quote (no
- * silent 1.0 fallback — a wrong price is worse than no quote). De-peg breaker:
- * |P−1| > 2% → refuse (protects both sides from quoting through a WBTC depeg event).
+ * Price source: multiple independent WBTC/BTC public feeds. Cached 30s server-side;
+ * served up to 90s stale on source failure (ops alert); beyond that we REFUSE to
+ * quote (no silent 1.0 fallback — a wrong price is worse than no quote). De-peg
+ * breaker: |P−1| > 2% → refuse (protects both sides from quoting through a WBTC
+ * depeg event).
  */
 import "server-only";
 
@@ -112,13 +113,71 @@ async function tryBinanceWbtcBtc(): Promise<number | null> {
   return wbtc / btc;
 }
 
+/** BTC per 1 WBTC from Kraken spot ratio. */
+async function tryKrakenWbtcBtc(): Promise<number | null> {
+  const j = (await fetchJson(
+    "https://api.kraken.com/0/public/Ticker?pair=WBTCUSD,XBTUSD"
+  )) as {
+    error?: string[];
+    result?: Record<string, { c?: [string, ...string[]] }>;
+  };
+  if (j.error?.length) throw new Error(j.error.join(", "));
+  const result = j.result ?? {};
+  let wbtcUsd: number | null = null;
+  let btcUsd: number | null = null;
+  for (const [pair, ticker] of Object.entries(result)) {
+    const last = parsePositive(ticker.c?.[0]);
+    if (last == null) continue;
+    const normalized = pair.toUpperCase();
+    if (normalized.includes("WBTC")) {
+      wbtcUsd = last;
+    } else if (
+      normalized.includes("XBT") ||
+      (normalized.includes("BTC") && !normalized.includes("WBTC"))
+    ) {
+      btcUsd = last;
+    }
+  }
+  if (wbtcUsd == null || btcUsd == null) return null;
+  return wbtcUsd / btcUsd;
+}
+
+/** BTC per 1 WBTC from CoinPaprika's direct WBTC/BTC quote. */
+async function tryCoinPaprikaWbtcBtc(): Promise<number | null> {
+  const j = (await fetchJson(
+    "https://api.coinpaprika.com/v1/tickers/wbtc-wrapped-bitcoin?quotes=BTC"
+  )) as {
+    quotes?: { BTC?: { price?: number | string } };
+  };
+  return parsePositive(j.quotes?.BTC?.price);
+}
+
+/** BTC per 1 WBTC from Coinbase's public exchange-rate endpoint. */
+async function tryCoinbaseWbtcBtc(): Promise<number | null> {
+  const j = (await fetchJson(
+    "https://api.coinbase.com/v2/exchange-rates?currency=WBTC"
+  )) as {
+    data?: { rates?: { BTC?: string } };
+  };
+  return parsePositive(j.data?.rates?.BTC);
+}
+
 async function fetchWbtcBtcLiveChecked(): Promise<WbtcBtcPrice> {
   const sources: Array<{ name: string; fn: () => Promise<number | null> }> = [
     { name: "coingecko", fn: tryCoinGeckoWbtcBtc },
+    { name: "kraken", fn: tryKrakenWbtcBtc },
+    { name: "coinpaprika", fn: tryCoinPaprikaWbtcBtc },
+    { name: "coinbase", fn: tryCoinbaseWbtcBtc },
     { name: "binance", fn: tryBinanceWbtcBtc }
   ];
   const settled = await Promise.allSettled(
-    sources.map(async ({ name, fn }) => ({ name, price: await fn() }))
+    sources.map(async ({ name, fn }) => {
+      try {
+        return { name, price: await fn() };
+      } catch (e) {
+        throw new Error(`${name}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    })
   );
   const valid: Array<{ name: string; price: number }> = [];
   const errors: string[] = [];
@@ -180,7 +239,7 @@ export async function getWbtcBtcPrice(): Promise<{
       },
       sources: [
         {
-          name: "coingecko+binance",
+          name: "wbtc-btc-cross-check",
           fetch: fetchWbtcBtcLiveChecked
         }
       ],
