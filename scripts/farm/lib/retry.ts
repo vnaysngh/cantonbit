@@ -21,7 +21,10 @@ export function isTransientError(err: unknown): boolean {
     "float check failed",
     "no viable swap",
     "not allowlisted",
-    "duplicate command"
+    "duplicate command",
+    "invalid_argument",
+    "template_id",
+    "inactive_contract"
   ];
   if (deterministic.some((d) => combined.includes(d))) return false;
 

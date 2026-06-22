@@ -29,6 +29,8 @@
     "farm:run:mainnet": "bash scripts/with-env.sh mainnet npx tsx scripts/farm/cli.mts run",
     "farm:status:mainnet": "bash scripts/with-env.sh mainnet npx tsx scripts/farm/cli.mts status",
     "farm:fund-traders-cc:mainnet": "bash scripts/with-env.sh mainnet npx tsx scripts/farm/cli.mts fund-traders-cc",
+    "farm:fund-traders-cbtc:mainnet": "bash scripts/with-env.sh mainnet npx tsx scripts/farm/cli.mts fund-traders-cbtc",
+    "farm:consolidate:mainnet": "bash scripts/with-env.sh mainnet npx tsx scripts/farm/cli.mts consolidate",
     "farm:audit-burns:mainnet": "bash scripts/with-env.sh mainnet npx tsx scripts/farm/cli.mts audit-burns",
     "farm:run:railway": "npx tsx scripts/farm/railway-start.mts",
     "dev:all": "bash scripts/dev-all.sh",

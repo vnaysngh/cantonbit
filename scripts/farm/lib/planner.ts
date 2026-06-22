@@ -260,7 +260,14 @@ export async function planNextSwap(params: {
   }
 
   if (candidates.length === 0) {
-    throw new Error(formatPlanBlockers({ float, pacing, quotes, state: params.state }));
+    throw new Error(
+      formatPlanBlockers({
+        float,
+        pacing: params.pacing,
+        quotes,
+        state: params.state
+      })
+    );
   }
 
   const chosen = pickScored(candidates);

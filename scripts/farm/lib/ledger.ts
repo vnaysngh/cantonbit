@@ -60,17 +60,23 @@ function holdingTemplate(kind: TransferRegistryKind): string {
   return kind === "cc" ? AMULET_HOLDING_TEMPLATE_FQN : CBTC_HOLDING_TEMPLATE_FQN;
 }
 
+function holdingDisclosedTemplateId(
+  holding: Holding,
+  registryKind: TransferRegistryKind
+): string {
+  if (holding.templateId) return holding.templateId;
+  return holdingTemplate(registryKind);
+}
+
 function mergeDisclosed(batches: DisclosedContract[][]): DisclosedContract[] {
-  const seen = new Set<string>();
-  const out: DisclosedContract[] = [];
+  const byCid = new Map<string, DisclosedContract>();
   for (const batch of batches) {
     for (const dc of batch) {
-      if (seen.has(dc.contractId)) continue;
-      seen.add(dc.contractId);
-      out.push(dc);
+      // Later batches win — input holdings override factory prefetch stubs.
+      byCid.set(dc.contractId, dc);
     }
   }
-  return out;
+  return [...byCid.values()];
 }
 
 function pickSynchronizerId(batches: DisclosedContract[][]): string {
@@ -259,6 +265,8 @@ export async function buildTransferExercise(params: {
   registryKind?: TransferRegistryKind;
   assetSymbol?: string;
   memo?: string;
+  /** Use every input holding (self-transfer merge) instead of greedy pick. */
+  useAllInputHoldings?: boolean;
 }): Promise<BuiltTransferLeg> {
   const {
     jwt,
@@ -271,23 +279,27 @@ export async function buildTransferExercise(params: {
     registrarAdmin = NETWORK.decentralizedPartyId,
     registryKind = "cbtc",
     assetSymbol = instrumentId.id === "Amulet" ? "CC" : "CBTC",
-    memo = "OranjSwap"
+    memo = "OranjSwap",
+    useAllInputHoldings = false
   } = params;
   const now = new Date().toISOString();
   const executeBefore = new Date(Date.now() + Math.max(60, expirationSeconds) * 1000).toISOString();
-  const picked = selectHoldingsForAmount(
-    inputHoldings.map((h) => ({
-      ...h,
-      payload: {
-        owner: h.payload?.owner ?? senderParty,
-        amount: h.payload?.amount ?? "0",
-        instrumentId: h.payload?.instrumentId ?? instrumentId
-      }
-    })),
-    amount,
-    assetSymbol === "CC" ? 10 : 8,
-    assetSymbol
-  );
+  const normalized = inputHoldings.map((h) => ({
+    ...h,
+    payload: {
+      owner: h.payload?.owner ?? senderParty,
+      amount: h.payload?.amount ?? "0",
+      instrumentId: h.payload?.instrumentId ?? instrumentId
+    }
+  }));
+  const picked = useAllInputHoldings
+    ? normalized
+    : selectHoldingsForAmount(
+        normalized,
+        amount,
+        assetSymbol === "CC" ? 10 : 8,
+        assetSymbol
+      );
   const transferPayload = {
     sender: senderParty,
     receiver: receiverParty,
@@ -318,18 +330,18 @@ export async function buildTransferExercise(params: {
       disclosedContracts: DisclosedContract[];
     };
   };
-  const disclosedContracts: DisclosedContract[] = [
-    ...factory.choiceContext.disclosedContracts.map((dc) => ({
+  const disclosedContracts = mergeDisclosed([
+    factory.choiceContext.disclosedContracts.map((dc) => ({
       ...dc,
       synchronizerId: dc.synchronizerId ?? ""
     })),
-    ...picked.map((h) => ({
-      templateId: h.templateId ?? holdingTemplate(registryKind),
+    picked.map((h) => ({
+      templateId: holdingDisclosedTemplateId(h, registryKind),
       contractId: h.contractId,
       createdEventBlob: h.createdEventBlob ?? "",
       synchronizerId: ""
     }))
-  ];
+  ]);
   const synchronizerId = pickSynchronizerId([disclosedContracts]);
   return {
     command: {
@@ -443,15 +455,22 @@ export async function listCcHoldings(
       JsActiveContract?: {
         createdEvent?: {
           contractId?: string;
+          templateId?: string;
           createdEventBlob?: string;
           interfaceViews?: Array<{
-            viewValue?: { owner?: string; amount?: string; instrumentId?: { id?: string } };
+            viewValue?: {
+              owner?: string;
+              amount?: string;
+              instrumentId?: { id?: string };
+              lock?: { expiresAt?: string | null; expiresAfter?: string | null } | null;
+            };
             viewStatus?: { code?: number };
           }>;
         };
       };
     };
   }>;
+  const nowIso = new Date().toISOString();
   const out: Holding[] = [];
   for (const e of entries) {
     const ev = e.contractEntry?.JsActiveContract?.createdEvent;
@@ -459,10 +478,15 @@ export async function listCcHoldings(
     if (!ev?.contractId || !iv || iv.viewStatus?.code) continue;
     const v = iv.viewValue;
     if (!v || v.owner !== party || v.instrumentId?.id !== "Amulet") continue;
+    const lock = v.lock;
+    if (lock != null) {
+      const locked = lock.expiresAt ? lock.expiresAt > nowIso : true;
+      if (locked) continue;
+    }
     out.push({
       contractId: ev.contractId,
       createdEventBlob: ev.createdEventBlob ?? "",
-      templateId: AMULET_HOLDING_TEMPLATE_FQN,
+      templateId: ev.templateId ?? AMULET_HOLDING_TEMPLATE_FQN,
       payload: {
         owner: party,
         amount: String(v.amount ?? "0"),
@@ -490,6 +514,7 @@ export async function listCbtcHoldings(party: string): Promise<Holding[]> {
     .map((h) => ({
       contractId: h.contractId,
       createdEventBlob: h.createdEventBlob,
+      templateId: CBTC_HOLDING_TEMPLATE_FQN,
       payload: {
         owner: party,
         amount: h.amount,

@@ -16,6 +16,8 @@ import { runFarmBot } from "./run";
 import { runStatus } from "./status";
 import { runBurnAudit } from "./audit-burns";
 import { runFundTradersCc } from "./fund-traders-cc";
+import { runFundTradersCbtc } from "./fund-traders-cbtc";
+import { runConsolidateTraderHoldings } from "./consolidate-trader-holdings";
 
 const sub = process.argv[2]?.trim() ?? "help";
 
@@ -81,7 +83,9 @@ Commands:
   swap        One managed swap (--trader --from --to --in)
   run         Continuous bot (--i-understand-mainnet --bitsafe-eligible-confirmed)
   status      Fleet balances + UTXO
-  fund-traders-cc  Send CC from vault to all traders (--cc --trader --dry-run)
+  fund-traders-cc   Send CC from vault to all traders (--cc --trader --dry-run)
+  fund-traders-cbtc Send CBTC from vault to all traders (--cbtc --trader --dry-run)
+  consolidate       Merge UTXOs via self-transfer (--asset --trader --min-utxo --vault)
   audit-burns Scan farm-swap.log for CC burn/fee choices
 
 npm scripts (via with-env.sh mainnet):
@@ -93,6 +97,8 @@ npm scripts (via with-env.sh mainnet):
   npm run farm:status:mainnet
   npm run farm:fund-traders-cc:mainnet -- --i-understand-mainnet --dry-run
   npm run farm:fund-traders-cc:mainnet -- --i-understand-mainnet --cc=50
+  npm run farm:fund-traders-cbtc:mainnet -- --i-understand-mainnet --cbtc=0.0002
+  npm run farm:consolidate:mainnet -- --i-understand-mainnet --asset=CBTC --trader=4
 `);
 }
 
@@ -118,6 +124,12 @@ async function main(): Promise<void> {
       break;
     case "fund-traders-cc":
       await runFundTradersCc();
+      break;
+    case "fund-traders-cbtc":
+      await runFundTradersCbtc();
+      break;
+    case "consolidate":
+      await runConsolidateTraderHoldings();
       break;
     case "audit-burns":
       await runBurnAudit();
