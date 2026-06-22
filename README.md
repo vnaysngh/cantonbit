@@ -1,340 +1,456 @@
-# OranjSwap — Atomic EVM ↔ Canton Swaps
+# OranjSwap — WBTC↔CBTC HTLC + Canton CBTC↔CC Swaps
 
-> **Single source of truth for this repo.** What we're building, how swaps work, and
-> what's trustless vs trust-minimized. Task list: [`TASKS.md`](./TASKS.md). Agent/runtime
-> notes: [`CLAUDE.md`](./CLAUDE.md).
+> **Single source of truth for this repo.** What the app supports, where the
+> trust boundaries are, and what must be true before a deployment is safe.
+> Task list: [`TASKS.md`](./TASKS.md). Agent/runtime notes: [`CLAUDE.md`](./CLAUDE.md).
 
-OranjSwap is a cross-chain swap app that moves **Bitcoin-backed tokens** between **EVM**
-(WBTC on Base Sepolia today) and **Canton** (CBTC on WarpX DevNet). Swaps are bound by a
-single **hashlock**: one random secret `s`, one hash `H = keccak256(s)`. Reveal the secret
-→ the trade completes on both legs. Wait out the timelock without revealing → each side
-gets its own funds back.
+OranjSwap now supports two swap families:
 
-We support **participant-managed** (email) and **Loop** (external wallet) Canton
-identities — the same split used by production EVM↔Canton HTLC venues, with different
-trust properties on the CBTC leg for each mode.
+- **Cross-chain HTLC swaps:** WBTC on Base/Base Sepolia ↔ CBTC on Canton.
+- **Same-Canton C2C swaps:** CBTC ↔ CC on Canton.
+
+Both swap families support **participant-managed/email parties** and **Loop wallet
+parties**, but those two wallet modes have different authority and custody
+properties. The app routes all new swap inventory through a funded **settlement
+vault party** configured by `CANTON_SWAP_SETTLEMENT_PARTY`.
+
+Post-audit status: the release-blocking findings from the June 2026 swap audit
+have been remediated in code, but production rollout still requires the database
+migrations, exact deployment env, funded smoke swaps, and recovery drills to match
+the target network. See:
+
+- [`docs/SWAP-SECURITY-AUDIT-README-2026-06-21.md`](./docs/SWAP-SECURITY-AUDIT-README-2026-06-21.md)
+- [`docs/SWAP-QUOTE-DESIGN.md`](./docs/SWAP-QUOTE-DESIGN.md)
+- [`docs/SECURITY-AUDIT-2026-06-21.md`](./docs/SECURITY-AUDIT-2026-06-21.md)
 
 ---
 
 ## Table of contents
 
-1. [The idea in one minute](#1-the-idea-in-one-minute)
-2. [Two swap directions](#2-two-swap-directions)
-3. [Two wallet modes](#3-two-wallet-modes)
-4. [Trust model (honest)](#4-trust-model-honest)
-5. [The HTLC secret](#5-the-htlc-secret)
-6. [Swap page vs Orders page](#6-swap-page-vs-orders-page)
-7. [Order lifecycle & the solver daemon](#7-order-lifecycle--the-solver-daemon)
-8. [On-chain / on-ledger building blocks](#8-on-chain--on-ledger-building-blocks)
-9. [Running locally](#9-running-locally)
-10. [Deploying on Railway](#10-deploying-on-railway)
-11. [Repo layout & deeper docs](#11-repo-layout--deeper-docs)
-12. [Fees & swap parameters](#12-fees--swap-parameters)
+1. [Swap families at a glance](#1-swap-families-at-a-glance)
+2. [Cross-chain HTLC swaps](#2-cross-chain-htlc-swaps)
+3. [Canton-to-Canton C2C swaps](#3-canton-to-canton-c2c-swaps)
+4. [Wallet modes and trust model](#4-wallet-modes-and-trust-model)
+5. [Quotes, floors, and price safety](#5-quotes-floors-and-price-safety)
+6. [Fees and swap parameters](#6-fees-and-swap-parameters)
+7. [Order lifecycle, daemons, and recovery](#7-order-lifecycle-daemons-and-recovery)
+8. [Database migrations and deployment invariants](#8-database-migrations-and-deployment-invariants)
+9. [On-chain / on-ledger building blocks](#9-on-chain--on-ledger-building-blocks)
+10. [Running locally](#10-running-locally)
+11. [Deploying on Railway](#11-deploying-on-railway)
+12. [Repo layout and deeper docs](#12-repo-layout-and-deeper-docs)
 
 ---
 
-## 1. The idea in one minute
+## 1. Swap families at a glance
 
-Imagine two people want to trade assets on different blockchains without trusting each other.
+| Family | Assets | Core mechanism | Wallet modes | Atomicity boundary |
+| --- | --- | --- | --- | --- |
+| Cross-chain HTLC | WBTC ↔ CBTC | EVM `HTLCEscrow` + Canton `HtlcLock` or standard transfer path | Email + Loop | Economic HTLC atomicity across two ledgers |
+| Same-Canton C2C | CBTC ↔ CC | Fixed-amount Canton transfer offers settled by the vault | Email + Loop | Single Canton update when direct; otherwise durable pending counter offer |
 
-1. **Both sides lock** under the same hash `H`, with **staggered refund timers**.
-2. **One party reveals** the secret `s` (where `keccak256(s) = H`) to claim what they're owed.
-3. That reveal **unlocks the other leg** — the counterparty uses the now-public `s` to claim their side.
-4. If someone stalls, **timelocks refund** each leg independently. Nobody can take the other's
-   funds without giving up their own (or waiting for a timeout).
+The important distinction is:
 
-On **EVM**, this is a standard ERC-20 HTLC contract (`lock` / `claim` / `retake`).
+- A **single Canton transaction** is all-or-nothing.
+- A **cross-chain swap** can never commit atomically on EVM and Canton at the same
+  instant. HTLCs provide economic atomicity through a shared hashlock, staggered
+  timelocks, finality checks, and refund paths.
+- The **database/orchestrator** must never lie about external state. Recent audit
+  fixes moved irreversible steps behind compare-and-swap state transitions,
+  deterministic command IDs, and serialized inventory-reservation RPCs.
 
-On **Canton**, CBTC does not ship with a native hashlock. We wrap a Splice **Allocation** in our
-custom Daml template **`HtlcLock`**, which enforces `keccak256(preimage) == hashLock` **on the
-ledger** before CBTC moves.
+---
+
+## 2. Cross-chain HTLC swaps
+
+Cross-chain swaps bind both legs to the same 32-byte secret:
 
 ```text
-         hashLock H = keccak256(secret s)
-                    │
-    ┌───────────────┴───────────────┐
-    │                               │
- EVM leg                         Canton leg
- (WBTC HTLC)                     (CBTC HtlcLock or transfer path)
- user/solver lock                solver/user lock
- longer/shorter timelock         shorter/longer timelock (per direction)
+hashLock H = keccak256(secret s)
+
+EVM leg                         Canton leg
+WBTC HTLC                       CBTC HtlcLock or standard transfer path
+lock / claim / retake           lock / claim / refund or deliver
 ```
 
-**keccak256 parity (critical):** EVM and Daml both hash the same raw 32-byte secret —
-we use keccak256 on both legs.
+The browser generates `s`; the order stores only `H`. The secret is revealed only
+when the user claims their receive leg.
 
 Canonical test vector: secret `the-cross-chain-secret-32bytes!!` →  
 `H = 0x94277b389401042e35f8709846050797955e2b321bee500555c2fbdc2f4e9903`.
 
----
-
-## 2. Two swap directions
-
-Timelocks follow the standard HTLC rule: **whoever reveals second gets the longer window**.
-Our server validates the ladder (`lib/htlc-timelock.ts`) — a hostile client cannot invert the legs.
-
-Default expiration: **4 hours** (user-selectable: 30m … 72h; minimum **2h** for Canton swaps).
-
-### EVM → Canton (buy CBTC with WBTC)
-
-You lock **WBTC on Base Sepolia** first; the solver locks **CBTC on Canton** second; you claim
-CBTC (reveal); the solver claims WBTC.
+### EVM → Canton: buy CBTC with WBTC
 
 | Step | Who | What |
-| ---- | --- | ---- |
-| 1 | User (browser) | Generate secret `s`, publish order with `H = keccak256(s)` |
-| 2 | Solver | Accept the order |
-| 3 | User (MetaMask) | Approve + **lock WBTC** on `HTLCEscrow` under `H` → `main_locked` |
-| 4 | Solver | **Lock CBTC** on Canton under the same `H` → `counter_locked` |
-| 5 | User | **Claim CBTC** — reveal `s` → `counter_claimed` |
-| 6 | Solver (daemon) | Read public `s`, **claim WBTC** on EVM → `main_claimed` / **Completed** |
+| --- | --- | --- |
+| 1 | User | Generate `s`; create order with `H` |
+| 2 | Vault/solver | Accept order after serialized CBTC-float reservation |
+| 3 | User | Approve + lock WBTC in `HTLCEscrow` |
+| 4 | Vault/solver | Lock or prepare CBTC counter leg |
+| 5 | User | Claim CBTC, revealing `s` |
+| 6 | HTLC daemon | Read `s` and claim WBTC on EVM |
 
-**Timelocks (forward):** `userTimelock` = EVM (longer — you retake WBTC after this);  
-`solverTimelock` = Canton (shorter — solver's CBTC refund window).
+Participant-managed/email users receive CBTC through the on-ledger `HtlcLock.Claim`
+path. Loop users receive through a standard Canton transfer after the backend
+verifies the revealed preimage; this is trust-minimized, not fully trustless.
 
-**CBTC delivery path depends on wallet mode** (see [§3](#3-two-wallet-modes)):
-- **Email:** on-ledger `HtlcLock.Claim` — hash checked by the Daml ledger.
-- **Loop:** standard CBTC transfer + backend hash gate (trust-minimized).
-
-### Canton → EVM (sell CBTC for WBTC)
-
-You lock **CBTC on Canton** first; the solver locks **WBTC on EVM** second; you claim WBTC in
-MetaMask (on-chain reveal); the solver claims CBTC on Canton.
+### Canton → EVM: sell CBTC for WBTC
 
 | Step | Who | What |
-| ---- | --- | ---- |
-| 1 | User (browser) | Generate `s`, publish order with `H` |
-| 2 | Solver | Accept |
-| 3 | User / backend | **Lock CBTC** on Canton → `main_locked` |
-| 4 | Solver (daemon) | **Lock WBTC** on EVM (receiver = your MetaMask address) → `counter_locked` |
-| 5 | User (MetaMask) | **`claim(preimage)` on EVM** — reveal on-chain → `counter_claimed` |
-| 6 | Solver (daemon) | Read `s` from the EVM `Claimed` event, **claim CBTC** on Canton → `main_claimed` |
-
-**Timelocks (reverse):** `userTimelock` = Canton (longer); `solverTimelock` = EVM (shorter).
-
-**Email users:** fully on-ledger — our backend signs `HtlcLock` lock/refund via `CanActAs` over
-your warpx-hosted party (**platform auto-lock**).
-
-**Loop sellers:** CBTC moves via a **standard transfer to the venue** (custody during swap —
-see [§4](#4-trust-model-honest)).
-
----
-
-## 3. Two wallet modes
-
-We support two Canton identity models:
-
-| | **Email / participant-managed** | **Loop wallet (external)** |
 | --- | --- | --- |
-| **Sign in** | Supabase OTP (email) | Loop Exchange API Key + wallet popup |
-| **Canton party** | Hosted on **our WarpX node** | Hosted on **Loop's participant** |
-| **Canton signing** | Backend signs via **`CanActAs`** — no popup for most steps | User signs in **Loop wallet** |
-| **`counterMode`** | `managed` | `loop` |
-| **Forward (EVM→Canton) CBTC claim** | `POST /claim-managed` — on-ledger `HtlcLock.Claim` | `claim-counter` + optional Loop `TransferInstruction_Accept` |
-| **Reverse (Canton→EVM) CBTC lock** | Backend `lock-main` — on-ledger `HtlcLock` | User signs transfer → venue accepts (custody) |
-| **Trust on CBTC leg** | ✅ **Fully trustless** (ledger enforces hash) | ⚠️ **Trust-minimized** (backend hash gate + standard transfer) |
+| 1 | User | Generate `s`; create order with `H` |
+| 2 | Vault/solver | Accept after WBTC exposure is reserved |
+| 3 | User / backend | Lock or transfer CBTC on Canton |
+| 4 | HTLC daemon | Lock WBTC in `HTLCEscrow` for the user's EVM address |
+| 5 | User | Claim WBTC on EVM, revealing `s` |
+| 6 | HTLC daemon | Claim CBTC on Canton using the EVM reveal |
 
-### Why email users get a fully trustless Canton leg
+Email users use the custom `HtlcLock` path. Loop sellers use a standard transfer
+to the vault, so the vault is temporarily custodian of the CBTC during settlement.
+The reverse WBTC leg is reserved before user Canton funds are locked or custodied.
 
-Three things must align for `HtlcLock.Claim` to work on our node:
+### HTLC secret vault
 
-1. **DAR on the receiver's participant** — our `cbtc-htlc-hardened` package must be vetted where
-   the receiver party lives. Email parties are **local on WarpX** → our DAR applies.
-2. **`CanActAs` grant** — the backend may sign `Claim` for the hosted receiver
-   (participant-managed path).
-3. **Disclosed Allocation** — the claim submission includes the Allocation contract the template
-   executes against.
+The secret is held client-side in `localStorage` under `oranj.htlc.secrets.v3`
+using AES-GCM (`lib/secret-vault.ts`).
 
-Proven on live DevNet: receiver exercises `HtlcLock.Claim` → ledger checks keccak →
-`Allocation_ExecuteTransfer` → CBTC delivered.
-
-### Why Loop users cannot be fully trustless on Canton (yet)
-
-Loop parties live on an **external participant** that does **not** have our custom DAR. A
-cross-participant `HtlcLock` where the receiver is a Loop party fails with synchronizer /
-authority errors — we proved this on-node in both directions.
-
-**Canton's authority model forces a different path:**
-
-- **Forward (buy CBTC):** after you lock WBTC, the solver delivers CBTC via a **standard Splice
-  transfer**. We verify `keccak256(preimage) == hashLock` **server-side** before releasing; you
-  may need one Loop popup to `TransferInstruction_Accept` unless preapproval auto-accepts.
-- **Reverse (sell CBTC):** you sign a **standard transfer** of your CBTC to the venue; we accept
-  as custodian, then lock WBTC on EVM. Refunds return custodied CBTC if you never reveal.
-
-This is the structural tradeoff for external-wallet Canton parties: **custody or
-backend-gated reveal**, not an on-ledger hash template on the external participant.
-
-**Your EVM leg stays fully trustless in both modes** — real `HTLCEscrow` on Base Sepolia with
-on-chain `keccak256` checks and `retake` refunds.
-
----
-
-## 4. Trust model (honest)
-
-| Leg | Email user | Loop user |
+| Anchor | Wallet mode | Unlock |
 | --- | --- | --- |
-| **EVM (WBTC)** | ✅ Trustless — `HTLCEscrow.sol` | ✅ Trustless — same contract |
-| **Canton (CBTC) forward** | ✅ Trustless — `HtlcLock` on ledger | ⚠️ Trust-minimized — backend reveal gate + transfer |
-| **Canton (CBTC) reverse** | ✅ Trustless — `HtlcLock` on ledger | ⚠️ Trust-minimized — venue custody during swap |
+| `managed-session` | Email / participant-managed | Active Supabase session + matching Canton party |
+| `loop-wallet` | Loop | Connected Loop party + matching public key; `signMessage` is a consent gate |
 
-**What "trust-minimized" means here:** the solver/platform must not learn your secret before you
-claim, and cannot pass the hash gate without the correct preimage. You still rely on the backend
-to **honor** that gate (and, for Loop reverse, to hold/return custodied CBTC).
+Design constraints:
 
-**What stays safe even if the solver misbehaves (both modes):**
-
-- Your locked **WBTC on EVM** is only taken by a valid on-chain `claim(preimage)` or returned
-  by `retake` after your timelock.
-- Staggered timelocks + server-side **EVM claim-margin checks** prevent "reveal late, steal both
-  legs" attacks against solver float.
-
-We deliberately **do not** store your secret on the server pre-claim. See [§5](#5-the-htlc-secret).
+- The server must not receive `s` before claim.
+- The vault entry must survive refresh and `/orders` recovery.
+- Wrong Supabase session, Loop wallet, or MetaMask address must not decrypt/claim.
+- Same-origin XSS can still access browser-held material; CSP and Trusted Types
+  reduce that risk but do not make browser storage a hardware boundary.
 
 ---
 
-## 5. The HTLC secret
+## 3. Canton-to-Canton C2C swaps
 
-Every swap starts in the browser with `generateSecret()` (`lib/htlc-client.ts`):
+C2C swaps trade **CBTC ↔ CC** on the Canton ledger. They do not use the HTLC secret.
+The order binds fixed input, output, `minOut`, quote expiry, user party, wallet mode,
+and the settlement vault party.
 
-- Random 32-byte secret `s`
-- `hashLock H = keccak256(s)` committed in the order and both locks
-- **`s` must survive refresh, tab close, and navigation to `/orders`**
-- **`s` must not reach the solver or our DB before claim** — otherwise the solver could front-run
+### Managed/email C2C
 
-### Encrypted browser vault (v3)
-
-Storage: `lib/secret-vault.ts` → `localStorage` key `oranj.htlc.secrets.v3` (AES-GCM).
-
-| Anchor | When | Unlock |
-| --- | --- | --- |
-| **`managed-session`** | Email / `counterMode: managed` | Active Supabase session + matching Canton party |
-| **`loop-wallet`** | Loop / `counterMode: loop` | Connected Loop party + matching `public_key`; one-time **`signMessage`** unlock gate per 30 min |
-
-**Design choices (vs server-side secret recovery):**
-
-- ✅ Secret stays **client-only** until you POST it at claim time
-- ✅ Bound to identity — wrong account / wrong Loop wallet / wrong MetaMask cannot decrypt
-- ✅ TTL purge after timelock; cleared after successful claim or retake
-- ✅ Manual **paste fallback** on `/orders` if storage is missing (honest cross-device limit)
-- ⚠️ Same-origin XSS can still decrypt — this is a browser ceiling; see
-  [`docs/HTLC-SECRET-VAULT.md`](./docs/HTLC-SECRET-VAULT.md) for Tier 2 ideas
-
-**Loop v3 fix:** an earlier vault derived AES keys from **non-deterministic** `signMessage`
-signatures, which broke recall after refresh. v3 uses a deterministic key from `party_id +
-public_key`; `signMessage` is only a **consent gate**, not key material.
-
----
-
-## 6. Swap page vs Orders page
-
-Both pages call the same claim protocol (`claimSwap` in `lib/htlc-client.ts`). Only **storage
-recall and UX** differ.
-
-### `/swap` — live swap flow
-
-- Generates the secret, **persists to vault before locking** (swap aborts if vault save fails)
-- Walks you through lock → wait for solver → claim with step UI
-- **Resume after refresh:** detects an in-progress claimable swap; shows **"Unlock saved secret"**
-  (does **not** auto-trigger Loop `signMessage`)
-- Clears vault entry after claim / retake
-
-### `/orders` — history & recovery
-
-- Lists swaps from **session party + Loop party** (merged history when you have both)
-- Hides abandoned drafts (`accepted` forward orders that never locked WBTC)
-- **Claim drawer** for `counter_locked` (and Loop forward at `main_locked`)
-- Recalls secret from vault, or **paste secret manually**
-- Loop users may see one **`signMessage`** popup to unlock the vault before claim
-- Email forward claim needs **no MetaMask** — only Supabase session + recalled secret
-
-| Scenario | Wallet | Claim from `/orders` needs |
-| --- | --- | --- |
-| Forward EVM→Canton | Email | Supabase session + vault (no MetaMask) |
-| Forward EVM→Canton | Loop | Loop connected + vault unlock + maybe Accept popup |
-| Reverse Canton→EVM | Either | MetaMask on the order's EVM address + vault or paste |
-
----
-
-## 7. Order lifecycle & the solver daemon
-
-### Statuses
+Participant-managed parties can be settled by the backend with the required
+`actAs` authority. The desired path is:
 
 ```text
-open → accepted → main_locked → counter_locked → counter_claimed → main_claimed
-                                                      ↘ refunded / cancelled / failed
+create quote → create order → user sell offer to vault →
+vault accepts sell offer + directly delivers counter asset in one Canton update
 ```
 
-| Status | Meaning (user-facing) |
-| --- | --- |
-| `main_locked` | Your leg is locked (WBTC or CBTC depending on direction) |
-| `counter_locked` | Both legs locked — **you can claim** |
-| `counter_claimed` | You revealed; solver finishing the other leg (**Settling**) |
-| `main_claimed` | Done (**Completed**) |
+The service refuses to consume the user sell leg if the counter leg would only
+create a pending offer for a managed user. That keeps managed C2C atomic at the
+Canton transaction boundary.
 
-### Independent solver daemon (required in production)
+### Loop C2C
 
-The browser **never** holds solver keys. A standalone worker polls the app API and completes
-the solver's on-chain steps:
+Loop users sign the sell leg in Loop. The vault then fills:
 
-```bash
-npm run solver:htlc   # swap-solver/src/htlc-solver-daemon.mts
+```text
+Loop user signs sell offer to vault →
+daemon accepts that offer and sends/creates the counter leg →
+user accepts counter offer if direct delivery did not auto-settle
 ```
 
-**Not** `npm run solver:watch` — that is the legacy mainnet OIF settler (Arbitrum), not HTLC.
+The fill transaction atomically consumes the user sell offer and creates or
+delivers the counter leg. If the counter leg is a pending offer, final receipt
+depends on the user accepting it in Loop. The service persists the counter-offer
+creation offset and permanent receipt proof before any reissue, so an old accepted
+offer cannot be mistaken for a failed delivery and paid twice.
 
-The daemon:
+### C2C order states
 
-1. On `main_locked` (forward) → verify EVM lock → lock CBTC counter
-2. On `counter_claimed` (forward) → read revealed `s` → claim WBTC on EVM
-3. On `main_locked` (reverse) → lock WBTC on EVM
-4. On `counter_locked` (reverse) → watch EVM `Claimed` event for `s` → claim CBTC on Canton
-5. Periodically calls `/api/htlc/auto-refund` for expired swaps
+```text
+open → settling / filling → user_locked → filled
+                         ↘ expired / failed / cancelled
+```
 
-If the daemon stops, swaps can stall at **Settling** (you already received CBTC; solver hasn't
-book-kept the EVM claim yet).
+Important fields:
+
+- `settlementParty`: current vault party.
+- `floatReserved`: vault inventory reservation held during settlement.
+- `settlementUpdateId`: Canton update that consumed the sell leg / delivered or
+  offered the counter leg.
+- `counterLegCreatedOffset` + `counterReceiptUpdateId`: durable proof for counter
+  offer recovery.
+- `networkFeeAccountingPending`: outbox marker for fee-booking recovery.
 
 ---
 
-## 8. On-chain / on-ledger building blocks
+## 4. Wallet modes and trust model
+
+| | Email / participant-managed | Loop wallet |
+| --- | --- | --- |
+| Sign-in | Supabase OTP | Loop API key/session + wallet popups |
+| Canton party | Hosted on the WarpX participant | Hosted on Loop's participant |
+| Canton signing | Backend via `CanActAs` | User signs in Loop |
+| Cross-chain forward | On-ledger `HtlcLock.Claim` | Backend hash gate + standard transfer |
+| Cross-chain reverse | On-ledger `HtlcLock` | Vault custody during settlement |
+| C2C | Backend submit with user + vault authority | User signs sell leg; vault daemon fills |
+
+Trust model by flow:
+
+| Flow | Current property | Limitation |
+| --- | --- | --- |
+| Cross-chain, email | Economic HTLC atomicity | Requires configured EVM finality, active daemon, and refund/watchtower paths |
+| Cross-chain, Loop buyer | Trust-minimized venue delivery obligation | Preimage reveal cannot be one atomic Canton/EVM transaction |
+| Cross-chain, Loop seller | Custodial during settlement | Vault temporarily controls CBTC; WBTC is reserved first and refunds are deterministic |
+| C2C, managed | Atomic direct Canton delivery | Quote/reference checks and DB reservation happen before submit |
+| C2C, Loop | Atomic sell-consumption + counter creation/delivery | User may still need to accept a pending counter offer |
+
+The EVM leg stays trustless in both wallet modes: `HTLCEscrow.sol` enforces
+`keccak256(preimage) == hashLock` and `retake` after timelock.
+
+Loop parties cannot currently use the custom `HtlcLock` template on their external
+participant. That is a Canton authority/package-vetting boundary, not a UI choice.
+
+---
+
+## 5. Quotes, floors, and price safety
+
+The quote is a guaranteed floor, not just display math. The UI should say
+**“You receive at least X”** and show source, age, expiry, and stale/indicative notes.
+
+### Cross-chain WBTC↔CBTC
+
+Quote math:
+
+- EVM → Canton: `cbtcOut = wbtcIn × WBTC/BTC × (1 − platformFee)`
+- Canton → EVM: `wbtcOut = cbtcIn ÷ WBTC/BTC × (1 − platformFee)`
+
+Controls:
+
+- CoinGecko + Binance WBTC/BTC cross-check.
+- 30s fresh cache; max 90s bounded stale serve; then refuse to quote.
+- 2% WBTC/BTC depeg breaker.
+- 60s quote TTL.
+- Server-side create re-quote with tight amount tolerance.
+- Settlement-time quote floor before solver value is locked or delivered.
+
+### Same-Canton CBTC↔CC
+
+Quote source:
+
+- Tradecraft fixed-input quote is the executable market price input.
+- The service independently sanity-checks Tradecraft against `amuletPrice × BTC/USD`.
+- Mainnet default sanity band is tight; devnet is wider because devnet C2C still
+  references mainnet Tradecraft pricing and is labeled indicative.
+- Settlement re-quotes and enforces `minOut` plus a bounded settlement slippage floor.
+
+### Deferred quote work
+
+Dutch auction / solver competition is intentionally deferred for v1. The current
+production target is short-TTL fixed-floor quotes with strict refuse-on-bad-price
+behavior.
+
+---
+
+## 6. Fees and swap parameters
+
+There are three separate cost categories:
+
+| Cost | Paid by | Notes |
+| --- | --- | --- |
+| Platform spread | User receives less than fair mid | Configured by `PLATFORM_FEE_BPS`; embedded in output amount |
+| EVM gas | EVM transaction sender | ETH on Base/Base Sepolia |
+| Canton traffic / CC | Party submitting Canton traffic | Managed fees can be quoted/collected by the app; Loop traffic is paid by Loop wallet |
+
+### Platform fee
+
+Default server fee: `PLATFORM_FEE_BPS=100` (1%), with client preview using
+`NEXT_PUBLIC_FEE_BPS`. The authoritative value comes from the server quote.
+
+The fee is not a separate transfer. It is embedded in the fixed receive amount:
+the vault/solver pays less output than mid-market and receives the full input leg.
+
+### Canton network fee
+
+For managed/email flows, `NETWORK_FEE_ENABLED=1` enables order-bound CC network-fee
+collection. The fee is:
+
+- estimated at quote/create time;
+- capped by configured notional bounds;
+- revalidated before settlement/lock/claim;
+- collected in the same relevant Canton transaction where possible;
+- recorded through a durable accounting outbox.
+
+For Loop flows, the separate Oranj-side CC fee prepayment was removed. Loop wallet
+traffic cost is handled by Loop signing/traffic mechanics, and platform costs are
+covered by the spread. This avoids the old “fee paid but swap cannot proceed”
+failure mode.
+
+Useful knobs:
+
+- `PLATFORM_FEE_BPS`
+- `NEXT_PUBLIC_FEE_BPS`
+- `NETWORK_FEE_ENABLED`
+- `NEXT_PUBLIC_NETWORK_FEE_ENABLED`
+- `NETWORK_FEE_QUOTE_PREVIEW`
+- `NETWORK_FEE_RECEIVER_PARTY`
+- `NETWORK_FEE_BUFFER_BPS`
+- `NETWORK_FEE_RESERVE_CC`
+- `NETWORK_FEE_MAX_BPS_OF_NOTIONAL`
+
+### Timelocks and windows
+
+- HTLC default expiration: 4h.
+- HTLC minimum Canton swap window: 2h.
+- HTLC leg gap: about 20m minimum between shorter and longer timelocks.
+- Cross-chain quote TTL: 60s, separate from the HTLC refund window.
+- Loop C2C order TTL: 15m to sign/fill.
+- Loop counter offer TTL: 24h.
+
+---
+
+## 7. Order lifecycle, daemons, and recovery
+
+### HTLC statuses
+
+```text
+open → accepted → main_locking → main_locked → counter_locking → counter_locked
+                                      ↘ refunding → refunded
+counter_locked → counter_claimed → main_claimed
+```
+
+The transient states are intentional:
+
+- `main_locking` / `counter_locking` claim the right to perform irreversible
+  ledger/EVM work.
+- `refunding` is durable and re-entrant, so a crash after submit does not strand
+  an order as terminal-but-unpaid.
+
+### C2C statuses
+
+```text
+open → settling / filling → user_locked → filled
+                         ↘ expired / failed / cancelled
+```
+
+### Required daemons
+
+Run the daemon that matches the swap family being tested:
+
+```bash
+# Cross-chain HTLC WBTC↔CBTC
+npm run solver:htlc
+npm run solver:htlc:mainnet
+
+# Loop C2C CBTC↔CC fills/recovery
+npm run solver:canton-swap
+npm run solver:canton-swap:mainnet
+```
+
+Do **not** use `npm run solver:watch` for HTLC or C2C. That is the legacy OIF
+solver watcher.
+
+The HTLC daemon:
+
+1. accepts/advances HTLC orders;
+2. locks counter legs after finality/quote checks;
+3. reads public preimages from Canton/EVM claims;
+4. claims the opposite leg;
+5. calls auto-refund and cleanup routes.
+
+The C2C daemon:
+
+1. fills Loop sell offers;
+2. reconciles pending or committed counter legs;
+3. reissues expired counter offers only after complete receipt-proof scans;
+4. drains fee-accounting outbox work.
+
+Recovery design:
+
+- irreversible Canton commands use deterministic command IDs;
+- duplicate-command committed responses are treated as committed and reconciled;
+- EVM settlement evidence requires configured confirmations and block-hash
+  revalidation before irreversible Canton actions;
+- full-row lifecycle overwrites have been replaced with CAS/state-specific writes;
+- stale cancel/expire paths must not clear committed contract IDs or update IDs.
+
+---
+
+## 8. Database migrations and deployment invariants
+
+Apply all Supabase migrations in order before running the post-audit code on a
+network. The audit-critical range is **029–039**. There is no `033` migration file
+in this branch; apply every migration file that exists.
+
+| Migration | Purpose |
+| --- | --- |
+| `029_htlc_refunding_and_float_reservation.sql` | HTLC `refunding` state + atomic forward CBTC reservation |
+| `030_canton_swap_atomic_float_reservation.sql` | Atomic C2C vault-float reservation |
+| `031_htlc_lifecycle_and_custody_evidence.sql` | HTLC lock states + Loop custody baseline/evidence |
+| `032_canton_swap_counter_receipt_proof.sql` | Counter-offer creation offset + receipt proof |
+| `034_distributed_api_rate_limits.sql` | Shared Postgres-backed API rate limits |
+| `035_reverse_htlc_evm_float_reservation.sql` | Reverse HTLC WBTC reservation during counter lock |
+| `036_network_fee_accounting_outbox.sql` | Durable network-fee accounting outbox |
+| `037_htlc_forward_reservation_states.sql` | Keep forward CBTC reserved through locking states |
+| `038_reverse_htlc_prelock_reservation.sql` | Reserve WBTC before user Canton leg is locked |
+| `039_htlc_custody_evidence_uniqueness.sql` | One custody evidence CID can prove only one HTLC order |
+
+Release blockers if missing:
+
+- `accept_htlc_order_with_float_reservation(...)` must exist and be executable by
+  the service role.
+- `reserve_canton_swap_float(...)` must exist.
+- `reserve_reverse_htlc_evm_float_before_main_lock(...)` and
+  `reserve_reverse_htlc_evm_float(...)` must exist.
+- `consume_api_rate_limit(...)` and `api_rate_limits` must exist.
+- `network_fee_ledger` must have the settlement-update uniqueness protection.
+- `htlc_orders.counter_transfer_offer_cid` uniqueness must be present.
+
+Other deployment invariants:
+
+- `CANTON_SWAP_SETTLEMENT_PARTY` and `NEXT_PUBLIC_CANTON_SWAP_SETTLEMENT_PARTY`
+  must point to the funded vault for that network.
+- `SOLVER_EVM` / `NEXT_PUBLIC_SOLVER_EVM` must match the EVM hot wallet used by
+  the HTLC daemon.
+- `API_BASE` on each daemon must point to the web app built for the same network.
+- `HTLC_DAEMON_SECRET` must match web and daemon services.
+- `CRON_SECRET` should be a strong secret and is compared with timing-safe auth.
+- Do not mix devnet Loop parties with mainnet web/daemon env.
+
+---
+
+## 9. On-chain / on-ledger building blocks
 
 | Component | Location | Role |
 | --- | --- | --- |
-| **EVM HTLC** | `contracts/src/HTLCEscrow.sol` | `lock` / `claim` / `retake` — 13/13 Foundry tests |
-| **Canton HTLC DAR** | `canton-htlc/daml/CbtcHtlc.daml` | `HtlcLock` wraps Allocation with hash + timelock |
-| **Swap service** | `lib/htlc-service-singleton.ts` | Order lifecycle, reveal gates, on-ledger ops |
-| **API** | `app/api/htlc/*` | Create, accept, lock, claim, refund, history |
-| **UI** | `app/swap/page.tsx`, `app/orders/page.tsx` | MetaMask + Loop + email flows |
-| **Daemon** | `swap-solver/src/htlc-solver-daemon.mts` | Solver automation |
+| EVM HTLC | `contracts/src/HTLCEscrow.sol` | WBTC `lock` / `claim` / `retake` |
+| Canton HTLC DAR | `canton-htlc/daml/CbtcHtlc.daml` | `HtlcLock` wraps Allocation with hash + timelock |
+| HTLC service | `lib/htlc-service-singleton.ts` | Cross-chain order lifecycle and on-ledger ops |
+| C2C service | `lib/canton-swap-service.ts` | CBTC↔CC order lifecycle and recovery |
+| C2C settlement | `lib/canton-swap-settle.ts` | Canton transfer-offer fill/reissue/receipt proof |
+| Quote engines | `lib/htlc-quote.ts`, `lib/canton-quote.ts` | Price, fee, freshness, and floor enforcement |
+| Fee engine | `lib/canton-network-fee.ts` | Managed network-fee estimate/collection/accounting |
+| Secret vault | `lib/secret-vault.ts` | Client-side HTLC preimage storage |
+| UI | `app/swap/page.tsx`, `app/orders/page.tsx` | Swap, claim, history, and recovery UX |
+| Daemons | `swap-solver/src/*.mts` | HTLC and C2C background workers |
 
-### DevNet references (Base Sepolia + WarpX)
+DevNet references:
 
 | Thing | Value |
 | --- | --- |
 | EVM HTLCEscrow | `0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1` |
-| Mock WBTC (testnet) | `0x8d587e55236d1d4898e85711f709e53e657413ee` — set as `NEXT_PUBLIC_WBTC_ADDRESS` |
-| CBTC HTLC DAR | `cbtc-htlc-hardened v0.1.0` — pkg `1b2397fd…faf2d28` → `CBTC_HTLC_PKG_ID` |
-| Solver Canton party | `warpx-devnet-1::1220231c1885f289…` |
+| Mock WBTC | `0x8d587e55236d1d4898e85711f709e53e657413ee` |
+| CBTC HTLC DAR | `cbtc-htlc-hardened v0.1.0` |
 
 ---
 
-## 9. Running locally
+## 10. Running locally
 
-```bash
-npm run dev:devnet        # or: npm run dev:mainnet
+Environment file layout is documented in [`docs/ENV.md`](./docs/ENV.md). Network
+values belong in `.env.devnet` or `.env.mainnet`; `.env.local` should be overrides
+only.
 
-# Terminal 2 — HTLC solver daemon (required for swaps to complete)
-npm run solver:htlc       # devnet
-# npm run solver:htlc:mainnet
-```
-
-**Env layout:** [docs/ENV.md](docs/ENV.md) — `.env.devnet` / `.env.mainnet` are the two stacks; `.env.local` is optional overrides only (no more flipping one file back and forth).
-
-Templates: [`.env.devnet.example`](.env.devnet.example), [`.env.mainnet.example`](.env.mainnet.example),
-[`swap-solver/.env.htlc-devnet.example`](swap-solver/.env.htlc-devnet.example),
-[`swap-solver/.env.htlc-mainnet.example`](swap-solver/.env.htlc-mainnet.example).
-
-First-time setup: copy each example to its gitignored target (skip if the file already exists):
+First-time setup:
 
 ```bash
 cp .env.devnet.example .env.devnet
@@ -343,234 +459,107 @@ cp swap-solver/.env.htlc-devnet.example swap-solver/.env.htlc-devnet
 cp swap-solver/.env.htlc-mainnet.example swap-solver/.env.htlc-mainnet
 ```
 
-Production deploy checklist: [`docs/MAINNET-DEPLOY.md`](docs/MAINNET-DEPLOY.md).
+Devnet cross-chain HTLC:
 
-Legacy OIF solver secrets live in `swap-solver/.env`. HTLC daemon uses layered files via npm scripts (see docs/ENV.md).
+```bash
+npm run dev:devnet
+npm run solver:htlc
+```
 
-**Supabase migration 010 (HTLC RLS lockdown):** before mainnet, paste
-`supabase/migrations/010_htlc_orders_rls_lockdown.sql` into the Supabase SQL Editor
-so `htlc_orders` and `solver_orders` are not readable via the anon REST key.
-RLS enabled with no policies is intentional — only the service-role key (server) retains access.
+Devnet Loop C2C:
 
-**Legacy (mainnet OIF path only — not HTLC):** `npm run dev:all` starts solver API + watch +
-app; HTLC swaps do **not** need this.
+```bash
+npm run dev:devnet
+npm run solver:canton-swap
+```
+
+Mainnet smoke tests use real funds:
+
+```bash
+npm run dev:mainnet
+npm run solver:htlc:mainnet
+npm run solver:canton-swap:mainnet
+```
+
+Validation commands:
+
+```bash
+npm run typecheck
+npm test
+npm run lint
+```
 
 ---
 
-## 10. Deploying on Railway
+## 11. Deploying on Railway
 
-Use **four services** in one project (parallel devnet + mainnet — see
-[`docs/MAINNET-DEPLOY.md`](docs/MAINNET-DEPLOY.md)). There is **no `railway.json`** — configure
-build/start commands in the Railway dashboard per service.
+Use separate web and daemon services per network. Parallel devnet/mainnet services
+are safer than flipping one deployment.
 
 | Service | Root directory | Build | Start |
 | --- | --- | --- | --- |
-| **Web (devnet or mainnet)** | `/` (repo root) | `npm ci && npm run build:prod` | `npm run start -- -p $PORT` |
-| **HTLC solver** | `swap-solver` | `npm ci` | `npx tsx src/htlc-solver-daemon.mts` |
+| Web | `/` | `npm ci && npm run build:prod` | `npm run start -- -p $PORT` |
+| HTLC solver | `swap-solver` | `npm ci` | `npx tsx src/htlc-solver-daemon.mts` |
+| C2C daemon | `swap-solver` | `npm ci` | `npx tsx src/canton-swap-daemon.mts` |
 
-Set network-specific env vars in each service (`NEXT_PUBLIC_NETWORK`, solver `SWAP_NETWORK`, etc.).
-Do **not** use `npm run build` on Railway — it runs `build:devnet` and requires a local
-`.env.devnet` file.
-
-### Network switch (master vars)
+Network switch:
 
 | | Devnet | Mainnet |
 | --- | --- | --- |
 | `NEXT_PUBLIC_NETWORK` | `devnet` | `mainnet` |
+| `NEXT_PUBLIC_LOOP_NETWORK` | `devnet` | `mainnet` |
 | `NEXT_PUBLIC_SWAP_CHAIN` | `base-sepolia` | `base` |
-| `NEXT_PUBLIC_HTLC_ESCROW` | Base Sepolia escrow | Base mainnet escrow |
-| Solver `SWAP_NETWORK` | `devnet` | `mainnet` |
-| Solver `ALLOW_MAINNET` | unset | `true` |
-| Solver `EVM_CHAIN` | `base-sepolia` | `base` |
-| Solver `ORIGIN_RPC_URL` | `https://sepolia.base.org` | `https://mainnet.base.org` |
+| HTLC daemon `SWAP_NETWORK` | `devnet` | `mainnet` |
+| HTLC daemon `EVM_CHAIN` | `base-sepolia` | `base` |
+| Mainnet guard | unset | `ALLOW_MAINNET=true` |
 
-Use [`.env.devnet.example`](.env.devnet.example) / [`.env.mainnet.example`](.env.mainnet.example) for the full web matrix.
+Required web env categories:
 
-### Web app env (required)
+- Supabase URL, anon key, and service-role key.
+- WarpX/Auth m2m credentials.
+- `CBTC_HTLC_PKG_ID`.
+- `NEXT_PUBLIC_HTLC_ESCROW`, `NEXT_PUBLIC_WBTC_ADDRESS`.
+- `SOLVER_EVM`, `NEXT_PUBLIC_SOLVER_EVM`.
+- `CANTON_SWAP_SETTLEMENT_PARTY`, `NEXT_PUBLIC_CANTON_SWAP_SETTLEMENT_PARTY`.
+- `HTLC_DAEMON_SECRET`, `CRON_SECRET`.
+- Quote/fee knobs such as `PLATFORM_FEE_BPS`, `NETWORK_FEE_ENABLED`, and optional
+  `COINGECKO_API_KEY` / `TRADECRAFT_API_URL`.
 
-```bash
-NODE_ENV=production
+Required daemon env categories:
 
-# Supabase — must exist at BUILD time (NEXT_PUBLIC_* are baked into the client)
-NEXT_PUBLIC_SUPABASE_URL=
-NEXT_PUBLIC_SUPABASE_ANON_KEY=
-SUPABASE_SERVICE_ROLE_KEY=
+- `API_BASE` for the matching web service.
+- `HTLC_DAEMON_SECRET` matching web.
+- EVM RPC, escrow address, solver hot key for HTLC.
+- Same network labels as the web build.
 
-# Canton JWT (Authentik / WarpX m2m)
-KEYCLOAK_TOKEN_URL=
-KEYCLOAK_CLIENT_ID_DEVNET=
-KEYCLOAK_CLIENT_SECRET_DEVNET=
-
-# Network + HTLC
-NEXT_PUBLIC_NETWORK=devnet
-CBTC_HTLC_PKG_ID=
-NEXT_PUBLIC_HTLC_ESCROW=0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1
-NEXT_PUBLIC_WBTC_ADDRESS=0x8d587e55236d1d4898e85711f709e53e657413ee
-NEXT_PUBLIC_SOLVER_EVM=
-NEXT_PUBLIC_SOLVER_CANTON=
-SOLVER_EVM=
-SOLVER_CANTON_PARTY=
-
-# Daemon + cron auth (generate long random strings)
-HTLC_DAEMON_SECRET=
-CRON_SECRET=
-```
-
-Also configure Supabase Auth redirect URL: `https://<your-domain>/auth/callback`.
-
-**WBTC balance in the UI** uses MetaMask `eth_call` in the browser — it does **not** use
-`ORIGIN_RPC_URL`. That var is solver-only.
-
-### HTLC solver worker env
-
-```bash
-SWAP_NETWORK=devnet                      # or mainnet (+ ALLOW_MAINNET=true)
-EVM_CHAIN=base-sepolia                   # or arbitrum on mainnet
-API_BASE=https://<web-app-url>           # must match web stack network
-HTLC_DAEMON_SECRET=<same as web>
-SOLVER_EVM_PK=<solver hot key>
-ORIGIN_RPC_URL=https://sepolia.base.org
-HTLC_ESCROW_ADDRESS=0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1
-# If solver service runs npm run build:
-NEXT_PUBLIC_HTLC_ESCROW=0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1
-```
-
-See [`swap-solver/.env.htlc-devnet.example`](swap-solver/.env.htlc-devnet.example) and
-[`.env.htlc-mainnet.example`](swap-solver/.env.htlc-mainnet.example).
-
-Optional: `ALERT_WEBHOOK_URL`, `SOLVER_POLL_MS`.
+Detailed rollout checklist: [`docs/MAINNET-DEPLOY.md`](./docs/MAINNET-DEPLOY.md).
 
 ---
 
-## 11. Repo layout & deeper docs
+## 12. Repo layout and deeper docs
 
 | Path | What |
 | --- | --- |
-| `contracts/` | EVM HTLC + Foundry tests + reference contract |
-| `canton-htlc/` | Daml `HtlcLock` DAR + tests |
-| `lib/htlc-onledger.ts` | Allocate, createHtlcLock, claim, refund |
-| `lib/htlc-service-singleton.ts` | Swap order service |
-| `lib/secret-vault.ts` | Encrypted browser secret storage |
-| `lib/htlc-client.ts` | Frontend API client + `claimSwap` |
-| `app/api/htlc/*` | REST routes |
-| `swap-solver/src/htlc-solver-daemon.mts` | Production solver worker |
+| `app/api/htlc/*` | Cross-chain HTLC API routes |
+| `app/api/canton/swap/*` | C2C API routes |
+| `app/swap/page.tsx` | Unified swap UI |
+| `app/orders/page.tsx` | History, claim, counter-accept, and recovery UI |
+| `lib/htlc-service-singleton.ts` | HTLC lifecycle and recovery |
+| `lib/canton-swap-service.ts` | C2C lifecycle and recovery |
+| `lib/canton-swap-settle.ts` | C2C settlement proofs and reissue logic |
+| `lib/htlc-quote.ts` | Cross-chain WBTC/BTC quote engine |
+| `lib/canton-quote.ts` | C2C Tradecraft + reference sanity quote engine |
+| `lib/canton-network-fee.ts` | CC network-fee estimate/collection/accounting |
+| `supabase/migrations/` | Required database schema/RPC security controls |
+| `swap-solver/src/htlc-solver-daemon.mts` | HTLC daemon |
+| `swap-solver/src/canton-swap-daemon.mts` | C2C daemon |
 
 | Doc | Topic |
 | --- | --- |
-| [`docs/HTLC-SECRET-VAULT.md`](./docs/HTLC-SECRET-VAULT.md) | Secret vault threat model & v3 design |
-| [`docs/HTLC-SECURITY-AUDIT-2026-06-12.md`](./docs/HTLC-SECURITY-AUDIT-2026-06-12.md) | Security audit & hardening |
-| [`docs/MAINNET-DEPLOY.md`](./docs/MAINNET-DEPLOY.md) | Devnet/mainnet env matrix, Railway, mainnet checklist |
-| [`docs/canton-to-evm-design.md`](./docs/canton-to-evm-design.md) | Reverse-direction design (Canton→EVM) |
-
-### Operational env vars (quick reference)
-
-| Var | Service | Purpose |
-| --- | --- | --- |
-| `CBTC_HTLC_PKG_ID` | Web | On-ledger HTLC package — app fails closed if missing |
-| `HTLC_DAEMON_SECRET` | Web + solver | Bearer auth for daemon-only API routes |
-| `CRON_SECRET` | Web | Auto-refund / cleanup cron routes |
-| `NEXT_PUBLIC_WBTC_ADDRESS` | Web (build) | Testnet WBTC contract for balance display |
-| `ORIGIN_RPC_URL` | Solver only | Base Sepolia RPC for daemon on-chain reads/txs |
-| `ALERT_WEBHOOK_URL` | Web + solver | Slack/Discord ops alerts (optional) |
-
----
-
-## 12. Fees & swap parameters
-
-Swaps involve **three separate cost types**. Only the **platform fee** is OranjSwap revenue;
-network fees go to Canton (CC) and EVM (gas) infrastructure.
-
-### Platform fee (OranjSwap / solver)
-
-**Model:** user ↔ **solver** (us), not P2P. We take **one fee on the quoted output** — not
-1% from each side like P2P venues that match two independent users.
-
-| Config | Default | Where enforced |
-| --- | --- | --- |
-| `PLATFORM_FEE_BPS` | `100` (1%) | Server quote (`lib/htlc-quote.ts`) |
-| `NEXT_PUBLIC_FEE_BPS` | `100` | UI pre-quote estimate (`app/swap/page.tsx`) |
-| `SOLVER_FEE_BPS` | `100` | Legacy OIF solver only (`swap-solver/`) |
-
-**Quote math** (live WBTC/BTC price `P`, 8dp units):
-
-- **EVM → Canton:** `cbtcOut = wbtcIn × P × (1 − fee)`
-- **Canton → EVM:** `wbtcOut = cbtcIn ÷ P × (1 − fee)`
-
-**How it is collected:** there is no separate on-chain “fee transfer.” The fee is embedded in
-the quoted amounts bound into the HTLC locks. The solver locks **less** on its leg than the
-fair mid-price amount and receives **more** on the user leg — the spread is the platform fee.
-
-**Example (Canton → EVM, P = 1.0, 1% fee):**
-
-| Party | Locks | Receives |
-| --- | --- | --- |
-| User | 1.00000000 CBTC | 0.99000000 WBTC |
-| Solver | 0.99000000 WBTC | 1.00000000 CBTC |
-
-Solver gross ≈ **0.01 BTC notional** minus network costs. Order creation re-validates amounts
-against a fresh quote (`assertOrderAmounts` in `lib/htlc-quote.ts`) so clients cannot bypass
-the fee.
-
-The review modal shows **Platform fee** with the exact deduction before confirm.
-
-### Canton network fee (CC / Amulet)
-
-Every Canton ledger submission **can** burn **CC (Amulet)** from the party in `actAs`. This is
-**not** platform revenue — it pays Canton synchronizer / validator infrastructure.
-
-**Theoretical `actAs` attribution (email / participant-managed HTLC flow):**
-
-| Direction | User party (`actAs`) | Solver party (`warpx-mainnet-1`, `actAs`) |
-| --- | --- | --- |
-| **EVM → Canton** | Claim CBTC (`claim-managed` — backend signs as user receiver) | Lock CBTC counter on Canton |
-| **Canton → EVM** | Lock CBTC (allocate + on-ledger path) | Claim CBTC after user reveals on EVM |
-
-Amount is **variable** (small fractions of CC per tx), not a fixed per-swap line item in the app.
-
-#### Mainnet observations (WarpX hosted parties, Jun 2026)
-
-Full HTLC cross-chain testing on **mainnet** (Base ↔ Canton) with **0 CC visible** on both:
-
-- **Email user party** — `0` CC in the header; **EVM → Canton** and **Canton → EVM** both complete.
-- **Solver Canton party** (`warpx-mainnet-1`) — `0` CC; solver still locks the CBTC counter on
-  **EVM → Canton** and claims CBTC on **Canton → EVM**.
-
-So in practice, **WarpX appears to subsidize synchronizer / Amulet costs** for hosted parties on
-mainnet (same pattern we already saw on devnet), even though the ledger still records burns in
-transaction metadata. Users do **not** need to fund CC before swapping on our current deployment.
-
-**What users still pay directly:**
-
-| Leg | Fee type | Who pays |
-| --- | --- | --- |
-| Lock WBTC (EVM → Canton) | ETH gas on Base | User (MetaMask) |
-| Claim WBTC (Canton → EVM) | ETH gas on Base | User (MetaMask) |
-| Solver WBTC lock / claim (Canton → EVM) | ETH gas on Base | Solver EVM hot wallet |
-| Canton ledger writes (both directions) | CC (Amulet) | **Operator-subsidized** in practice — 0 CC balance OK |
-
-**UI:**
-
-- CC balance shown in the header for email users (`/api/parties/balance` → `useBalance`) — **informational only**; swaps do not block on CC balance.
-- **EnableCC** (one-time CC opt-in: `ValidatorRight` + `TransferPreapproval`) runs on
-  participant provision (`lib/enable-cc.ts`); failure is non-fatal when the validator subsidizes.
-
-CC burn does not appear as a separate row in the swap UI; inspect ledger transaction history
-(Splice meta keys such as `splice.lfdecentralizedtrust.org/burned`) to verify per-tx cost.
-
-### EVM network fee (gas)
-
-Paid in **ETH** on the swap chain (Base Sepolia today) to Ethereum validators — not OranjSwap.
-
-| Step | Who pays gas |
-| --- | --- |
-| User locks WBTC (EVM → Canton) | User (MetaMask) |
-| User claims WBTC (Canton → EVM) | User (MetaMask) |
-| Solver locks WBTC counter (Canton → EVM) | Solver hot wallet |
-| Solver claims / retake on EVM | Solver |
-
-### Other swap parameters
-
-- **Timelocks:** maker ≥ order expiration; taker shorter; min **2h** for Canton swaps; default **4h**
-- **Gap:** ~20m minimum between legs (Canton skew + EVM finality + execution buffer)
-- **Refunds:** Canton auto-refund sweep + manual; EVM `retake(hashLock)` via MetaMask
-- **Cancel:** maker can cancel before any lock (no on-chain activity)
+| [`docs/ENV.md`](./docs/ENV.md) | Env-file layout and local run commands |
+| [`docs/SWAP-RUNBOOK.md`](./docs/SWAP-RUNBOOK.md) | Operational swap runbook |
+| [`docs/SWAP-SECURITY-AUDIT-README-2026-06-21.md`](./docs/SWAP-SECURITY-AUDIT-README-2026-06-21.md) | Full post-audit security report |
+| [`docs/SWAP-QUOTE-DESIGN.md`](./docs/SWAP-QUOTE-DESIGN.md) | Quote architecture and deferred Dutch-auction work |
+| [`docs/HTLC-SECRET-VAULT.md`](./docs/HTLC-SECRET-VAULT.md) | Browser preimage vault threat model |
+| [`docs/MAINNET-DEPLOY.md`](./docs/MAINNET-DEPLOY.md) | Deployment guide |
+| [`docs/canton-to-evm-design.md`](./docs/canton-to-evm-design.md) | Reverse HTLC design notes |
