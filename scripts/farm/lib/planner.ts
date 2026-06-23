@@ -1,6 +1,7 @@
 import { toBaseUnitsFloor } from "../../../lib/amount-units";
 import { CBTC_ASSET, CC_ASSET } from "../../../lib/canton-assets";
 import { partyBalancesSummary } from "./float";
+import { isUtxoOverAcsCap } from "./utxo-guard";
 import { quoteFarmSwap } from "./quote";
 import type { FarmAsset, FarmFleetConfig, OrganicPick, PacingConfig } from "./types";
 
@@ -57,7 +58,7 @@ export async function loadFleetFloat(
   jwt: string,
   fleet: FarmFleetConfig
 ): Promise<FleetFloatSnapshot> {
-  const vaultBal = await partyBalancesSummary(jwt, fleet.vault);
+  const vaultBal = await partyBalancesSummary(jwt, fleet.vault, { countUtxo: false });
   const traders = await Promise.all(
     fleet.traders.map(async (t) => {
       const bal = await partyBalancesSummary(jwt, t.party);
@@ -109,7 +110,7 @@ function traderCanSellCbtc(
   t: FleetFloatSnapshot["traders"][number],
   pacing: PacingConfig
 ): boolean {
-  if (t.utxoCbtc >= 10) return false;
+  if (t.utxoCbtc >= 10 || isUtxoOverAcsCap(t.utxoCbtc)) return false;
   return hasReserve(
     t.cbtc,
     pacing.cbtcInAmount,
@@ -122,7 +123,7 @@ function traderCanSellCc(
   t: FleetFloatSnapshot["traders"][number],
   pacing: PacingConfig
 ): boolean {
-  if (t.utxoCc >= 10) return false;
+  if (t.utxoCc >= 10 || isUtxoOverAcsCap(t.utxoCc)) return false;
   return hasReserve(t.cc, pacing.ccInAmount, RESERVE_CC, CC_ASSET.decimals);
 }
 
@@ -339,8 +340,8 @@ function countDirectionBlockers(
     if (!sampleTraderIssue) {
       if (
         direction === "CBTC→CC"
-          ? t.utxoCbtc >= 10
-          : t.utxoCc >= 10
+          ? t.utxoCbtc >= 10 || isUtxoOverAcsCap(t.utxoCbtc)
+          : t.utxoCc >= 10 || isUtxoOverAcsCap(t.utxoCc)
       ) {
         sampleTraderIssue = `${t.hint}: UTXO cap`;
       } else if (!canSell) {

@@ -1,7 +1,7 @@
 import { toBaseUnitsFloor } from "../../../lib/amount-units";
 import { CBTC_ASSET, CC_ASSET } from "../../../lib/canton-assets";
 import type { FarmAsset, FarmFleetConfig } from "./types";
-import { cbtcBalance, ccBalance, countHoldings, holdingsForAsset } from "./ledger";
+import { cbtcBalance, ccBalance, countHoldings, holdingsForAssetOrBatch } from "./ledger";
 
 const UTXO_WARN = 8;
 const UTXO_MAX = 10;
@@ -18,11 +18,12 @@ export async function checkTraderFloat(params: {
   inAmount: string;
 }): Promise<FloatCheckResult> {
   const asset = params.fromAsset === "CBTC" ? CBTC_ASSET : CC_ASSET;
-  const holdings = await holdingsForAsset(params.jwt, params.traderParty, params.fromAsset);
-  const utxoCount =
-    params.fromAsset === "CBTC"
-      ? holdings.length
-      : (await countHoldings(params.jwt, params.traderParty)).cc;
+  const holdings = await holdingsForAssetOrBatch(
+    params.jwt,
+    params.traderParty,
+    params.fromAsset
+  );
+  const utxoCount = holdings.length;
 
   if (utxoCount >= UTXO_MAX) {
     return { ok: false, reason: `trader UTXO at cap (${utxoCount}/${UTXO_MAX})` };
@@ -52,7 +53,11 @@ export async function checkVaultFloat(params: {
   outAmount: string;
 }): Promise<FloatCheckResult> {
   const asset = params.toAsset === "CBTC" ? CBTC_ASSET : CC_ASSET;
-  const holdings = await holdingsForAsset(params.jwt, params.vaultParty, params.toAsset);
+  const holdings = await holdingsForAssetOrBatch(
+    params.jwt,
+    params.vaultParty,
+    params.toAsset
+  );
   let total = 0n;
   for (const h of holdings) {
     total += toBaseUnitsFloor(h.payload?.amount ?? "0", asset.decimals);
@@ -91,11 +96,18 @@ export async function checkSwapFloat(params: {
   });
 }
 
-export async function partyBalancesSummary(jwt: string, party: string) {
+export async function partyBalancesSummary(
+  jwt: string,
+  party: string,
+  opts?: { countUtxo?: boolean }
+) {
+  const countUtxo = opts?.countUtxo !== false;
   const [cbtc, cc, counts] = await Promise.all([
-    cbtcBalance(party),
+    cbtcBalance(jwt, party),
     ccBalance(jwt, party),
-    countHoldings(jwt, party)
+    countUtxo
+      ? countHoldings(jwt, party)
+      : Promise.resolve({ cbtc: 0, cc: 0 })
   ]);
   return { cbtc, cc, utxoCbtc: counts.cbtc, utxoCc: counts.cc };
 }

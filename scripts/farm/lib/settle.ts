@@ -4,7 +4,7 @@ import {
   assertSameSynchronizer,
   buildAcceptExercise,
   buildTransferExercise,
-  holdingsForAsset,
+  holdingsForAssetOrBatch,
   isDirectTransferKind,
   mergeDisclosed,
   registrarForAsset,
@@ -38,7 +38,11 @@ async function submitUserLegOffer(params: ManagedSettleParams): Promise<{
   offerUpdateId: string;
 }> {
   const reg = await registrarForAsset(params.jwt, params.fromAsset);
-  const holdings = await holdingsForAsset(params.jwt, params.traderParty, params.fromAsset);
+  const holdings = await holdingsForAssetOrBatch(
+    params.jwt,
+    params.traderParty,
+    params.fromAsset
+  );
   if (holdings.length === 0) {
     throw new Error(`trader has no ${params.fromAsset} holdings`);
   }
@@ -100,7 +104,11 @@ async function fillFromUserOffer(params: ManagedSettleParams & {
     registryKind: fromReg.kind
   });
 
-  const vaultHoldings = await holdingsForAsset(params.jwt, params.vaultParty, params.toAsset);
+  const vaultHoldings = await holdingsForAssetOrBatch(
+    params.jwt,
+    params.vaultParty,
+    params.toAsset
+  );
   if (vaultHoldings.length === 0) {
     throw new Error(`vault has insufficient ${params.toAsset} float`);
   }

@@ -112,7 +112,7 @@ export async function runFundTradersCbtc(): Promise<void> {
     ? [{ hint: `trader-${traderFilter}`, party: traderParty(fleet, traderFilter) }]
     : fleet.traders;
 
-  const sourceCbtcBefore = await cbtcBalance(sourceParty);
+  const sourceCbtcBefore = await cbtcBalance(jwt, sourceParty);
   console.log(`Network:  ${process.env.NEXT_PUBLIC_NETWORK ?? "mainnet"}`);
   console.log(`Source:   ${sourceParty}`);
   console.log(`CBTC each: ${cbtcAmount}`);
@@ -128,7 +128,7 @@ export async function runFundTradersCbtc(): Promise<void> {
 
   if (dryRun) {
     for (const t of traders) {
-      const bal = await cbtcBalance(t.party);
+      const bal = await cbtcBalance(jwt, t.party);
       console.log(`  [dry-run] ${t.hint}: would send ${cbtcAmount} CBTC (now ${bal} CBTC)`);
     }
     return;
@@ -136,7 +136,7 @@ export async function runFundTradersCbtc(): Promise<void> {
 
   for (let i = 0; i < traders.length; i++) {
     const t = traders[i]!;
-    const before = await cbtcBalance(t.party);
+    const before = await cbtcBalance(jwt, t.party);
     console.log(`[${i + 1}/${traders.length}] ${t.hint} (${t.party.slice(0, 28)}…) CBTC=${before}`);
     await transferCbtcFromVault({
       jwt,
@@ -145,12 +145,12 @@ export async function runFundTradersCbtc(): Promise<void> {
       amount: cbtcAmount,
       label: t.hint
     });
-    const after = await cbtcBalance(t.party);
+    const after = await cbtcBalance(jwt, t.party);
     console.log(`    balance: ${before} → ${after} CBTC\n`);
     if (i < traders.length - 1) await sleep(2000);
   }
 
-  const sourceCbtcAfter = await cbtcBalance(sourceParty);
+  const sourceCbtcAfter = await cbtcBalance(jwt, sourceParty);
   console.log(`Source CBTC after: ${sourceCbtcAfter}`);
   console.log("\n✓ Fund traders CBTC complete.");
 }

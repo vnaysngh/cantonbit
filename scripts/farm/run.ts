@@ -5,6 +5,7 @@
 import { randomUUID } from "node:crypto";
 
 import { assertMainnetNetwork, loadFleet, saveFleet } from "./lib/config";
+import { consolidateFleetUtxos, consolidateVaultUtxos } from "./lib/consolidate";
 import { executeSwap } from "./lib/execute-swap";
 import { getLedgerJwt } from "./lib/jwt";
 import { logRunSummary, logSwapResult } from "./lib/log";
@@ -14,19 +15,21 @@ import {
   meanIntervalSeconds
 } from "./lib/lighthouse";
 import { auditMainnetConfig, printAudit } from "./lib/mainnet-audit";
+import { isAcsLimitError } from "./lib/ledger";
 import {
   organicInterval,
   pacingFromArgs,
   sleepSecondsAfterSwap,
   sleepMs
 } from "./lib/organic";
-import { MEASURED_BYTES_PER_SWAP, planNextSwap, type PlannerState } from "./lib/planner";
+import { MEASURED_BYTES_PER_SWAP, balancePacingAmounts, planNextSwap, type PlannerState } from "./lib/planner";
 import {
   parseFlag,
   parseNumberArg,
   requireMainnetGuard
 } from "./lib/parse-args";
 import { isTransientError, retry } from "./lib/retry";
+import { needsUtxoConsolidation } from "./lib/utxo-guard";
 
 function assertBitsafeGate(): void {
   if (
@@ -95,6 +98,55 @@ function flushBatchSummary(params: {
   });
 }
 
+const CONSOLIDATE_EVERY_SWAPS = 8;
+const VAULT_CONSOLIDATE_MIN_UTXO = 2;
+const PROACTIVE_CONSOLIDATE_MIN_UTXO = 3;
+const RECOVERY_CONSOLIDATE_MIN_UTXO = 2;
+
+async function runConsolidateWithRetry(
+  label: string,
+  fn: () => Promise<number>,
+  attempts = 3
+): Promise<number> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn(`  ${label} attempt ${i + 1}/${attempts} failed: ${msg.slice(0, 120)}`);
+      if (i < attempts - 1) await sleepMs(5000);
+    }
+  }
+  throw lastErr;
+}
+
+async function recoverFromUtxoPressure(
+  jwt: string,
+  fleet: ReturnType<typeof loadFleet>,
+  reason: string
+): Promise<void> {
+  console.warn(`  UTXO pressure (${reason}) — merging holdings…`);
+  const vault = await runConsolidateWithRetry("vault consolidate", () =>
+    consolidateVaultUtxos({
+      jwt,
+      fleet,
+      minUtxo: RECOVERY_CONSOLIDATE_MIN_UTXO,
+      reason
+    })
+  );
+  const fleetMerges = await runConsolidateWithRetry("fleet consolidate", () =>
+    consolidateFleetUtxos({
+      jwt,
+      fleet,
+      minUtxo: RECOVERY_CONSOLIDATE_MIN_UTXO,
+      reason
+    })
+  );
+  console.log(`  consolidate done (vault=${vault} fleet=${fleetMerges} merge round(s))`);
+}
+
 export async function runFarmBot(): Promise<void> {
   assertMainnetNetwork();
   requireMainnetGuard();
@@ -107,7 +159,8 @@ export async function runFarmBot(): Promise<void> {
   }
 
   const fleet = loadFleet();
-  const pacing = pacingFromArgs();
+  let pacing = pacingFromArgs();
+  pacing = await balancePacingAmounts(pacing);
   const maxSwaps = parseNumberArg("max-swaps", 0);
   const dryRun = parseFlag("dry-run");
 
@@ -143,6 +196,20 @@ export async function runFarmBot(): Promise<void> {
   );
   console.log(`Planner: alternates direction, balance-aware trader pick`);
 
+  if (!dryRun) {
+    await runConsolidateWithRetry("startup consolidate", () =>
+      consolidateFleetUtxos({
+        jwt,
+        fleet,
+        minUtxo: PROACTIVE_CONSOLIDATE_MIN_UTXO,
+        reason: "startup"
+      })
+    ).catch((e) => {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`  startup consolidate failed after retries: ${msg.slice(0, 200)}`);
+    });
+  }
+
   while (maxSwaps === 0 || swapCount < maxSwaps) {
     let pick;
     try {
@@ -160,6 +227,20 @@ export async function runFarmBot(): Promise<void> {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`✗ plan failed:\n${msg.split("\n").map((l) => `  ${l}`).join("\n")}`);
+      if (isAcsLimitError(e) || needsUtxoConsolidation(e)) {
+        try {
+          await recoverFromUtxoPressure(
+            jwt,
+            fleet,
+            isAcsLimitError(e) ? "acs-limit" : "utxo-cap"
+          );
+        } catch (ce) {
+          const cm = ce instanceof Error ? ce.message : String(ce);
+          console.error(`  consolidate failed: ${cm.slice(0, 200)}`);
+        }
+        await sleepMs(5000);
+        continue;
+      }
       if (/401|unauthorized|jwt/i.test(msg)) {
         jwt = await retry(() => getLedgerJwt(), { label: "jwt", onRetry: logRetry("jwt") });
       }
@@ -230,6 +311,29 @@ export async function runFarmBot(): Promise<void> {
       };
       lastSwapLogAt = loggedAt;
 
+      // Vault receives one UTXO per swap — merge before ACS 200 cap.
+      await consolidateVaultUtxos({
+        jwt,
+        fleet,
+        minUtxo: VAULT_CONSOLIDATE_MIN_UTXO,
+        reason: "post-swap"
+      }).catch((e) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn(`  vault consolidate skipped: ${msg.slice(0, 120)}`);
+      });
+
+      if (swapCount % CONSOLIDATE_EVERY_SWAPS === 0) {
+        await consolidateFleetUtxos({
+          jwt,
+          fleet,
+          minUtxo: PROACTIVE_CONSOLIDATE_MIN_UTXO,
+          reason: `every-${CONSOLIDATE_EVERY_SWAPS}-swaps`
+        }).catch((e) => {
+          const msg = e instanceof Error ? e.message : String(e);
+          console.warn(`  periodic consolidate skipped: ${msg.slice(0, 120)}`);
+        });
+      }
+
       if (calibrateSwaps >= pacing.calibrateEvery) {
         flushBatchSummary({
           runId,
@@ -272,6 +376,20 @@ export async function runFarmBot(): Promise<void> {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`✗ swap failed: ${msg.slice(0, 200)}`);
+      if (isAcsLimitError(e) || needsUtxoConsolidation(e)) {
+        try {
+          await recoverFromUtxoPressure(
+            jwt,
+            fleet,
+            isAcsLimitError(e) ? "acs-limit" : "utxo-cap"
+          );
+        } catch (ce) {
+          const cm = ce instanceof Error ? ce.message : String(ce);
+          console.error(`  consolidate failed: ${cm.slice(0, 200)}`);
+        }
+        await sleepMs(5000);
+        continue;
+      }
       if (/401|unauthorized|jwt/i.test(msg)) {
         jwt = await retry(() => getLedgerJwt(), { label: "jwt", onRetry: logRetry("jwt") });
       }

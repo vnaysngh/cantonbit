@@ -7,20 +7,30 @@ import { toBaseUnitsFloor } from "../../../lib/amount-units";
 import { selectHoldingsForAmount } from "../../../lib/transfer-holdings";
 import { buildTransferMeta } from "../../../lib/transfer-options";
 import type { Holding } from "../../../lib/types";
-import { CantonClient } from "../../../swap-solver/src/canton.js";
-import { authEnv } from "./jwt";
 
 const CBTC_HOLDING_TEMPLATE_FQN =
   "8107899ac4723ce986bf7d27416534e576e54b92161e46150a595fb78ff3d3a1:Utility.Registry.Holding.V0.Holding:Holding";
 const AMULET_HOLDING_TEMPLATE_FQN =
   "a31be0483f3175647053f28965a4e6d97e3dbc433ea2338be303fae69bbcff6a:Splice.Amulet:Amulet";
+/** ACS TemplateFilter — package name form (not hash). */
+const CBTC_HOLDING_TEMPLATE_BY_NAME =
+  "#utility-registry-holding-v0:Utility.Registry.Holding.V0.Holding:Holding";
+const AMULET_TEMPLATE_BY_NAME = "#splice-amulet:Splice.Amulet:Amulet";
+
+/** WarpX JSON API returns 413 when a party has >200 matching ACS rows. */
+export function isAcsLimitError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return (
+    msg.includes("maximum_list_elements") ||
+    msg.includes("acs read failed (413)") ||
+    msg.includes("getholdings acs query failed (413)")
+  );
+}
 
 const TRANSFER_FACTORY_INTERFACE =
   "#splice-api-token-transfer-instruction-v1:Splice.Api.Token.TransferInstructionV1:TransferFactory";
 const TRANSFER_INSTRUCTION_INTERFACE =
   "#splice-api-token-transfer-instruction-v1:Splice.Api.Token.TransferInstructionV1:TransferInstruction";
-const HOLDING_INTERFACE =
-  "#splice-api-token-holding-v1:Splice.Api.Token.HoldingV1:Holding";
 
 export type TransferRegistryKind = "cbtc" | "cc";
 
@@ -409,17 +419,47 @@ export async function buildAcceptExercise(params: {
 
 export { mergeDisclosed };
 
-export async function listCcHoldings(
-  jwt: string,
-  party: string,
-  dsoAdmin: string
-): Promise<Holding[]> {
+type AcsCreatedEvent = {
+  contractId?: string;
+  templateId?: string;
+  createdEventBlob?: string;
+  createArgument?: Record<string, unknown>;
+  interfaceViews?: Array<{
+    viewValue?: {
+      owner?: string;
+      amount?: string;
+      instrumentId?: { id?: string };
+      lock?: { expiresAt?: string | null; expiresAfter?: string | null } | null;
+    };
+    viewStatus?: { code?: number };
+  }>;
+};
+
+async function getLedgerOffset(jwt: string): Promise<number> {
   const endRes = await fetch(`${NETWORK.ledgerHost}/v2/state/ledger-end`, {
     headers: { Authorization: `Bearer ${jwt}` }
   });
   if (!endRes.ok) throw new Error("ledger-end failed");
   const { offset } = (await endRes.json()) as { offset: number };
-  const r = await fetch(`${NETWORK.ledgerHost}/v2/state/active-contracts`, {
+  return offset;
+}
+
+/** WarpX caps ACS list responses at 200; stay below when batching merges. */
+export const ACS_QUERY_BATCH_LIMIT = 150;
+
+async function queryActiveContractsByTemplate(
+  jwt: string,
+  party: string,
+  templateId: string,
+  includeCreatedEventBlob: boolean,
+  limit?: number
+): Promise<AcsCreatedEvent[]> {
+  const offset = await getLedgerOffset(jwt);
+  const qs =
+    limit != null && limit > 0
+      ? `?limit=${Math.min(limit, ACS_QUERY_BATCH_LIMIT)}`
+      : "";
+  const r = await fetch(`${NETWORK.ledgerHost}/v2/state/active-contracts${qs}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -432,11 +472,10 @@ export async function listCcHoldings(
             cumulative: [
               {
                 identifierFilter: {
-                  InterfaceFilter: {
+                  TemplateFilter: {
                     value: {
-                      interfaceId: HOLDING_INTERFACE,
-                      includeInterfaceView: true,
-                      includeCreatedEventBlob: true
+                      templateId,
+                      includeCreatedEventBlob
                     }
                   }
                 }
@@ -445,51 +484,74 @@ export async function listCcHoldings(
           }
         }
       },
-      verbose: false,
+      verbose: true,
       activeAtOffset: offset
     })
   });
-  if (!r.ok) throw new Error(`ACS read failed (${r.status})`);
+  if (!r.ok) {
+    const body = await r.text().catch(() => "");
+    throw new Error(`ACS read failed (${r.status})${body ? `: ${body.slice(0, 240)}` : ""}`);
+  }
   const entries = (await r.json()) as Array<{
-    contractEntry?: {
-      JsActiveContract?: {
-        createdEvent?: {
-          contractId?: string;
-          templateId?: string;
-          createdEventBlob?: string;
-          interfaceViews?: Array<{
-            viewValue?: {
-              owner?: string;
-              amount?: string;
-              instrumentId?: { id?: string };
-              lock?: { expiresAt?: string | null; expiresAfter?: string | null } | null;
-            };
-            viewStatus?: { code?: number };
-          }>;
-        };
-      };
-    };
+    contractEntry?: { JsActiveContract?: { createdEvent?: AcsCreatedEvent } };
   }>;
+  return entries
+    .map((e) => e.contractEntry?.JsActiveContract?.createdEvent)
+    .filter((ev): ev is AcsCreatedEvent => !!ev?.contractId);
+}
+
+function isActivelyLocked(
+  lock: { expiresAt?: string | null; expiresAfter?: string | null } | null | undefined,
+  nowIso: string
+): boolean {
+  if (lock == null) return false;
+  return lock.expiresAt ? lock.expiresAt > nowIso : true;
+}
+
+function parseAmuletAmount(arg: Record<string, unknown> | undefined): string {
+  if (!arg) return "0";
+  const amt = arg.amount;
+  if (typeof amt === "string") return amt;
+  if (amt && typeof amt === "object" && "initialAmount" in amt) {
+    return String((amt as { initialAmount?: string }).initialAmount ?? "0");
+  }
+  return "0";
+}
+
+export async function listCcHoldings(
+  jwt: string,
+  party: string,
+  dsoAdmin: string,
+  limit?: number
+): Promise<Holding[]> {
+  const events = await queryActiveContractsByTemplate(
+    jwt,
+    party,
+    AMULET_TEMPLATE_BY_NAME,
+    true,
+    limit
+  );
   const nowIso = new Date().toISOString();
   const out: Holding[] = [];
-  for (const e of entries) {
-    const ev = e.contractEntry?.JsActiveContract?.createdEvent;
-    const iv = ev?.interfaceViews?.[0];
-    if (!ev?.contractId || !iv || iv.viewStatus?.code) continue;
-    const v = iv.viewValue;
-    if (!v || v.owner !== party || v.instrumentId?.id !== "Amulet") continue;
-    const lock = v.lock;
-    if (lock != null) {
-      const locked = lock.expiresAt ? lock.expiresAt > nowIso : true;
-      if (locked) continue;
-    }
+  for (const ev of events) {
+    const iv = ev.interfaceViews?.[0];
+    const v = iv && !iv.viewStatus?.code ? iv.viewValue : undefined;
+    const arg = ev.createArgument;
+    const owner = v?.owner ?? (typeof arg?.owner === "string" ? arg.owner : undefined);
+    if (!ev.contractId || owner !== party) continue;
+    const lock = (v?.lock ?? arg?.lock) as
+      | { expiresAt?: string | null; expiresAfter?: string | null }
+      | null
+      | undefined;
+    if (isActivelyLocked(lock, nowIso)) continue;
+    const amount = v?.amount ?? parseAmuletAmount(arg);
     out.push({
       contractId: ev.contractId,
       createdEventBlob: ev.createdEventBlob ?? "",
       templateId: ev.templateId ?? AMULET_HOLDING_TEMPLATE_FQN,
       payload: {
         owner: party,
-        amount: String(v.amount ?? "0"),
+        amount: String(amount ?? "0"),
         instrumentId: { admin: dsoAdmin, id: "Amulet" }
       }
     });
@@ -497,40 +559,68 @@ export async function listCcHoldings(
   return out;
 }
 
-export async function listCbtcHoldings(party: string): Promise<Holding[]> {
-  const client = new CantonClient(
-    {
-      ledgerHost: NETWORK.ledgerHost,
-      registryUrl: NETWORK.registryUrl,
-      decentralizedPartyId: NETWORK.decentralizedPartyId,
-      instrumentId: NETWORK.instrumentId,
-      solverParty: party
-    },
-    authEnv()
+export async function listCbtcHoldings(
+  jwt: string,
+  party: string,
+  limit?: number
+): Promise<Holding[]> {
+  const events = await queryActiveContractsByTemplate(
+    jwt,
+    party,
+    CBTC_HOLDING_TEMPLATE_BY_NAME,
+    true,
+    limit
   );
-  const raw = await client.getHoldings(party);
-  return raw
-    .filter((h) => !h.locked)
-    .map((h) => ({
-      contractId: h.contractId,
-      createdEventBlob: h.createdEventBlob,
-      templateId: CBTC_HOLDING_TEMPLATE_FQN,
+  const nowIso = new Date().toISOString();
+  const out: Holding[] = [];
+  for (const ev of events) {
+    const arg = ev.createArgument;
+    const owner = typeof arg?.owner === "string" ? arg.owner : undefined;
+    if (!ev.contractId || owner !== party) continue;
+    const lock = arg?.lock as
+      | { expiresAt?: string | null; expiresAfter?: string | null }
+      | null
+      | undefined;
+    if (isActivelyLocked(lock, nowIso)) continue;
+    const amount = typeof arg?.amount === "string" ? arg.amount : "0";
+    out.push({
+      contractId: ev.contractId,
+      createdEventBlob: ev.createdEventBlob ?? "",
+      templateId: ev.templateId ?? CBTC_HOLDING_TEMPLATE_FQN,
       payload: {
         owner: party,
-        amount: h.amount,
+        amount,
         instrumentId: NETWORK.instrumentId
       }
-    }));
+    });
+  }
+  return out;
 }
 
 export async function holdingsForAsset(
   jwt: string,
   party: string,
-  asset: "CBTC" | "CC"
+  asset: "CBTC" | "CC",
+  limit?: number
 ): Promise<Holding[]> {
-  if (asset === "CBTC") return listCbtcHoldings(party);
+  if (asset === "CBTC") return listCbtcHoldings(jwt, party, limit);
   const dso = await getDsoPartyId(jwt);
-  return listCcHoldings(jwt, party, dso);
+  return listCcHoldings(jwt, party, dso, limit);
+}
+
+/** Fetch holdings for merge when ACS is at the 200-contract node cap. */
+export async function holdingsForAssetOrBatch(
+  jwt: string,
+  party: string,
+  asset: "CBTC" | "CC",
+  batchLimit = ACS_QUERY_BATCH_LIMIT
+): Promise<Holding[]> {
+  try {
+    return await holdingsForAsset(jwt, party, asset);
+  } catch (e) {
+    if (!isAcsLimitError(e)) throw e;
+    return holdingsForAsset(jwt, party, asset, batchLimit);
+  }
 }
 
 export async function ccInstrumentId(jwt: string): Promise<InstrumentId> {
@@ -557,12 +647,15 @@ export async function countHoldings(
   jwt: string,
   party: string
 ): Promise<{ cbtc: number; cc: number }> {
-  const [cbtc, cc] = await Promise.all([
-    listCbtcHoldings(party).then((h) => h.length),
-    ccInstrumentId(jwt).then((inst) =>
-      listCcHoldings(jwt, party, inst.admin).then((h) => h.length)
-    )
-  ]);
+  const countOne = async (asset: "CBTC" | "CC"): Promise<number> => {
+    try {
+      return (await holdingsForAsset(jwt, party, asset)).length;
+    } catch (e) {
+      if (isAcsLimitError(e)) return ACS_QUERY_BATCH_LIMIT + 51;
+      throw e;
+    }
+  };
+  const [cbtc, cc] = await Promise.all([countOne("CBTC"), countOne("CC")]);
   return { cbtc, cc };
 }
 
@@ -588,8 +681,8 @@ export async function ccBalance(jwt: string, party: string): Promise<string> {
   return fromBaseUnits(units, 10);
 }
 
-export async function cbtcBalance(party: string): Promise<string> {
-  const holdings = await listCbtcHoldings(party);
+export async function cbtcBalance(jwt: string, party: string): Promise<string> {
+  const holdings = await listCbtcHoldings(jwt, party);
   let units = 0n;
   for (const h of holdings) {
     units += toBaseUnitsFloor(h.payload?.amount ?? "0", 8);

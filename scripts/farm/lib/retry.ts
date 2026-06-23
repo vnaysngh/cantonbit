@@ -27,6 +27,13 @@ export function isTransientError(err: unknown): boolean {
     "inactive_contract"
   ];
   if (deterministic.some((d) => combined.includes(d))) return false;
+  if (
+    combined.includes("maximum_list_elements") ||
+    combined.includes("acs read failed (413)") ||
+    combined.includes("getholdings acs query failed (413)")
+  ) {
+    return false;
+  }
 
   const transient = [
     "fetch failed",
