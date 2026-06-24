@@ -4,7 +4,7 @@
  */
 import "server-only";
 
-import { fromBaseUnits, toBaseUnitsFloor } from "./amount-units";
+import { fromBaseUnits, toBaseUnits, toBaseUnitsFloor } from "./amount-units";
 import {
   getSwapAsset,
   isCantonPair,
@@ -106,6 +106,26 @@ const ORDER_AMOUNT_TOLERANCE_BPS = 30;
 
 /** Max adverse price move tolerated at settlement vs order outAmount. */
 export const SETTLEMENT_SLIPPAGE_BPS = 50;
+
+/** Settlement floor in base units: quoted out minus SETTLEMENT_SLIPPAGE_BPS. */
+export function settlementMinOutUnits(
+  promisedOutUnits: bigint,
+  slippageBps = SETTLEMENT_SLIPPAGE_BPS
+): bigint {
+  return (
+    promisedOutUnits -
+    (promisedOutUnits * BigInt(slippageBps)) / 10000n
+  );
+}
+
+export function settlementMinOutAmount(
+  outAmount: string,
+  decimals: number,
+  slippageBps = SETTLEMENT_SLIPPAGE_BPS
+): string {
+  const promised = toBaseUnits(outAmount, decimals);
+  return fromBaseUnits(settlementMinOutUnits(promised, slippageBps), decimals);
+}
 
 export async function assertOrderAmountsCantonToCanton(
   fromAsset: CantonSwapAssetId,

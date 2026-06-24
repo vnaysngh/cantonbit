@@ -47,13 +47,19 @@ function eventsFromTree(
   );
 }
 
+/** Ledger scan offset — omit when missing or non-positive (never substitute ledger end). */
+export function scanOffsetFromRecovery(raw: unknown): number | undefined {
+  const n = Number(raw ?? 0);
+  return n > 0 ? n : undefined;
+}
+
 async function scanPartyUpdateTrees(
   partyId: string,
   range: { lookback?: number; beginExclusive?: number },
   match: (tree: TransactionTreeValue) => boolean
 ): Promise<{
   updateId: string;
-  offset: number;
+  offset?: number;
   eventsById: Record<string, unknown>;
 } | null> {
   const jwt = await getLedgerJwt();
@@ -115,9 +121,12 @@ async function scanPartyUpdateTrees(
   for (let i = items.length - 1; i >= 0; i--) {
     const tree = unwrapTransactionTree(items[i]);
     if (!tree || !tree.updateId || !match(tree)) continue;
+    const treeOffset = scanOffsetFromRecovery(tree.offset);
     return {
       updateId: tree.updateId,
-      offset: Number(tree.offset ?? 0),
+      // Never substitute ledger end — missing offset must stay unknown so accept
+      // scans are not anchored after the offer was already accepted.
+      ...(treeOffset !== undefined ? { offset: treeOffset } : {}),
       eventsById: eventsFromTree(tree)
     };
   }
@@ -135,7 +144,7 @@ export async function fetchTransactionTreeByCommandId(
   lookback = DEFAULT_LOOKBACK
 ): Promise<{
   updateId: string;
-  offset: number;
+  offset?: number;
   eventsById: Record<string, unknown>;
 } | null> {
   return scanPartyUpdateTrees(partyId, { lookback }, (tree) => tree.commandId === commandId);
@@ -151,7 +160,7 @@ export async function fetchTransactionTreeByUpdateId(
   lookback = DEFAULT_LOOKBACK
 ): Promise<{
   updateId: string;
-  offset: number;
+  offset?: number;
   eventsById: Record<string, unknown>;
 } | null> {
   for (const partyId of partyIds) {
@@ -173,7 +182,7 @@ export async function fetchTransactionTreeForOfferAccept(
   lookback = DEFAULT_LOOKBACK
 ): Promise<{
   updateId: string;
-  offset: number;
+  offset?: number;
   eventsById: Record<string, unknown>;
 } | null> {
   return scanPartyUpdateTrees(partyId, { lookback }, (tree) =>
@@ -196,7 +205,7 @@ export async function fetchOfferAcceptFromOffset(
   ) => boolean
 ): Promise<{
   updateId: string;
-  offset: number;
+  offset?: number;
   eventsById: Record<string, unknown>;
 } | null> {
   return scanPartyUpdateTrees(partyId, { beginExclusive }, (tree) =>

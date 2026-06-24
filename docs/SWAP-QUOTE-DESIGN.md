@@ -68,14 +68,14 @@ and you keep your funds."* Replace the slippage slider with a hard floor.
 - Sources: CoinGecko + Binance cross-check; 30s fresh cache, 90s max-stale serve, else refuse (no silent 1.0). ✓
 - Depeg breaker (|P−1|>2% → refuse). ✓
 - `QUOTE_TTL_SECONDS=60`; `assertOrderAmounts` re-quotes at create with `ORDER_AMOUNT_TOLERANCE_BPS=30`. ✓
-- Settlement-time floor: `assertHtlcSettlementQuoteFresh` re-quotes before solver value is locked/delivered (forward managed CBTC HtlcLock, forward Loop reveal/delivery, reverse WBTC counter-lock). ✓
+- Settlement-time floor: `assertHtlcSettlementQuoteFresh` re-quotes before solver value is locked/delivered on **reverse** paths (canton→evm main lock, Loop seller lock). **Forward** (evm→canton) paths skip settlement re-pricing after the user's WBTC is locked — refund timelocks unwind instead. ✓
 - Quote response exposes source, age, stale flag, mid price, min-received floor, and expiry. ✓
 - **Remaining gap:** no Dutch decay; this is intentionally deferred for v1.
 
 ### Same-chain C2C (`lib/canton-swap-quote.ts`, `canton-quote.ts`, `canton-quote-sanity.ts`) — strong, metadata/freshness hardened
 - Tradecraft AMM (`/quoteForFixedInput`) is the executable price; 20s cache. ✓
 - **Independent sanity cross-check**: Tradecraft vs `amuletPrice × BTC/USD`, 300bps band mainnet (10% devnet) → refuse if off. ✓ (this is the model the HTLC path lacks)
-- `assertSettlementQuoteFresh`: re-quote at settle, enforce `minOut` floor + `SETTLEMENT_SLIPPAGE_BPS=50`. ✓
+- `assertSettlementQuoteFresh`: re-quote at settle, enforce `minOut` (= quoted out − 50bps). ✓
 - Shared freshness helper now covers Tradecraft, BTC/USD, and amulet/CC reference pricing; Tradecraft serves only bounded stale quotes and then refuses. ✓
 - `amuletPrice` has an absolute clamp (`AMULET_PRICE_MIN_USD`/`AMULET_PRICE_MAX_USD`, default 0.0005–5 USD/CC). ✓
 - Quote response exposes source, age, stale flag, gross mid price, min-received floor, expiry, and devnet indicative labeling. ✓
@@ -93,7 +93,7 @@ Ranked by impact, scoped to keep the proven pieces and only add what's missing.
 
 ### P1 — Cross-chain: add a settlement-time floor + sanity cross-check (implemented)
 The cross-chain time gap is where users/solvers get hurt. Mirror C2C's two guards on the HTLC path:
-1. **`assertHtlcSettlementQuoteFresh`** re-quotes WBTC/BTC immediately before solver value is locked/delivered and enforces the quoted output as the user's floor.
+1. **`assertHtlcSettlementQuoteFresh`** re-quotes WBTC/BTC immediately before reverse-path solver value is locked/delivered and enforces the settlement floor (quoted output − 50bps). Forward paths after user WBTC lock intentionally skip this guard.
 2. **HTLC source cross-check** requires CoinGecko and Binance WBTC/BTC to agree within `HTLC_WBTC_BTC_SOURCE_SANITY_BPS` (default 100bps) and still applies the 2% depeg breaker.
 
 ### P2 — Price source quality (implemented)

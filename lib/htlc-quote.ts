@@ -394,18 +394,13 @@ export async function assertHtlcSettlementQuoteFresh(params: {
   const fresh = reverse
     ? await quoteCbtcToWbtc(inUnits)
     : await quoteWbtcToCbtc(inUnits);
-  const minOut = params.minOutUnits ?? promisedOut;
-  if (fresh.outUnits < minOut) {
-    throw new Error(
-      `fresh HTLC quote ${fresh.outUnits} below minOut ${minOut} — quote expired, refund instead`
-    );
-  }
   const settlementFloor =
     promisedOut -
     (promisedOut * BigInt(HTLC_SETTLEMENT_SLIPPAGE_BPS)) / 10000n;
-  if (fresh.outUnits < settlementFloor) {
+  const minOut = params.minOutUnits ?? settlementFloor;
+  if (fresh.outUnits < minOut) {
     throw new Error(
-      `fresh HTLC quote ${fresh.outUnits} below settlement floor ${settlementFloor}`
+      `fresh HTLC quote ${fresh.outUnits} below settlement floor ${minOut} — quote expired, refund instead`
     );
   }
 }

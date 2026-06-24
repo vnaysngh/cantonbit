@@ -1,0 +1,60 @@
+---
+description: Full-application security audit — required process when user asks for security audit/review of the app
+alwaysApply: true
+---
+
+# Full app security audit
+
+When the user asks for a **security audit**, **security review of the app**, **review the code** (without "quick" or "diff only"), or equivalent:
+
+## Default = whole app
+
+- **You** perform the audit by reading source directly. Cover the **entire** application, not the current diff or session bug.
+- Bugbot / Security Review subagents are **optional supplements only**. Never treat their output as completion.
+- **Do not** add narrow `Custom Instructions` on subagents unless the user explicitly asked for a scoped review.
+
+## Scoped vs full
+
+| User says | Scope |
+|-----------|--------|
+| "Full app security audit" / "security audit" / "review the app" | Whole app (default) |
+| "Quick diff review" / "review this PR only" | Diff-scoped OK |
+
+If ambiguous, assume **full app**.
+
+## Required coverage (this repo)
+
+Read and trace failure modes for at least:
+
+- **Auth**: `lib/htlc-auth.ts`, session/party guards, daemon vs cron vs user routes
+- **Funds — C2C**: fill, settle, `reconcile*`, `reissue*`, expire daemon, proof invariants
+- **Funds — HTLC**: lock, claim, refund, forward/reverse, Loop vs managed
+- **Daemons**: `swap-solver/src/*.mts`, secret parity with server
+- **Quotes / slippage**: `lib/canton-swap-quote.ts`, `lib/htlc-quote.ts`, doc claims
+- **Rate limits**: public quote routes, IP derivation
+- **Config traps**: env vars accepted client-side vs server-side
+
+## Sibling-path rule
+
+Any new or changed `reconcile*` / `reissue*` path must be compared to the existing safe path (e.g. `reconcileLoopCounters`). Trace: stale DB + repair returns null → what runs next? Refuse if ledger unreadable.
+
+## Required deliverable
+
+Report must include all sections below. Missing section = incomplete audit.
+
+1. **Scope map** — API routes, daemons, cron jobs opened
+2. **Funds paths** — C2C + HTLC end-to-end traces
+3. **Sibling-path compare** — reconcile/reissue guards table
+4. **Auth/config parity** — daemon, cron, env secrets
+5. **Doc vs code** — README / SWAP-QUOTE-DESIGN vs implementation
+6. **Findings table** — Severity | Location | Failure scenario | Fix
+7. **Files read** — explicit list of paths reviewed
+8. **Gaps** — what could not be verified and why
+
+## Threat model
+
+Include **solvency / double-pay / mis-reconciliation** bugs, not only external attacker paths. "Operational" daemon bugs that pay users twice are **critical**.
+
+## Verification
+
+User may ask: "List every file you read for the audit." You must answer with a real path list, not vague module names.

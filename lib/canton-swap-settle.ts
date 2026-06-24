@@ -6,7 +6,8 @@ import "server-only";
 import {
   fetchOfferAcceptFromOffset,
   fetchTransactionTreeByCommandId,
-  fetchTransactionTreeByUpdateId
+  fetchTransactionTreeByUpdateId,
+  scanOffsetFromRecovery
 } from "./canton-command-recovery";
 import type { CantonSwapOrder } from "./canton-swap-types";
 import { loopFillActAsParties, swapParty, userLegReceiverParty } from "./canton-swap-types";
@@ -25,7 +26,7 @@ import {
   counterOfferConsumedInEvents,
   extractCounterOfferCidFromEvents
 } from "./canton-swap-leg-verify-logic";
-import { verifyUserLegFromSubmitUpdate } from "./canton-swap-leg-verify";
+import { verifyUserLegFromSubmitUpdate, fetchUpdateEventsById } from "./canton-swap-leg-verify";
 import {
   isDirectTransferKind,
   previewLoopSwapReadiness,
@@ -139,7 +140,7 @@ async function recoverCommittedFill(
   return {
     ...result,
     counterLegCreatedOffset: result.counterLegPendingAccept
-      ? recovered.offset
+      ? scanOffsetFromRecovery(recovered.offset)
       : undefined
   };
 }
@@ -387,7 +388,9 @@ async function fillFromUserOffer(
     );
   return {
     ...result,
-    counterLegCreatedOffset: result.counterLegPendingAccept ? offset : undefined,
+    counterLegCreatedOffset: result.counterLegPendingAccept
+      ? scanOffsetFromRecovery(offset)
+      : undefined,
     networkFeeCollected
   };
 }
@@ -456,7 +459,7 @@ export async function repairManagedFillFromLedger(
   return {
     ...result,
     counterLegCreatedOffset: result.counterLegPendingAccept
-      ? recovered.offset
+      ? scanOffsetFromRecovery(recovered.offset)
       : undefined
   };
 }
@@ -471,31 +474,68 @@ export async function repairLoopFillFromSettlement(
   counterLegCreatedOffset?: number;
 } | null> {
   if (!order.settlementUpdateId) return null;
-  const recovered = await fetchTransactionTreeByUpdateId(
-    order.settlementUpdateId,
-    [order.userParty, swapParty(order)]
-  );
-  if (
-    !recovered?.eventsById ||
-    Object.keys(recovered.eventsById).length === 0
-  ) {
+  const eventsById = await fetchUpdateEventsById(order.settlementUpdateId, [
+    order.userParty,
+    swapParty(order)
+  ]);
+  if (!eventsById || Object.keys(eventsById).length === 0) {
     return null;
   }
   try {
     const result = await buildFillRecoveryFromEvents(
       order,
       order.settlementUpdateId,
-      recovered.eventsById
+      eventsById
     );
+    if (!result.counterLegPendingAccept) {
+      return { ...result, counterLegCreatedOffset: undefined };
+    }
+    const recovered = await fetchTransactionTreeByUpdateId(
+      order.settlementUpdateId,
+      [order.userParty, swapParty(order)]
+    );
+    const offset = scanOffsetFromRecovery(recovered?.offset);
+    if (!offset) return null;
     return {
       ...result,
-      counterLegCreatedOffset: result.counterLegPendingAccept
-        ? recovered.offset
-        : undefined
+      counterLegCreatedOffset: offset
     };
   } catch {
     return null;
   }
+}
+
+/** Read settlement tx and prove direct counter delivery to the user (no reissue). */
+export async function proveCounterDeliveredOnSettlement(
+  order: CantonSwapOrder
+): Promise<{ updateId: string } | "unreadable" | null> {
+  if (!order.settlementUpdateId) return null;
+  const eventsById = await fetchUpdateEventsById(order.settlementUpdateId, [
+    order.userParty,
+    swapParty(order)
+  ]);
+  if (!eventsById || Object.keys(eventsById).length === 0) {
+    return "unreadable";
+  }
+  const asset = getSwapAsset(order.toAsset);
+  const expectedInstrument = await resolveSwapInstrumentId(order.toAsset);
+  const expectedMemo = cantonSwapCounterLegMemo(
+    order,
+    order.counterReissueAttempt ?? 0
+  );
+  if (
+    counterLegDeliveredToUserInEvents(eventsById, {
+      senderParty: swapParty(order),
+      receiverParty: order.userParty,
+      amount: order.outAmount,
+      amountDecimals: asset.decimals,
+      expectedInstrument,
+      expectedMemo
+    })
+  ) {
+    return { updateId: order.settlementUpdateId };
+  }
+  return null;
 }
 
 /** Recover Loop fill from committed ledger when DB lost the outcome (race / in-flight). */
@@ -522,7 +562,7 @@ export async function repairLoopFillFromLedger(
   return {
     ...result,
     counterLegCreatedOffset: result.counterLegPendingAccept
-      ? recovered.offset
+      ? scanOffsetFromRecovery(recovered.offset)
       : undefined
   };
 }
@@ -550,6 +590,7 @@ async function recoverCommittedCounterReissue(
   order: CantonSwapOrder,
   deliverTransferKind: string
 ): Promise<{
+  updateId: string;
   counterLegOfferCid?: string;
   counterLegPendingAccept: boolean;
   counterReissueAttempt: number;
@@ -580,7 +621,7 @@ async function recoverCommittedCounterReissue(
     ...result,
     counterReissueAttempt: attempt,
     counterLegCreatedOffset: result.counterLegPendingAccept
-      ? recovered.offset
+      ? scanOffsetFromRecovery(recovered.offset)
       : undefined
   };
 }
@@ -653,7 +694,9 @@ export async function reissueLoopCounterLeg(order: CantonSwapOrder): Promise<{
   return {
     ...result,
     counterReissueAttempt: attempt,
-    counterLegCreatedOffset: result.counterLegPendingAccept ? offset : undefined
+    counterLegCreatedOffset: result.counterLegPendingAccept
+      ? scanOffsetFromRecovery(offset)
+      : undefined
   };
 }
 

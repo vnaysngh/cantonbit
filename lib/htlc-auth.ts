@@ -20,6 +20,7 @@ export function daemonSecret(): string {
   return (
     process.env.HTLC_DAEMON_SECRET?.trim() ||
     process.env.CRON_SECRET?.trim() ||
+    process.env.API_AUTH_TOKEN?.trim() ||
     ""
   );
 }

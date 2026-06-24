@@ -3,7 +3,7 @@
  *
  *   npm run canton-swap:daemon
  *
- * Env: HTLC_DAEMON_SECRET, CANTON_SWAP_API_URL (or NEXT_PUBLIC_APP_URL)
+ * Env: HTLC_DAEMON_SECRET (or CRON_SECRET / API_AUTH_TOKEN), CANTON_SWAP_API_URL
  */
 import { startHealthServer } from "./health-server.mjs";
 import { runDaemonPhases } from "./daemon-phases.js";
@@ -11,7 +11,12 @@ import { runDaemonPhases } from "./daemon-phases.js";
 const APP_URL_EXPLICIT =
   process.env.CANTON_SWAP_API_URL ?? process.env.NEXT_PUBLIC_APP_URL;
 const APP_URL = APP_URL_EXPLICIT ?? "http://localhost:3000";
-const SECRET = (process.env.HTLC_DAEMON_SECRET ?? "").trim();
+const SECRET = (
+  process.env.HTLC_DAEMON_SECRET ??
+  process.env.CRON_SECRET ??
+  process.env.API_AUTH_TOKEN ??
+  ""
+).trim();
 const POLL_MS = Number(process.env.CANTON_SWAP_POLL_MS ?? "3000");
 const API_TIMEOUT_MS = Number(
   process.env.CANTON_SWAP_DAEMON_API_TIMEOUT_MS ?? "60000"
@@ -25,7 +30,7 @@ const IS_MAINNET =
 // forever with no signal.
 if (!SECRET) {
   console.error(
-    "[canton-swap-daemon] FATAL: HTLC_DAEMON_SECRET is not set — all daemon API calls would 401. Set it (must match the web app) and restart."
+    "[canton-swap-daemon] FATAL: HTLC_DAEMON_SECRET, CRON_SECRET, or API_AUTH_TOKEN is not set — all daemon API calls would 401. Set one (must match the web app daemonSecret()) and restart."
   );
   process.exit(1);
 }

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { buildLoopFillResultFromEvents } from "./canton-swap-leg-verify-logic";
-import { cantonSwapQuoteRateLimitOk } from "./canton-swap-rate-limit";
+import { cantonSwapQuoteRateLimitOk, clientIpFromRequest } from "./canton-swap-rate-limit";
 
 test("cantonSwapQuoteRateLimitOk enforces bucket", () => {
   const key = `test-${Date.now()}`;
@@ -12,6 +12,25 @@ test("cantonSwapQuoteRateLimitOk enforces bucket", () => {
     assert.equal(cantonSwapQuoteRateLimitOk(key), true);
   }
   assert.equal(cantonSwapQuoteRateLimitOk(key), false);
+});
+
+test("clientIpFromRequest prefers x-real-ip over x-forwarded-for", () => {
+  const req = new Request("http://localhost/quote", {
+    headers: {
+      "x-real-ip": "203.0.113.9",
+      "x-forwarded-for": "198.51.100.1, 10.0.0.1"
+    }
+  });
+  assert.equal(clientIpFromRequest(req), "203.0.113.9");
+});
+
+test("clientIpFromRequest takes client before trusted proxy hop", () => {
+  const req = new Request("http://localhost/quote", {
+    headers: {
+      "x-forwarded-for": "203.0.113.1, 10.0.0.1"
+    }
+  });
+  assert.equal(clientIpFromRequest(req), "203.0.113.1");
 });
 
 test("buildLoopFillResultFromEvents: pending accept when counter offer created", () => {

@@ -316,7 +316,10 @@ Controls:
 - 2% WBTC/BTC depeg breaker.
 - 60s quote TTL.
 - Server-side create re-quote with tight amount tolerance.
-- Settlement-time quote floor before solver value is locked or delivered.
+- Settlement-time quote floor before solver value is locked or delivered on **reverse**
+  (canton→evm) paths and before managed reverse main lock. **Forward** (evm→canton) paths
+  intentionally skip re-pricing after the user's WBTC is locked so a flaky feed cannot
+  strand a funded order; refund timelocks unwind instead.
 
 ### Same-Canton CBTC↔CC
 
@@ -326,7 +329,7 @@ Quote source:
 - The service independently sanity-checks Tradecraft against `amuletPrice × BTC/USD`.
 - Mainnet default sanity band is tight; devnet is wider because devnet C2C still
   references mainnet Tradecraft pricing and is labeled indicative.
-- Settlement re-quotes and enforces `minOut` plus a bounded settlement slippage floor.
+- Settlement re-quotes and enforces `minOut` (quoted out minus 50bps settlement slippage).
 
 ### Deferred quote work
 
@@ -472,7 +475,8 @@ The C2C daemon:
 3. reissues expired counter offers only after complete receipt-proof scans;
 4. drains fee-accounting outbox work;
 5. repairs `filled` Loop orders missing counter receipt proof by re-parsing
-   `settlementUpdateId` (`reconcileFilledLoopCounterProof` on `POST /api/canton/swap/expire`).
+   `settlementUpdateId` only (`reconcileFilledLoopCounterProof` — **never reissues**
+   counter on `filled`; reissue stays on `user_locked` + receipt-proof scans).
 
 Recovery design:
 

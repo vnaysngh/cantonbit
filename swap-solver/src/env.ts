@@ -156,8 +156,18 @@ export function loadEnv(): SolverEnv {
     },
 
     startBlock: BigInt(opt("ESCROW_START_BLOCK", "0")),
-    pollIntervalMs: Number(opt("POLL_INTERVAL_MS", "15000"))
+    pollIntervalMs: parsePollIntervalMs(opt("POLL_INTERVAL_MS", "15000"))
   };
+}
+
+function parsePollIntervalMs(raw: string): number {
+  const ms = Number(raw);
+  if (!Number.isFinite(ms) || ms <= 0) {
+    throw new Error(
+      `POLL_INTERVAL_MS must be a positive number, got '${raw}'`
+    );
+  }
+  return ms;
 }
 
 /** A log-safe summary. NEVER returns secrets — keys/secrets are masked. */

@@ -5,10 +5,12 @@ import { getSwapAsset } from "./canton-assets";
 import {
   assertOrderAmountsCantonToCanton,
   quoteCantonToCanton,
-  SETTLEMENT_SLIPPAGE_BPS,
+  settlementMinOutAmount,
   type CantonQuoteResult
 } from "./canton-quote";
 import type { CantonSwapMvpAssetId } from "./canton-swap-types";
+
+export { settlementMinOutAmount };
 
 /** MVP same-Canton pairs: CBTC ↔ CC only. */
 export function isMvpSwapPair(
@@ -69,20 +71,11 @@ export async function assertSettlementQuoteFresh(params: {
   const to = getSwapAsset(params.toAsset);
   const inUnits = toBaseUnits(params.inAmount, from.decimals);
   const minOutUnits = toBaseUnits(params.minOut, to.decimals);
-  const promisedOut = toBaseUnits(params.outAmount, to.decimals);
 
   const fresh = await quoteCantonToCanton(params.fromAsset, params.toAsset, inUnits);
   if (fresh.outUnits < minOutUnits) {
     throw new Error(
-      `fresh quote ${fromBaseUnits(fresh.outUnits, to.decimals)} below minOut ${params.minOut}`
-    );
-  }
-  const floor =
-    promisedOut -
-    (promisedOut * BigInt(SETTLEMENT_SLIPPAGE_BPS)) / 10000n;
-  if (fresh.outUnits < floor) {
-    throw new Error(
-      `price moved: fresh quote ${fromBaseUnits(fresh.outUnits, to.decimals)} below settlement floor`
+      `price moved: fresh quote ${fromBaseUnits(fresh.outUnits, to.decimals)} below settlement minOut ${params.minOut}`
     );
   }
 }

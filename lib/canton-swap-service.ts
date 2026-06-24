@@ -15,7 +15,7 @@ import {
   shouldExpireForVaultMigration
 } from "./canton-swap-order-logic";
 import { QUOTE_TTL_SECONDS } from "./htlc-quote";
-import { assertSettlementQuoteFresh, assertMvpOrderAmounts, quoteMvpCantonSwap } from "./canton-swap-quote";
+import { assertSettlementQuoteFresh, assertMvpOrderAmounts, quoteMvpCantonSwap, settlementMinOutAmount } from "./canton-swap-quote";
 import {
   computeC2cSwapNotionalUsd,
   estimateManagedC2cSettleFee,
@@ -40,6 +40,7 @@ import {
   repairLoopFillFromSettlement,
   repairManagedFillFromLedger,
   resolveUserLegEvidence,
+  proveCounterDeliveredOnSettlement,
   settleManagedSwap,
   listPendingOffersStrict,
   verifyCounterLegReceiptProof
@@ -119,7 +120,7 @@ export class CantonSwapService {
       toAsset: params.toAsset,
       inAmount: params.inAmount,
       outAmount: params.outAmount,
-      minOut: params.outAmount,
+      minOut: settlementMinOutAmount(params.outAmount, to.decimals),
       quoteExpiresAt: q.expiresAt,
       userParty: params.userParty,
       solverParty: vaultParty,
@@ -826,6 +827,59 @@ export class CantonSwapService {
     return n;
   }
 
+  private applyFilledProofRepair(
+    o: CantonSwapOrder,
+    result: {
+      updateId: string;
+      counterLegOfferCid?: string;
+      counterLegPendingAccept: boolean;
+      counterLegCreatedOffset?: number;
+    }
+  ): void {
+    o.settlementUpdateId = result.updateId;
+    o.floatReserved = false;
+    o.counterPendingClearedAt = undefined;
+    if (result.counterLegPendingAccept) {
+      o.counterLegOfferCid = result.counterLegOfferCid;
+      o.counterLegCreatedOffset = result.counterLegCreatedOffset;
+      o.counterReceiptUpdateId = undefined;
+      o.status = "user_locked";
+      o.failureReason =
+        "Counter leg pending Loop accept — user must accept incoming transfer";
+      return;
+    }
+    o.counterReceiptUpdateId = result.updateId;
+    o.counterLegOfferCid = result.counterLegOfferCid;
+    o.counterLegCreatedOffset = undefined;
+    o.status = "filled";
+    o.failureReason = undefined;
+  }
+
+  private async tryCompleteFromSettlementDelivery(
+    o: CantonSwapOrder,
+    expectedStatus: CantonSwapStatus
+  ): Promise<"filled" | "blocked" | "continue"> {
+    const delivery = await proveCounterDeliveredOnSettlement(o);
+    if (delivery === "unreadable") {
+      o.failureReason =
+        "Counter receipt proof incomplete — settlement ledger unreadable; reissue blocked";
+      await this.store.putIfStatus(o, expectedStatus);
+      return "blocked";
+    }
+    if (!delivery) return "continue";
+
+    o.counterReceiptUpdateId = delivery.updateId;
+    o.counterLegOfferCid = undefined;
+    o.counterLegCreatedOffset = undefined;
+    o.counterPendingClearedAt = undefined;
+    o.status = "filled";
+    o.failureReason = undefined;
+    if (await this.transition(o, expectedStatus)) {
+      return "filled";
+    }
+    return "continue";
+  }
+
   /** Re-issue expired counter offers after the user sell leg was already taken. */
   async reconcileLoopCounters(): Promise<number> {
     const orders = await this.store.byStatus("user_locked");
@@ -869,6 +923,15 @@ export class CantonSwapService {
         o.failureReason =
           "Counter receipt proof incomplete — reissue blocked until creation offset is recovered";
         await this.store.putIfStatus(o, "user_locked");
+        continue;
+      }
+
+      const earlyDelivery = await this.tryCompleteFromSettlementDelivery(
+        o,
+        "user_locked"
+      );
+      if (earlyDelivery === "filled" || earlyDelivery === "blocked") {
+        if (earlyDelivery === "filled") n++;
         continue;
       }
 
@@ -921,6 +984,15 @@ export class CantonSwapService {
         continue;
       }
 
+      const deliveryBeforeReissue = await this.tryCompleteFromSettlementDelivery(
+        fresh,
+        "user_locked"
+      );
+      if (deliveryBeforeReissue === "filled" || deliveryBeforeReissue === "blocked") {
+        if (deliveryBeforeReissue === "filled") n++;
+        continue;
+      }
+
       console.warn(
         `[canton-swap] COUNTER REISSUE order=${fresh.id.slice(0, 12)}… ` +
           `priorCid=${priorOfferCid.slice(0, 16)}… attempt=${priorAttempt + 1} ` +
@@ -964,7 +1036,7 @@ export class CantonSwapService {
     return n;
   }
 
-  /** Repair filled Loop orders missing counter delivery or accept proof. */
+  /** Repair filled Loop orders missing counter delivery or accept proof (repair-only; no reissue). */
   async reconcileFilledLoopCounterProof(): Promise<number> {
     const orders = await this.store.byStatus("filled");
     let n = 0;
@@ -978,35 +1050,32 @@ export class CantonSwapService {
           (await repairLoopFillFromSettlement(o)) ??
           (await repairLoopFillFromLedger(o));
         if (repaired) {
-          this.applyLoopFillResult(o, repaired);
+          this.applyFilledProofRepair(o, repaired);
           if (await this.transition(o, "filled")) {
             n++;
           }
           continue;
         }
 
-        console.warn(
-          `[canton-swap] filled counter proof missing — reissuing order=${o.id.slice(0, 12)}…`
-        );
-        const result = await reissueLoopCounterLeg(o);
-        o.counterReissueAttempt = result.counterReissueAttempt;
-        o.counterLegOfferCid = result.counterLegOfferCid;
-        o.counterLegCreatedOffset = result.counterLegPendingAccept
-          ? result.counterLegCreatedOffset
-          : undefined;
-        o.counterPendingClearedAt = undefined;
-        if (result.counterLegPendingAccept) {
-          o.status = "user_locked";
-          o.counterReceiptUpdateId = undefined;
+        const delivery = await proveCounterDeliveredOnSettlement(o);
+        if (delivery === "unreadable") {
           o.failureReason =
-            "Counter leg reissued — accept incoming transfer in Loop";
-        } else {
-          o.counterReceiptUpdateId = result.updateId;
+            "Counter receipt proof missing — refusing repair until settlement ledger is readable";
+          await this.store.putIfStatus(o, "filled");
+          continue;
+        }
+        if (delivery) {
+          o.counterReceiptUpdateId = delivery.updateId;
           o.failureReason = undefined;
+          if (await this.transition(o, "filled")) {
+            n++;
+          }
+          continue;
         }
-        if (await this.transition(o, "filled")) {
-          n++;
-        }
+
+        o.failureReason =
+          "Counter receipt proof missing on filled order — reissue disabled; use user_locked reconcile path";
+        await this.store.putIfStatus(o, "filled");
       } catch (e) {
         console.warn(
           `[canton-swap] filled counter proof repair failed ${o.id.slice(0, 12)}:`,

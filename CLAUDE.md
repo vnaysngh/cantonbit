@@ -184,6 +184,10 @@ Mainnet CBTC↔CC swaps: branch **`c2c-swaps`**, deploy **`oranjswap-web-mainnet
 
 <!-- record any decisions made beyond this document -->
 
+### Security audits
+
+When asked for a **security audit** or **app security review** (unless the user says "quick" or "diff only"), follow `.cursor/rules/security-audit.mdc`: read the whole app yourself, trace funds/reconcile/auth paths, deliver the full findings template, and do not treat Bugbot or Security Review subagents as a substitute.
+
 ### Known issues
 
 <!-- e.g. Transfer factory contract ID needs confirming from metadata endpoint -->
