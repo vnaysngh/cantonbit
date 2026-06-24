@@ -5,7 +5,8 @@ import "server-only";
 
 import {
   fetchOfferAcceptFromOffset,
-  fetchTransactionTreeByCommandId
+  fetchTransactionTreeByCommandId,
+  fetchTransactionTreeByUpdateId
 } from "./canton-command-recovery";
 import type { CantonSwapOrder } from "./canton-swap-types";
 import { loopFillActAsParties, swapParty, userLegReceiverParty } from "./canton-swap-types";
@@ -25,7 +26,6 @@ import {
   extractCounterOfferCidFromEvents
 } from "./canton-swap-leg-verify-logic";
 import { verifyUserLegFromSubmitUpdate } from "./canton-swap-leg-verify";
-import { fetchUpdateEventsById } from "./canton-swap-leg-verify";
 import {
   isDirectTransferKind,
   previewLoopSwapReadiness,
@@ -471,21 +471,26 @@ export async function repairLoopFillFromSettlement(
   counterLegCreatedOffset?: number;
 } | null> {
   if (!order.settlementUpdateId) return null;
-  const events = await fetchUpdateEventsById(order.settlementUpdateId, [
-    order.userParty,
-    swapParty(order)
-  ]);
-  if (!events || Object.keys(events).length === 0) return null;
+  const recovered = await fetchTransactionTreeByUpdateId(
+    order.settlementUpdateId,
+    [order.userParty, swapParty(order)]
+  );
+  if (
+    !recovered?.eventsById ||
+    Object.keys(recovered.eventsById).length === 0
+  ) {
+    return null;
+  }
   try {
     const result = await buildFillRecoveryFromEvents(
       order,
       order.settlementUpdateId,
-      events
+      recovered.eventsById
     );
     return {
       ...result,
       counterLegCreatedOffset: result.counterLegPendingAccept
-        ? order.counterLegCreatedOffset
+        ? recovered.offset
         : undefined
     };
   } catch {

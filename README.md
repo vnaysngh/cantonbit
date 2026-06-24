@@ -214,6 +214,24 @@ depends on the user accepting it in Loop. The service persists the counter-offer
 creation offset and permanent receipt proof before any reissue, so an old accepted
 offer cannot be mistaken for a failed delivery and paid twice.
 
+**CBTC → CC vs CC → CBTC (Loop UX):** CC→CBTC counter delivery is registry CBTC
+(often a visible holding or accept flow in Loop). CBTC→CC counter delivery is CC
+(Amulet) via `TransferPreapproval_SendV2` when the user has CC auto-accept enabled.
+That path credits Amulet silently — Loop may show **no** incoming-transfer prompt.
+Check the header **CC balance** after fill; the app marks completion only when
+ledger proof exists (`counterReceiptUpdateId` for direct delivery, or offer CID +
+accept update id for pending counter legs).
+
+**Completion proof (not `settlementUpdateId` alone):**
+
+| Counter outcome | Required DB proof | Ledger check |
+| --- | --- | --- |
+| Direct delivery (preapproval) | `counterReceiptUpdateId` | Amulet `SendV2` balance change or registry holding to user |
+| Pending counter offer | `counterLegOfferCid` + `counterReceiptUpdateId` | Accept scan from `counterLegCreatedOffset` |
+
+Fill outcomes are parsed from committed transaction events; the registry
+`transferKind` at prepare time does not alone mark an order complete.
+
 ### C2C preapproval rules
 
 Preapproval is directional: it affects the **receiver** of a transfer.
@@ -243,7 +261,9 @@ Important fields:
 - `settlementUpdateId`: Canton update that consumed the sell leg / delivered or
   offered the counter leg.
 - `counterLegCreatedOffset` + `counterReceiptUpdateId`: durable proof for counter
-  offer recovery.
+  offer recovery and UI completion. Direct fills set `counterReceiptUpdateId` to
+  the fill update id only after ledger-verified delivery; pending offers require
+  both fields before status `filled`.
 - `networkFeeAccountingPending`: outbox marker for fee-booking recovery.
 
 ---
@@ -267,7 +287,7 @@ Trust model by flow:
 | Cross-chain, Loop buyer | Trust-minimized venue delivery obligation | Preimage reveal cannot be one atomic Canton/EVM transaction |
 | Cross-chain, Loop seller | Custodial during settlement | Vault temporarily controls CBTC; WBTC is reserved first and refunds are deterministic |
 | C2C, managed | Atomic direct Canton delivery | Quote/reference checks and DB reservation happen before submit |
-| C2C, Loop | Atomic sell-consumption + counter creation/delivery | User may still need to accept a pending counter offer |
+| C2C, Loop | Atomic sell-consumption + counter creation/delivery | User may still need to accept a pending counter offer; CBTC→CC with CC preapproval completes silently in Loop |
 
 The EVM leg stays trustless in both wallet modes: `HTLCEscrow.sol` enforces
 `keccak256(preimage) == hashLock` and `retake` after timelock.
@@ -450,7 +470,9 @@ The C2C daemon:
 1. fills Loop sell offers;
 2. reconciles pending or committed counter legs;
 3. reissues expired counter offers only after complete receipt-proof scans;
-4. drains fee-accounting outbox work.
+4. drains fee-accounting outbox work;
+5. repairs `filled` Loop orders missing counter receipt proof by re-parsing
+   `settlementUpdateId` (`reconcileFilledLoopCounterProof` on `POST /api/canton/swap/expire`).
 
 Recovery design:
 
