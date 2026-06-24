@@ -12,6 +12,7 @@
  * on-ledger hashlock — T1), then delivers and stores the preimage for the EVM claim.
  */
 import { keccak_256 } from "@noble/hashes/sha3";
+import { Buffer } from "node:buffer";
 
 import { getHoldings } from "./canton";
 import { alert } from "./alert";
@@ -36,6 +37,8 @@ import {
   recordNetworkFeeCollected
 } from "./network-fee-ledger";
 import { isEvmTxHash, reverseZeroLockReconcileOutcome } from "./htlc-order-logic";
+import { htlcCanExposePreimageToSolver, htlcForwardLoopDeliveryProven, htlcVisibleCompleted } from "./swap-product-invariants";
+import { htlcUserWbtcClaimTx } from "./htlc-order-logic";
 import {
   allocate,
   createHtlcLock,
@@ -53,6 +56,7 @@ import {
   assertEvmTransactionFinalized,
   evmBlockAtOrBeforeUnixTime,
   hasEvmClaimedForHashLock,
+  findEvmClaimTxForHashLock,
   isReverseEvmCounterLockReady,
   readErc20Balance,
   readEvmLockMapping,
@@ -61,22 +65,46 @@ import {
   verifyReverseCounterLockTx
 } from "./htlc-evm-counter-lock";
 import type { SwapOrder, SwapStatus, SwapDirection } from "./htlc-types";
-import { fetchTransactionTreeByCommandId } from "./canton-command-recovery";
+import { fetchTransactionTreeByCommandId, fetchTransactionTreeForOfferAccept } from "./canton-command-recovery";
+import { fetchUpdateEventsById } from "./canton-swap-leg-verify";
 import { recoverHtlcCounterDeliveryFromEvents } from "./htlc-counter-delivery-recovery";
+import { counterOfferConsumedInEvents } from "./canton-swap-leg-verify-logic";
 import {
   recoverExactAllocationFromEvents,
   recoverExactHtlcLockFromEvents
 } from "./htlc-ledger-recovery";
 import { matchesInstrument } from "./canton-assets";
 import { assertHtlcSettlementQuoteFresh } from "./htlc-quote";
+import { TRANSFER_REASON_META_KEY } from "./transfer-options";
+import { htlcLoopCounterDeliveryMemo } from "./swap-transfer-memo";
 
 export type { SwapOrder, SwapStatus, SwapDirection };
+
+type GetOrderMode = "full" | "light";
+
+function reconcileCacheKey(id: string, mode: GetOrderMode): string {
+  return `${id}:${mode}`;
+}
 
 function isUniqueConstraintViolation(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
   if ((err as { code?: string }).code === "23505") return true;
   const message = (err as { message?: string }).message ?? "";
   return message.includes("duplicate key") || message.includes("unique constraint");
+}
+
+function isAwaitingEvmFinality(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    err.message.includes("EVM transaction awaiting finality")
+  );
+}
+
+function isExpiredTransferInstructionError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /deadline-exceeded|executeBefore.*future|Transfer `executeBefore` must be in the future/i.test(
+    msg
+  );
 }
 
 function toHexLower(bytes: Uint8Array): string {
@@ -103,6 +131,7 @@ const REVERSE_PRELOCK_RESERVATION_TTL_SECONDS = Number(
 
 /** Marker when Loop transfer auto-settled via solver TransferPreapproval (no pending offer). */
 const LOOP_PREAPPROVAL_SETTLED = "transfer-preapproval-settled";
+const LOOP_CUSTODY_MEMO_PREFIX = "oranj.htlc.rev.v1.";
 
 function cbtcAmountsMatch(a: string, b: string): boolean {
   try {
@@ -110,6 +139,40 @@ function cbtcAmountsMatch(a: string, b: string): boolean {
   } catch {
     return false;
   }
+}
+
+function memoPartyTag(party: string): string {
+  if (party.length <= 24) return party;
+  return `${party.slice(0, 10)}-${party.slice(-10)}`;
+}
+
+function reverseLoopCustodyMemo(order: SwapOrder): string {
+  const payload = {
+    id: order.id.startsWith("0x") ? order.id.slice(2) : order.id,
+    ts: order.createdAt,
+    user: memoPartyTag(order.userCantonParty),
+    solver: memoPartyTag(order.solverCantonParty)
+  };
+  const memo = `${LOOP_CUSTODY_MEMO_PREFIX}${Buffer.from(
+    JSON.stringify(payload),
+    "utf8"
+  ).toString("base64url")}`;
+  if (memo.length > 256) {
+    throw new Error("Loop custody memo exceeds Canton transfer metadata limit");
+  }
+  return memo;
+}
+
+function transferOfferMemo(offer: { meta?: Record<string, unknown> }): string {
+  const values = offer.meta?.values;
+  if (!values || typeof values !== "object") return "";
+  const memo = (values as Record<string, unknown>)[TRANSFER_REASON_META_KEY];
+  return typeof memo === "string" ? memo : "";
+}
+
+function transferOfferRequestedAtMs(offer: { requestedAt?: string }): number {
+  const ms = Date.parse(offer.requestedAt ?? "");
+  return Number.isFinite(ms) ? ms : 0;
 }
 
 function isSafeReversePrelockReleaseCause(cause: unknown): boolean {
@@ -368,27 +431,306 @@ class HtlcService {
       ).order;
     }
   }
-  async getOrder(id: string) {
+  async peekOrder(id: string): Promise<SwapOrder | undefined> {
+    return this.store.get(id);
+  }
+
+  private reconcileInflight = new Map<string, Promise<SwapOrder>>();
+
+  async getOrder(
+    id: string,
+    opts?: { mode?: GetOrderMode }
+  ): Promise<SwapOrder | undefined> {
     const o = await this.store.get(id);
     if (!o) return undefined;
-    return this.reconcilePhantomEvmCounterLock(o);
+    const mode = opts?.mode ?? "full";
+    const key = reconcileCacheKey(id, mode);
+    const inflight = this.reconcileInflight.get(key);
+    if (inflight) return inflight;
+    const work = (
+      mode === "light"
+        ? this.reconcileOrderLight(o)
+        : this.reconcileOrderIfNeeded(o)
+    ).finally(() => {
+      this.reconcileInflight.delete(key);
+    });
+    this.reconcileInflight.set(key, work);
+    return work;
   }
-  /** Orders the solver should act on (not terminal). No on-chain reconcile here —
-   *  the daemon polls every few seconds; reconcile runs on getOrder() for UI reads. */
+  /** Orders the solver should act on (not terminal). Runs light reconcile only
+   *  (Loop delivery proof repair) — no per-order EVM event scans, so many
+   *  concurrent orders do not serialize on Base RPC during every poll tick. */
   async activeOrders(): Promise<SwapOrder[]> {
     const all = await this.store.active();
     const actionable = new Set([
+      "main_locking",
       "main_locked",
       "counter_locking",
       "counter_locked",
       "counter_claimed"
     ]);
-    return all.filter(
+    const filtered = all.filter(
       (o) =>
         (o.direction === "evm-to-canton" || o.direction === "canton-to-evm") &&
         actionable.has(o.status) &&
         !o.id.startsWith("smoke-")
     );
+    const reconciled: SwapOrder[] = [];
+    for (const o of filtered) {
+      reconciled.push(await this.reconcileOrderLight(o));
+    }
+    return reconciled;
+  }
+
+  /** Light repair for daemon polls — ledger update trees only, no EVM scans. */
+  private async reconcileOrderLight(o: SwapOrder): Promise<SwapOrder> {
+    if (
+      o.status === "refunded" ||
+      o.status === "cancelled" ||
+      o.status === "failed" ||
+      htlcVisibleCompleted(o)
+    ) {
+      return o;
+    }
+    return this.reconcileLoopForwardCounterDelivery(o);
+  }
+
+  /** Full reconcile for list/detail views (history, getOrder). */
+  private async reconcileOrderIfNeeded(o: SwapOrder): Promise<SwapOrder> {
+    if (
+      o.status === "refunded" ||
+      o.status === "cancelled" ||
+      o.status === "failed" ||
+      htlcVisibleCompleted(o)
+    ) {
+      return o;
+    }
+    let row = await this.reconcilePhantomEvmCounterLock(o);
+    row = await this.reconcileLoopForwardCounterDelivery(row);
+    row = await this.reconcileForwardEvmMainClaim(row);
+    row = await this.reconcileReverseSolverClaim(row);
+    row = await this.reconcileMainClaimedProof(row);
+    return row;
+  }
+
+  /** When Loop delivery proof exists and the solver already claimed WBTC on EVM,
+   *  repair counter_claimed → main_claimed so history/status show Completed. */
+  private async reconcileForwardEvmMainClaim(
+    o: SwapOrder
+  ): Promise<SwapOrder> {
+    if (o.direction !== "evm-to-canton" || o.status !== "counter_claimed") {
+      return o;
+    }
+    if (o.mainClaimTx) {
+      const patched = { ...o, status: "main_claimed" as const };
+      if (await this.store.putIfStatus(patched, "counter_claimed")) {
+        return patched;
+      }
+      return this.must(o.id);
+    }
+    const gate = htlcCanExposePreimageToSolver(o);
+    if (!gate.ok) return o;
+    try {
+      const lock = await readEvmLockMapping(o.hashLock);
+      if (lock.amount > 0n) return o;
+    } catch (e) {
+      console.warn(
+        `[htlc] forward main-claim reconcile ${o.id.slice(0, 12)} lock read failed: ${e instanceof Error ? e.message : e}`
+      );
+      return o;
+    }
+    const fromBlockHex = o.mainLockTx
+      ? await evmTxBlockHex(o.mainLockTx)
+      : undefined;
+    let claimTx: string | undefined;
+    try {
+      claimTx = await findEvmClaimTxForHashLock(o.hashLock, { fromBlockHex });
+    } catch (e) {
+      console.warn(
+        `[htlc] forward main-claim reconcile ${o.id.slice(0, 12)} Claimed scan failed: ${e instanceof Error ? e.message : e}`
+      );
+      return o;
+    }
+    if (!claimTx) return o;
+    try {
+      await verifyReverseClaimTx(claimTx, o.hashLock);
+    } catch {
+      return o;
+    }
+    const patched = {
+      ...o,
+      status: "main_claimed" as const,
+      mainClaimTx: claimTx as `0x${string}`
+    };
+    if (await this.store.putIfStatus(patched, "counter_claimed")) {
+      return patched;
+    }
+    return this.must(o.id);
+  }
+
+  /** Reverse counter_claimed: user already claimed WBTC — finish Canton settlement. */
+  private async reconcileReverseSolverClaim(o: SwapOrder): Promise<SwapOrder> {
+    if (o.direction !== "canton-to-evm" || o.status !== "counter_claimed") {
+      return o;
+    }
+    if (!htlcUserWbtcClaimTx(o) || !o.revealedPreimage) return o;
+    try {
+      const { order } = await this.claimMainAsSolver(o.id);
+      return order;
+    } catch (e) {
+      console.warn(
+        `[htlc] reverse solver claim reconcile ${o.id.slice(0, 12)} failed: ${e instanceof Error ? e.message : e}`
+      );
+      return o;
+    }
+  }
+
+  /** Repair main_claimed rows that advanced without persisting required proof fields. */
+  private async reconcileMainClaimedProof(o: SwapOrder): Promise<SwapOrder> {
+    if (o.status !== "main_claimed" || htlcVisibleCompleted(o)) return o;
+
+    if (
+      o.direction === "evm-to-canton" &&
+      o.counterMode === "loop" &&
+      !htlcForwardLoopDeliveryProven(o)
+    ) {
+      o = await this.reconcileLoopForwardCounterDelivery(o);
+      if (htlcVisibleCompleted(o)) return o;
+    }
+
+    const needsForwardClaimTx =
+      o.direction === "evm-to-canton" && !o.mainClaimTx;
+    const needsReverseUserClaimTx =
+      o.direction === "canton-to-evm" && !htlcUserWbtcClaimTx(o);
+    if (!needsForwardClaimTx && !needsReverseUserClaimTx) return o;
+
+    const anchorTx =
+      o.direction === "evm-to-canton" ? o.mainLockTx : o.counterLockTx;
+    let fromBlockHex: string | undefined;
+    if (anchorTx) {
+      try {
+        fromBlockHex = await evmTxBlockHex(anchorTx);
+      } catch {
+        /* scan from genesis */
+      }
+    }
+    let claimTx: string | undefined;
+    try {
+      claimTx = await findEvmClaimTxForHashLock(o.hashLock, { fromBlockHex });
+    } catch (e) {
+      console.warn(
+        `[htlc] main_claimed proof reconcile ${o.id.slice(0, 12)} Claimed scan failed: ${e instanceof Error ? e.message : e}`
+      );
+      return o;
+    }
+    if (!claimTx) return o;
+    try {
+      await verifyReverseClaimTx(claimTx, o.hashLock);
+    } catch {
+      return o;
+    }
+
+    const patched = { ...o, mainClaimTx: claimTx as `0x${string}` };
+    if (await this.store.putIfStatus(patched, "main_claimed")) {
+      return patched;
+    }
+    return this.must(o.id);
+  }
+
+  /** Repair stale Loop forward rows where delivery update proves direct/preapproved
+   *  settlement but a transient offer CID blocked counterClaimUpdateId persistence. */
+  private async reconcileLoopForwardCounterDelivery(
+    o: SwapOrder
+  ): Promise<SwapOrder> {
+    if (
+      o.direction !== "evm-to-canton" ||
+      o.counterMode !== "loop" ||
+      !o.counterTransferUpdateId ||
+      o.counterClaimUpdateId
+    ) {
+      return o;
+    }
+    if (o.status !== "counter_claimed" && o.status !== "main_claimed") {
+      return o;
+    }
+    const expectedMemo = htlcLoopCounterDeliveryMemo(o);
+    const proof = await this.recoverLoopCounterDeliveryEvidence({
+      order: o,
+      updateId: o.counterTransferUpdateId,
+      expectedMemo
+    });
+    if (proof?.delivered) {
+      try {
+        return await this.persistLoopCounterDeliveryEvidence({
+          id: o.id,
+          updateId: o.counterTransferUpdateId,
+          directDeliveryProven: true
+        });
+      } catch (e) {
+        console.warn(
+          `[htlc] loop forward delivery repair ${o.id.slice(0, 12)} failed: ${e instanceof Error ? e.message : e}`
+        );
+        return o;
+      }
+    }
+
+    let offerCid = o.counterTransferOfferCid ?? proof?.offerCid;
+    if (!offerCid) {
+      offerCid =
+        (await findOfferFromSender(
+          o.solverCantonParty,
+          o.userCantonParty,
+          expectedMemo,
+          {
+            amountBtc: o.cbtcAmount!,
+            amountDecimals: 8,
+            instrumentId: NETWORK.instrumentId
+          }
+        )) ?? undefined;
+    }
+    if (!offerCid) return o;
+
+    if (!o.counterTransferOfferCid) {
+      const withOffer = { ...o, counterTransferOfferCid: offerCid };
+      if (await this.store.putIfStatus(withOffer, o.status)) {
+        o = withOffer;
+      } else {
+        o = await this.must(o.id);
+      }
+    }
+
+    let userPending: Awaited<ReturnType<typeof listPendingOffers>> = [];
+    try {
+      userPending = await listPendingOffers(o.userCantonParty);
+    } catch (e) {
+      console.warn(
+        `[htlc] loop forward accept repair ${o.id.slice(0, 12)} pending-offer ACS skipped: ${e instanceof Error ? e.message : e}`
+      );
+    }
+    if (userPending.some((p) => p.contractId === offerCid)) {
+      return o;
+    }
+
+    try {
+      const acceptTree = await fetchTransactionTreeForOfferAccept(
+        offerCid,
+        o.userCantonParty,
+        counterOfferConsumedInEvents
+      );
+      if (!acceptTree?.updateId) return o;
+      const patched = {
+        ...o,
+        counterTransferOfferCid: offerCid,
+        counterClaimUpdateId: acceptTree.updateId
+      };
+      if (await this.store.putIfStatus(patched, o.status)) return patched;
+      return this.must(o.id);
+    } catch (e) {
+      console.warn(
+        `[htlc] loop forward accept repair ${o.id.slice(0, 12)} failed: ${e instanceof Error ? e.message : e}`
+      );
+      return o;
+    }
   }
 
   /** Sync reverse order state with Base Sepolia — fix phantom locks AND recover after user claim. */
@@ -503,9 +845,11 @@ class HtlcService {
       ? o
       : this.must(o.id);
   }
-  /** Order history for one user party (newest first). */
+  /** Order history for one user party (newest first). Reconciles in-flight rows so
+   *  list views match getOrder() proof repair (Loop delivery + EVM main claim). */
   async historyForParty(party: string): Promise<SwapOrder[]> {
-    return this.store.byParty(party);
+    const orders = await this.store.byParty(party);
+    return Promise.all(orders.map((o) => this.reconcileOrderIfNeeded(o)));
   }
 
   async accept(id: string) {
@@ -906,20 +1250,93 @@ class HtlcService {
     return o;
   }
 
-  /** LOOP REVEAL + DELIVER — Cancore's venue/custody ordering: SECRET FIRST, then CBTC.
+  /** LOOP REVEAL + DELIVER — trust-minimized Loop path.
    *
-   *  Why this order (solver-robbery guard): if we delivered the CBTC on main_locked,
-   *  a user could accept it, never reveal the secret, and retake their WBTC after the
-   *  EVM timelock — robbing the solver. So the user's "Claim" click sends us the
-   *  preimage FIRST; once we hold a valid preimage we can ALWAYS claim the WBTC
-   *  (status flips to counter_claimed → the daemon claims it), and only then do we
-   *  deliver the CBTC via a STANDARD TransferFactory_Transfer the user accepts in
-   *  their Loop wallet. The user signs ONLY standard choices; all secret logic is on
-   *  our node (Loop's Option 1, same custody model Cancore ships for Loop users).
+   *  Loop cannot exercise our custom HTLC DAR, so the user reveals to our backend
+   *  and receives CBTC through standard TransferFactory transfers. The critical
+   *  invariant is that the daemon must not claim WBTC until the CBTC delivery is
+   *  proven:
+   *    - direct/preapproved delivery: delivery update creates the user's holding;
+   *    - pending offer: the exact offer is later consumed by the user's Loop accept.
    *
    *  IDEMPOTENT on retry: preimage step keys on status; delivery keys on
    *  counterTransferUpdateId (persisted the instant createTransfer returns).
    */
+  private async recoverLoopCounterDeliveryEvidence(params: {
+    order: SwapOrder;
+    updateId: string;
+    expectedMemo: string;
+  }): Promise<{ delivered: boolean; offerCid?: string } | null> {
+    const eventsById = await fetchUpdateEventsById(params.updateId, [
+      params.order.solverCantonParty,
+      params.order.userCantonParty
+    ]);
+    if (!eventsById) return null;
+    return recoverHtlcCounterDeliveryFromEvents(eventsById, {
+      senderParty: params.order.solverCantonParty,
+      receiverParty: params.order.userCantonParty,
+      amountBtc: params.order.cbtcAmount ?? "",
+      expectedInstrument: NETWORK.instrumentId,
+      expectedMemo: params.expectedMemo
+    });
+  }
+
+  private loopCounterDeliveryMatch(order: SwapOrder, expectedMemo: string) {
+    return {
+      senderParty: order.solverCantonParty,
+      receiverParty: order.userCantonParty,
+      amountBtc: order.cbtcAmount ?? "",
+      expectedInstrument: NETWORK.instrumentId,
+      expectedMemo
+    };
+  }
+
+  /** Parse or poll until the solver delivery update proves offer vs direct delivery. */
+  private async waitForLoopCounterDeliveryEvidence(params: {
+    order: SwapOrder;
+    updateId: string;
+    expectedMemo: string;
+    eventsById?: Record<string, unknown>;
+    maxAttempts?: number;
+    pollMs?: number;
+  }): Promise<{ delivered: boolean; offerCid?: string } | null> {
+    const match = this.loopCounterDeliveryMatch(params.order, params.expectedMemo);
+    if (params.eventsById) {
+      const immediate = recoverHtlcCounterDeliveryFromEvents(
+        params.eventsById,
+        match
+      );
+      if (immediate) return immediate;
+    }
+    const maxAttempts = params.maxAttempts ?? 15;
+    const pollMs = params.pollMs ?? 2000;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const recovered = await this.recoverLoopCounterDeliveryEvidence({
+        order: params.order,
+        updateId: params.updateId,
+        expectedMemo: params.expectedMemo
+      });
+      if (recovered) return recovered;
+      if (attempt < maxAttempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, pollMs));
+      }
+    }
+    return null;
+  }
+
+  private async persistLoopCounterDeliveryUpdateOnly(params: {
+    id: string;
+    updateId: string;
+    offerContractId?: string;
+  }): Promise<SwapOrder> {
+    return this.persistLoopCounterDeliveryEvidence({
+      id: params.id,
+      updateId: params.updateId,
+      offerContractId: params.offerContractId,
+      directDeliveryProven: false
+    });
+  }
+
   async claimCounter(
     id: string,
     preimageHex: string
@@ -930,8 +1347,10 @@ class HtlcService {
         `claim-counter is the Loop path (mode ${o.counterMode ?? "managed"}); managed users use claim-managed`
       );
     }
-    // main_claimed is fine too — the daemon may have already claimed the WBTC after
-    // the reveal (the custody ordering); the user is just completing their accept.
+    // counter_claimed/main_claimed are retry states. They are valid only because
+    // preimage exposure to the solver is separately proof-gated by
+    // htlcCanExposePreimageToSolver; a pending Loop offer must still be accepted
+    // before the daemon can claim WBTC.
     if (
       o.status !== "main_locked" &&
       o.status !== "counter_claimed" &&
@@ -942,9 +1361,10 @@ class HtlcService {
     if (!preimageMatches(preimageHex, o.hashLock))
       throw new Error("invalid preimage");
 
-    // 1. SECRET FIRST — persist the preimage + flip to counter_claimed BEFORE any
-    // delivery. From this moment the daemon can claim the WBTC; we are unrobbable.
-    // (Only from main_locked — never downgrade counter_claimed/main_claimed.)
+    // 1. Store the reveal as durable user intent, but do NOT let the daemon use it
+    // until the standard Loop delivery obligation is proven. /preimage and /active
+    // both gate forward Loop preimage exposure on counterTransferUpdateId +
+    // counterClaimUpdateId.
     if (o.status === "main_locked") {
       // 0. EVM LOCK CHECK — the WBTC must REALLY be locked for our solver with time to
       // spare. Do not re-price here: the user has already locked WBTC, and a price
@@ -977,16 +1397,24 @@ class HtlcService {
     if (!o.counterTransferUpdateId) {
       const holdings = await getHoldings(o.solverCantonParty);
       const commandId = `htlc-counter-deliver-${id}`;
+      const counterDeliveryMemo = htlcLoopCounterDeliveryMemo(o);
       let updateId: string;
       let offerContractId: string | undefined;
       let transferKind: string | undefined;
+      let deliveryEventsById: Record<string, unknown> | undefined;
       try {
-        ({ updateId, offerContractId, transferKind } = await createTransfer({
+        ({
+          updateId,
+          offerContractId,
+          transferKind,
+          eventsById: deliveryEventsById
+        } = await createTransfer({
           senderParty: o.solverCantonParty,
           receiverParty: o.userCantonParty, // the Loop party (cross-participant)
           amountBtc: o.cbtcAmount!,
           inputHoldings: holdings,
-          commandId
+          commandId,
+          memo: counterDeliveryMemo
         }));
       } catch (e) {
         // F7: a retry after a committed-but-unpersisted transfer. The deterministic
@@ -995,11 +1423,37 @@ class HtlcService {
         // crashed before persisting. Recover WITHOUT re-sending.
         if (e instanceof Error && e.message.includes("duplicate command committed")) {
           const fresh = await this.must(id);
+          const memo = htlcLoopCounterDeliveryMemo(fresh);
           if (fresh.counterTransferUpdateId) {
-            return {
+            const recoveredFresh = await this.waitForLoopCounterDeliveryEvidence({
               order: fresh,
               updateId: fresh.counterTransferUpdateId,
-              delivered: !fresh.counterTransferOfferCid
+              expectedMemo: memo
+            });
+            if (!recoveredFresh) {
+              o = await this.persistLoopCounterDeliveryUpdateOnly({
+                id,
+                updateId: fresh.counterTransferUpdateId,
+                offerContractId: fresh.counterTransferOfferCid
+              });
+              return {
+                order: o,
+                updateId: fresh.counterTransferUpdateId,
+                delivered: false
+              };
+            }
+            const persisted = await this.persistLoopCounterDeliveryEvidence({
+              id,
+              updateId: fresh.counterTransferUpdateId,
+              offerContractId: recoveredFresh.delivered
+                ? undefined
+                : recoveredFresh.offerCid,
+              directDeliveryProven: recoveredFresh.delivered
+            });
+            return {
+              order: persisted,
+              updateId: fresh.counterTransferUpdateId,
+              delivered: recoveredFresh.delivered
             };
           }
           const committed = await fetchTransactionTreeByCommandId(
@@ -1011,24 +1465,30 @@ class HtlcService {
               `duplicate command committed but counter delivery transaction not found (${commandId})`
             );
           }
-          const recovered = recoverHtlcCounterDeliveryFromEvents(
-            committed.eventsById,
-            {
-              senderParty: o.solverCantonParty,
-              receiverParty: o.userCantonParty,
-              amountBtc: o.cbtcAmount ?? "",
-              expectedInstrument: NETWORK.instrumentId
-            }
-          );
+          const recovered = await this.waitForLoopCounterDeliveryEvidence({
+            order: o,
+            updateId: committed.updateId,
+            expectedMemo: memo,
+            eventsById: committed.eventsById
+          });
           if (!recovered) {
-            throw new Error(
-              `committed counter delivery lacks receiver evidence (${commandId})`
-            );
+            o = await this.persistLoopCounterDeliveryUpdateOnly({
+              id,
+              updateId: committed.updateId
+            });
+            return {
+              order: o,
+              updateId: committed.updateId,
+              delivered: false
+            };
           }
           const persisted = await this.persistLoopCounterDeliveryEvidence({
             id,
             updateId: committed.updateId,
-            offerContractId: recovered.offerCid
+            offerContractId: recovered.delivered
+              ? undefined
+              : recovered.offerCid,
+            directDeliveryProven: recovered.delivered
           });
           return {
             order: persisted,
@@ -1038,30 +1498,85 @@ class HtlcService {
         }
         throw e;
       }
+      const recovered = await this.waitForLoopCounterDeliveryEvidence({
+        order: o,
+        updateId,
+        expectedMemo: counterDeliveryMemo,
+        eventsById: deliveryEventsById
+      });
+      if (!recovered) {
+        o = await this.persistLoopCounterDeliveryUpdateOnly({
+          id,
+          updateId,
+          offerContractId: offerContractId || undefined
+        });
+        console.warn(
+          `[htlc] loop deliver ${id}: update committed, proof pending propagation (${updateId.slice(0, 20)}...)`
+        );
+        return { order: o, updateId, delivered: false };
+      }
+      delivered = recovered.delivered;
+      offerContractId = recovered.delivered ? undefined : recovered.offerCid;
       o = await this.persistLoopCounterDeliveryEvidence({
         id,
         updateId,
-        offerContractId
+        offerContractId,
+        directDeliveryProven: delivered
       });
-      // No offer created = the transfer self-completed (preapproval auto-accept).
-      delivered = !offerContractId;
       console.log(
         `[htlc] loop deliver ${id}: kind=${transferKind} delivered=${delivered}`
       );
-    } else if (!o.counterTransferOfferCid) {
-      // RETRY path with no recorded offer: either it auto-accepted (direct) or the
-      // offer was already accepted. If no pending offer exists on-ledger, the CBTC
-      // is with the user — nothing left to accept.
-      const pending = await findOfferFromSender(
-        o.solverCantonParty,
-        o.userCantonParty
-      );
-      if (pending) {
-        o.counterTransferOfferCid = pending;
-        if (!(await this.store.putIfStatus(o, o.status))) {
-          throw new Error("counter offer recovery lost lifecycle race");
+    } else if (!o.counterClaimUpdateId) {
+      o = await this.reconcileLoopForwardCounterDelivery(o);
+      if (o.counterClaimUpdateId) {
+        delivered = true;
+      } else if (!o.counterTransferOfferCid) {
+        // RETRY path with no recorded offer: never treat "no pending offer found" as
+        // proof of delivery. A missing offer can also mean propagation lag, an expired
+        // transfer instruction, or an offer cid we failed to persist. Only mark direct
+        // delivery when the original update tree proves a receiver holding was created.
+        const pending = await findOfferFromSender(
+          o.solverCantonParty,
+          o.userCantonParty,
+          htlcLoopCounterDeliveryMemo(o),
+          {
+            amountBtc: o.cbtcAmount!,
+            amountDecimals: 8,
+            instrumentId: NETWORK.instrumentId
+          }
+        );
+        if (pending) {
+          o.counterTransferOfferCid = pending;
+          if (!(await this.store.putIfStatus(o, o.status))) {
+            throw new Error("counter offer recovery lost lifecycle race");
+          }
+        } else {
+          const recovered = await this.waitForLoopCounterDeliveryEvidence({
+            order: o,
+            updateId: o.counterTransferUpdateId!,
+            expectedMemo: htlcLoopCounterDeliveryMemo(o),
+            maxAttempts: 8,
+            pollMs: 1500
+          });
+          if (!recovered) {
+            delivered = false;
+          } else if (recovered.delivered) {
+            o = await this.persistLoopCounterDeliveryEvidence({
+              id,
+              updateId: o.counterTransferUpdateId!,
+              directDeliveryProven: true
+            });
+            delivered = true;
+          } else if (recovered.offerCid) {
+            o = await this.persistLoopCounterDeliveryEvidence({
+              id,
+              updateId: o.counterTransferUpdateId!,
+              offerContractId: recovered.offerCid
+            });
+            delivered = false;
+          }
         }
-      } else delivered = true;
+      }
     }
     return { order: o, updateId: o.counterTransferUpdateId ?? "", delivered };
   }
@@ -1070,6 +1585,7 @@ class HtlcService {
     id: string;
     updateId: string;
     offerContractId?: string;
+    directDeliveryProven?: boolean;
   }): Promise<SwapOrder> {
     for (let attempt = 0; attempt < 3; attempt++) {
       const fresh = await this.must(params.id);
@@ -1101,8 +1617,14 @@ class HtlcService {
 
       fresh.counterTransferUpdateId =
         fresh.counterTransferUpdateId ?? params.updateId;
-      fresh.counterTransferOfferCid =
-        fresh.counterTransferOfferCid ?? params.offerContractId;
+      if (params.directDeliveryProven) {
+        fresh.counterClaimUpdateId =
+          fresh.counterClaimUpdateId ?? params.updateId;
+        fresh.counterTransferOfferCid = undefined;
+      } else if (params.offerContractId) {
+        fresh.counterTransferOfferCid =
+          fresh.counterTransferOfferCid ?? params.offerContractId;
+      }
       const expectedStatus = fresh.status;
       if (await this.store.putIfStatus(fresh, expectedStatus)) return fresh;
     }
@@ -1114,7 +1636,8 @@ class HtlcService {
 
   /** PREPARE the standard TransferInstruction_Accept command for the Loop user to
    *  sign in their own wallet. Standard Splice choice (no custom DAR) → runs on
-   *  Loop's node. Only available AFTER the reveal+deliver (claimCounter). */
+   *  Loop's node. Only available after the reveal path has created a pending
+   *  order-bound transfer offer. */
   async prepareLoopAccept(
     id: string
   ): Promise<{
@@ -1125,8 +1648,9 @@ class HtlcService {
     const o = await this.must(id);
     if (o.counterMode !== "loop")
       throw new Error(`order is not a loop swap (mode ${o.counterMode})`);
-    // counter_claimed = revealed+delivered; main_claimed = daemon already took the
-    // WBTC too (normal custody ordering) — the user's accept is valid in both.
+    // counter_claimed means the reveal path has created or recovered the standard
+    // delivery obligation. If direct/preapproved delivery already happened, there
+    // is no accept command to prepare.
     if (o.status !== "counter_claimed" && o.status !== "main_claimed") {
       throw new Error(
         `counter transfer not ready (status ${o.status}) — reveal the secret first`
@@ -1137,20 +1661,64 @@ class HtlcService {
         "counter transfer not sent yet — reveal the secret first"
       );
     // RECOVERY: if the offer cid wasn't captured from the tx tree at create time,
-    // find it from the SENDER's ACS (the solver sees the offers it created, even
-    // when the receiver is cross-participant).
+    // first find it from the SENDER's ACS (the solver sees the offers it created,
+    // even when the receiver is cross-participant). If that is not visible, recover
+    // from the original delivery update tree. Do not infer delivery from a missing
+    // offer; only the update tree can prove preapproval/direct delivery.
     if (!o.counterTransferOfferCid) {
-      const recovered = await findOfferFromSender(
+      let recovered = await findOfferFromSender(
         o.solverCantonParty,
-        o.userCantonParty
+        o.userCantonParty,
+        htlcLoopCounterDeliveryMemo(o),
+        {
+          amountBtc: o.cbtcAmount!,
+          amountDecimals: 8,
+          instrumentId: NETWORK.instrumentId
+        }
       );
-      if (!recovered)
+      if (!recovered) {
+        const proof = await this.recoverLoopCounterDeliveryEvidence({
+          order: o,
+          updateId: o.counterTransferUpdateId,
+          expectedMemo: htlcLoopCounterDeliveryMemo(o)
+        });
+        if (proof?.delivered) {
+          await this.persistLoopCounterDeliveryEvidence({
+            id,
+            updateId: o.counterTransferUpdateId,
+            directDeliveryProven: true
+          });
+          throw new Error(
+            "CBTC was already delivered by Transfer Preapproval — no Loop accept is needed."
+          );
+        }
+        recovered = proof?.offerCid ?? null;
+      }
+      if (!recovered) {
         throw new Error(
-          "CBTC transfer offer not found on-ledger — it may have expired (24h TTL)"
+          "CBTC transfer offer is not proven on-ledger yet — retry shortly."
         );
+      }
       o.counterTransferOfferCid = recovered;
       if (!(await this.store.putIfStatus(o, o.status))) {
         throw new Error("counter offer recovery lost lifecycle race");
+      }
+    }
+    if (o.counterTransferOfferCid) {
+      const pending = await listPendingOffers(o.userCantonParty);
+      const stillOpen = pending.some(
+        (p) => p.contractId === o.counterTransferOfferCid
+      );
+      if (!stillOpen) {
+        const repaired = await this.reconcileLoopForwardCounterDelivery(o);
+        if (repaired.counterClaimUpdateId) {
+          throw new Error(
+            "CBTC was already delivered by Transfer Preapproval — no Loop accept is needed."
+          );
+        }
+        throw new Error(
+          "This CBTC transfer offer is no longer pending. Refresh this page — WarpX will reconcile your accept proof."
+        );
       }
     }
     return prepareAcceptCommand({ offerContractId: o.counterTransferOfferCid });
@@ -1198,7 +1766,9 @@ class HtlcService {
 
     // Same solver-robbery guard as claimCounter — reject late reveals when the EVM
     // lock no longer gives the daemon enough time to claim WBTC before user retake.
-    if (o.direction === "evm-to-canton") await verifyEvmLock(o);
+    if (o.direction === "evm-to-canton" && o.status === "counter_locked") {
+      await verifyEvmLock(o);
+    }
 
     let networkFeeCc: string | undefined;
     let feeEstimate:
@@ -1486,13 +2056,39 @@ class HtlcService {
     if (!expectedWbtc) {
       throw new Error("WBTC address not configured — cannot verify counter-lock");
     }
-    await verifyReverseCounterLockTx(counterLockTx, {
-      hashLock: o.hashLock,
-      wbtcAmount: o.wbtcAmount,
-      userEvmAddress: o.userEvmAddress,
-      solverTimelock: o.solverTimelock,
-      expectedWbtcAddress: expectedWbtc
-    });
+    try {
+      await verifyReverseCounterLockTx(counterLockTx, {
+        hashLock: o.hashLock,
+        wbtcAmount: o.wbtcAmount,
+        userEvmAddress: o.userEvmAddress,
+        solverTimelock: o.solverTimelock,
+        expectedWbtcAddress: expectedWbtc
+      });
+    } catch (e) {
+      if (!isAwaitingEvmFinality(e)) throw e;
+
+      // The tx is mined, successful, and structurally matches this order, but
+      // it has not reached the configured confirmation depth yet. Persist the
+      // tx while keeping the order in counter_locking so daemon restarts retry
+      // finality instead of sending another WBTC lock.
+      await verifyReverseCounterLockTx(
+        counterLockTx,
+        {
+          hashLock: o.hashLock,
+          wbtcAmount: o.wbtcAmount,
+          userEvmAddress: o.userEvmAddress,
+          solverTimelock: o.solverTimelock,
+          expectedWbtcAddress: expectedWbtc
+        },
+        { requireFinality: false }
+      );
+      o.counterLockTx = counterLockTx;
+      o.status = "counter_locking";
+      if (!(await this.store.putIfStatus(o, expectedStatus))) {
+        return this.must(id);
+      }
+      return o;
+    }
     o.counterLockTx = counterLockTx;
     o.status = "counter_locked";
     o.evmFloatReserved = false;
@@ -1658,7 +2254,8 @@ class HtlcService {
       senderParty: o.userCantonParty,
       receiverParty: o.solverCantonParty,
       amountBtc: o.cbtcAmount!,
-      inputHoldingCids: holdingCids
+      inputHoldingCids: holdingCids,
+      memo: reverseLoopCustodyMemo(o)
     });
   }
 
@@ -1712,6 +2309,7 @@ class HtlcService {
       );
     }
     const baselineCids = new Set(o.solverCustodyBaselineCids);
+    const expectedMemo = reverseLoopCustodyMemo(o);
 
     // Holdings already linked to other in-flight loop-seller orders (same amount).
     const active = await this.store.active();
@@ -1732,7 +2330,7 @@ class HtlcService {
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const offers = await listPendingOffers(o.solverCantonParty);
-      const matchingOffers = offers.filter(
+      const baseMatchingOffers = offers.filter(
         (x) =>
           x.sender === o.userCantonParty &&
           x.receiver === o.solverCantonParty &&
@@ -1740,17 +2338,51 @@ class HtlcService {
           !!x.instrumentId &&
           matchesInstrument(x.instrumentId, NETWORK.instrumentId)
       );
+      const memoMatchingOffers = baseMatchingOffers.filter(
+        (x) => transferOfferMemo(x) === expectedMemo
+      );
+      const legacyCutoffMs = ((o.updatedAt ?? o.createdAt) - 60) * 1000;
+      const legacyMatchingOffers =
+        memoMatchingOffers.length > 0
+          ? []
+          : baseMatchingOffers.filter((x) => {
+              const memo = transferOfferMemo(x);
+              if (memo.startsWith(LOOP_CUSTODY_MEMO_PREFIX)) return false;
+              if (memo) return false;
+              const requestedAtMs = transferOfferRequestedAtMs(x);
+              return !requestedAtMs || requestedAtMs >= legacyCutoffMs;
+            });
+      const matchingOffers =
+        memoMatchingOffers.length > 0
+          ? memoMatchingOffers
+          : legacyMatchingOffers;
       if (matchingOffers.length > 1) {
         throw new Error(
-          "ambiguous Loop custody transfer — multiple exact offers match this order"
+          memoMatchingOffers.length > 0
+            ? "ambiguous Loop custody transfer — multiple offers carry this order memo"
+            : "ambiguous Loop custody transfer — multiple legacy offers match this order"
         );
       }
       const offer = matchingOffers[0];
       if (offer) {
-        const { updateId } = await acceptTransfer({
-          receiverParty: o.solverCantonParty,
-          offerContractId: offer.contractId
-        });
+        let updateId: string;
+        try {
+          ({ updateId } = await acceptTransfer({
+            receiverParty: o.solverCantonParty,
+            offerContractId: offer.contractId
+          }));
+        } catch (e) {
+          if (!isExpiredTransferInstructionError(e)) throw e;
+          const failed: SwapOrder = {
+            ...o,
+            status: "failed",
+            evmFloatReserved: false
+          };
+          await this.store.putIfStatus(failed, "main_locking").catch(() => {});
+          throw new Error(
+            "Loop CBTC transfer expired before the solver could accept it — start a new swap."
+          );
+        }
         o.counterTransferOfferCid = offer.contractId;
         o.counterTransferUpdateId = updateId;
         o.status = "main_locked";
@@ -1783,15 +2415,8 @@ class HtlcService {
       }
     }
 
-    const rollback = {
-      ...o,
-      status: "accepted" as const,
-      evmFloatReserved: false
-    };
-    await this.store.putIfStatus(rollback, "main_locking").catch(() => {});
     throw new Error(
-      "transfer offer not visible on-ledger yet — connect Loop and use Retry lock, or wait a moment and confirm again. " +
-        "If you already signed in Loop, tap Confirm CBTC lock on Orders (custody may have auto-settled)."
+      "Loop custody transfer is not visible on-ledger yet — confirmation will retry automatically."
     );
   }
 
@@ -1918,6 +2543,7 @@ class HtlcService {
     updateId: string
   ): Promise<SwapOrder> {
     const o = await this.must(id);
+    const claimRef = updateId.trim();
     // GUARD: a forward MANAGED order must settle via claimCounterAsBackend (which
     // ACTUALLY claims the CBTC on-ledger), NOT this record-only endpoint — else a
     // client could mark it counter_claimed without the CBTC moving, then the daemon
@@ -1927,10 +2553,40 @@ class HtlcService {
         "forward managed orders settle via claim-managed, not claim-record"
       );
     }
+    if (!preimageMatches(preimageHex, o.hashLock))
+      throw new Error("invalid preimage");
+    // Reverse: the solver watchtower may call claim-main as soon as the EVM Claim
+    // event is visible — often before the browser's recordClaim arrives. Treat that
+    // as success, not "unexpected status main_claimed".
+    if (o.direction === "canton-to-evm" && o.status === "main_claimed") {
+      if (isEvmTxHash(claimRef)) {
+        if (
+          o.mainClaimTx &&
+          o.mainClaimTx.toLowerCase() !== claimRef.toLowerCase()
+        ) {
+          throw new Error("claim tx mismatch");
+        }
+        if (!o.mainClaimTx) {
+          await verifyReverseClaimTx(claimRef, o.hashLock);
+          const patched = { ...o, mainClaimTx: claimRef as `0x${string}` };
+          if (await this.store.putIfStatus(patched, "main_claimed")) {
+            return patched;
+          }
+        }
+      }
+      return o;
+    }
+    if (
+      o.direction === "canton-to-evm" &&
+      o.status === "counter_claimed" &&
+      isEvmTxHash(claimRef) &&
+      o.mainClaimTx?.toLowerCase() === claimRef.toLowerCase()
+    ) {
+      return o;
+    }
     if (o.status !== "counter_locked" && o.status !== "counter_claimed") {
       throw new Error(`unexpected status ${o.status}`);
     }
-    if (o.status === "counter_claimed") return o;
     // DEFENSE-IN-DEPTH (solver-robbery guard): for ANY forward order, re-verify the
     // EVM WBTC lock has enough margin BEFORE we record the reveal — same guard as
     // claimCounter/claimCounterAsBackend. Today no forward order reaches this path
@@ -1939,13 +2595,75 @@ class HtlcService {
     // future change ever routes a forward order here, a late reveal still cannot rob
     // the solver.
     if (o.direction === "evm-to-canton") await verifyEvmLock(o);
-    // VALIDATE the preimage (same gate as the managed path). The browser supplies it,
-    // so reject a junk preimage here — recording a bad one as counter_claimed would
-    // stall the solver's EVM claim with an unusable secret. (The on-chain claim also
-    // re-checks keccak, but we must not corrupt order state.)
-    if (!preimageMatches(preimageHex, o.hashLock))
-      throw new Error("invalid preimage");
-    const claimRef = updateId.trim();
+    if (o.status === "counter_claimed") {
+      // Forward Loop has two sub-cases:
+      // - preapproval/direct delivery: no offer exists, so there is no Loop accept tx.
+      // - pending offer: the user must accept the exact TransferInstruction in Loop.
+      //   Without this gate the daemon can claim WBTC and mark the order complete
+      //   while the user's CBTC is still only a pending offer.
+      if (o.direction === "evm-to-canton" && o.counterMode === "loop") {
+        if (o.counterClaimUpdateId) return o;
+        if (!o.counterTransferUpdateId) {
+          throw new Error(
+            "Loop counter delivery update missing — cannot prove CBTC delivery"
+          );
+        }
+        if (o.counterTransferOfferCid) {
+          const deliveryProof = await this.recoverLoopCounterDeliveryEvidence({
+            order: o,
+            updateId: o.counterTransferUpdateId,
+            expectedMemo: htlcLoopCounterDeliveryMemo(o)
+          });
+          if (deliveryProof?.delivered) {
+            o.counterClaimUpdateId = o.counterTransferUpdateId;
+            o.counterTransferOfferCid = undefined;
+          } else {
+            const parties = [o.userCantonParty, o.solverCantonParty];
+            let eventsById = await fetchUpdateEventsById(claimRef, parties);
+            let consumed =
+              !!eventsById &&
+              counterOfferConsumedInEvents(
+                eventsById,
+                o.counterTransferOfferCid
+              );
+            for (let attempt = 0; !consumed && attempt < 15; attempt++) {
+              if (attempt > 0) {
+                await new Promise((resolve) => setTimeout(resolve, 2000));
+              }
+              eventsById = await fetchUpdateEventsById(claimRef, parties);
+              consumed =
+                !!eventsById &&
+                counterOfferConsumedInEvents(
+                  eventsById,
+                  o.counterTransferOfferCid
+                );
+            }
+            if (!consumed) {
+              throw new Error(
+                "Loop accept update is not visible on Canton yet — keep this page open and WarpX will retry shortly."
+              );
+            }
+            o.counterClaimUpdateId = claimRef;
+          }
+        } else {
+          const proof = await this.recoverLoopCounterDeliveryEvidence({
+            order: o,
+            updateId: o.counterTransferUpdateId,
+            expectedMemo: htlcLoopCounterDeliveryMemo(o)
+          });
+          if (!proof?.delivered) {
+            throw new Error(
+              "Loop direct-delivery update does not prove CBTC was delivered"
+            );
+          }
+          o.counterClaimUpdateId = o.counterTransferUpdateId;
+        }
+        if (!(await this.store.putIfStatus(o, "counter_claimed"))) {
+          return this.must(id);
+        }
+      }
+      return o;
+    }
     if (o.direction === "canton-to-evm") {
       const fromBlockHex = o.counterLockTx
         ? await evmTxBlockHex(o.counterLockTx)
@@ -1989,6 +2707,10 @@ class HtlcService {
       );
     if (o.status !== "counter_claimed")
       throw new Error(`counter not claimed (${o.status})`);
+    const canComplete = htlcCanExposePreimageToSolver(o);
+    if (!canComplete.ok) {
+      throw new Error(canComplete.reason);
+    }
     await verifyReverseClaimTx(mainClaimTx, o.hashLock);
     o.status = "main_claimed";
     o.mainClaimTx = mainClaimTx;
@@ -1998,7 +2720,10 @@ class HtlcService {
     return o;
   }
   async getRevealedPreimage(id: string) {
-    return (await this.must(id)).revealedPreimage;
+    const order = await this.must(id);
+    const gate = htlcCanExposePreimageToSolver(order);
+    if (!gate.ok) throw new Error(gate.reason);
+    return order.revealedPreimage;
   }
 
   /** REFUND (CBTC) — after the Canton timelock, the solver withdraws the locked

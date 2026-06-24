@@ -28,7 +28,7 @@ import { useInvalidateBalances } from "@/hooks/useInvalidateBalances";
 import {
   hasCbtcAutoAccept,
   swapSessionActive,
-  mintSwapSession
+  mintSwapSessionDetailed
 } from "@/lib/swap-accept";
 import { truncatePartyId } from "@/lib/format";
 import { toBaseUnits } from "@/lib/amount-units";
@@ -69,9 +69,11 @@ import {
   generateSecret,
   secretToPreimage,
   htlcApi,
+  claimSwap,
   evmApproveAndLock,
   evmClaim,
-  evmRetake
+  evmRetake,
+  loopSubmitUpdateId
 } from "@/lib/htlc-client";
 import {
   EvmTxRevertedError,
@@ -84,7 +86,6 @@ import {
   rememberPendingMainLock,
   selectPendingMainLock
 } from "@/lib/htlc-pending-main-lock";
-import { isHtlcTerminal } from "@/lib/htlc-track-order";
 import {
   listLoopCbtcHoldingCids,
   listLoopInstrumentHoldingCids
@@ -93,9 +94,8 @@ import { findLoopOutgoingTransferOffer } from "@/lib/loop-transfer-offers";
 import { cantonSwapApi } from "@/lib/canton-swap-client";
 import { logNetworkFeeInBrowser } from "@/lib/network-fee-client-log";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
-import { isSwapClaimable, htlcUserWbtcClaimTx } from "@/lib/htlc-order-logic";
+import { htlcUserWbtcClaimTx } from "@/lib/htlc-order-logic";
 import { isReverseEvmCounterLockReady } from "@/lib/htlc-evm-counter-lock";
-import type { SwapStatus } from "@/lib/htlc-types";
 import {
   forgetSecret,
   rememberSecret,
@@ -132,6 +132,7 @@ import {
   loopC2cSteps,
   reverseLoopHtlcSteps
 } from "@/lib/swap-stepper-state";
+import { projectC2cStatus, projectHtlcStatus } from "@/lib/swap-status-projector";
 import {
   quoteOutUnits,
   quoteGrossOutUnits
@@ -187,6 +188,7 @@ const SOLVER_CANTON = SETTLEMENT_PARTY;
 
 type Stage =
   | { kind: "idle" }
+  | { kind: "redirecting"; orderId: string }
   | { kind: "quoting" }
   // `retryError` lets a rejected approve/sign return to the quote (don't lose it).
   | { kind: "quoted"; quote: QuoteResponse; retryError?: string }
@@ -286,6 +288,8 @@ type Stage =
       inAmount: string;
       outAmount: string;
       walletMode: "managed" | "loop";
+      /** Counter CC/CBTC landed via preapproval — no Loop accept prompt. */
+      directCounterDelivery?: boolean;
     }
   | {
       kind: "c2c-waiting";
@@ -616,7 +620,7 @@ export default function SwapPage() {
         const { order } = await cantonSwapApi.get(orderId);
         if (cancelled) return;
 
-        if (order.status === "filled") {
+        if (projectC2cStatus(order).terminal) {
           setStage({
             kind: "c2c-done",
             orderId,
@@ -624,8 +628,25 @@ export default function SwapPage() {
             toAsset,
             inAmount,
             outAmount,
-            walletMode: "loop"
+            walletMode: "loop",
+            directCounterDelivery:
+              !order.counterLegOfferCid && !!order.counterReceiptUpdateId
           });
+          return;
+        }
+
+        if (
+          order.counterLegOfferCid &&
+          !order.counterReceiptUpdateId
+        ) {
+          setStage((s) =>
+            s.kind === "c2c-waiting"
+              ? {
+                  ...s,
+                  note: "Solver delivered your tokens — accept the incoming transfer in Loop (see Orders)."
+                }
+              : s
+          );
           return;
         }
 
@@ -636,22 +657,6 @@ export default function SwapPage() {
               order.failureReason ?? `Swap ${order.status}`
             )
           });
-          return;
-        }
-
-        if (
-          order.status === "user_locked" &&
-          order.counterLegOfferCid &&
-          order.failureReason?.toLowerCase().includes("pending")
-        ) {
-          setStage((s) =>
-            s.kind === "c2c-waiting"
-              ? {
-                  ...s,
-                  note: "Solver delivered your tokens — accept the incoming transfer in Loop (see Orders)."
-                }
-              : s
-          );
           return;
         }
 
@@ -790,16 +795,18 @@ export default function SwapPage() {
     setSignError(null);
     setSigning(true);
     try {
-      const ok = await mintSwapSession(wallet.provider);
-      setSessionReady(ok);
-      if (!ok) {
-        setSignError(
-          "Signature was declined or couldn't be verified. Please try again to continue."
-        );
+      const result = await mintSwapSessionDetailed(wallet.provider);
+      setSessionReady(result.ok);
+      if (!result.ok) {
+        setSignError(result.message);
       }
-    } catch {
+    } catch (e) {
       setSessionReady(false);
-      setSignError("Something went wrong while signing. Please try again.");
+      setSignError(
+        e instanceof Error
+          ? e.message
+          : "Something went wrong while signing. Please try again."
+      );
     } finally {
       setSigning(false);
     }
@@ -963,8 +970,6 @@ export default function SwapPage() {
           minReceived?: string;
           minReceivedToken?: string;
           expiresAt?: number;
-          quoteIndicative?: boolean;
-          quoteNote?: string;
         };
         if (!r.ok) throw new Error(formatCantonQuoteError(q.error));
         logNetworkFeeInBrowser("c2c quote", {
@@ -1004,9 +1009,7 @@ export default function SwapPage() {
             midPrice: q.midPrice,
             minReceived: q.minReceived,
             minReceivedToken: q.minReceivedToken,
-            expiresAt: q.expiresAt,
-            quoteIndicative: q.quoteIndicative,
-            quoteNote: q.quoteNote
+            expiresAt: q.expiresAt
           }
         });
       } catch (e) {
@@ -1143,13 +1146,12 @@ export default function SwapPage() {
     }
   }, [wallet.provider, probeCbtcAutoAccept, handleQuote]);
 
-  // Begin tracking a freshly-submitted order: redirect to /orders and reset the
-  // swap card so refresh always lands on the form.
+  // Begin tracking a freshly-submitted order on the dedicated swap status route.
   const startTracking = useCallback(
     (orderId: string) => {
-      setStage({ kind: "idle" });
+      setStage({ kind: "redirecting", orderId });
       setAmount("");
-      router.push(`/orders?id=${encodeURIComponent(orderId)}`);
+      router.replace(`/swap/orders/${encodeURIComponent(orderId)}`);
     },
     [router]
   );
@@ -1231,16 +1233,7 @@ export default function SwapPage() {
             outAmount: quote.outAmount,
             userParty: destinationParty
           });
-          setAmount("");
-          setStage({
-            kind: "c2c-done",
-            orderId: order.id,
-            fromAsset,
-            toAsset,
-            inAmount,
-            outAmount: quote.outAmount,
-            walletMode: "managed"
-          });
+          startTracking(order.id);
           return;
         }
 
@@ -1335,16 +1328,7 @@ export default function SwapPage() {
           return;
         }
         c2cDraftOrderIdRef.current = null;
-        setAmount("");
-        setStage({
-          kind: "c2c-waiting",
-          orderId: order.id,
-          fromAsset,
-          toAsset,
-          inAmount,
-          outAmount: quote.outAmount,
-          waitStartedAt: Date.now()
-        });
+        startTracking(order.id);
       } catch (e) {
         retry(`Could not submit swap: ${getSwapErrorMessage(e)}`);
       }
@@ -1354,12 +1338,13 @@ export default function SwapPage() {
       amount,
       isParticipantManaged,
       wallet.provider,
+      wallet.partyId,
       needsCcDeposit,
       needsEnableCc,
       needsEnableCbtc,
       managedPreapproval,
       cancelC2cDraft,
-      SOLVER_CANTON
+      startTracking
     ]
   );
 
@@ -1508,24 +1493,16 @@ export default function SwapPage() {
         return;
       }
 
-      // 4. WAIT for the INDEPENDENT SOLVER to lock the CBTC counter — polled in UI.
-      setStage({
-        kind: "htlc-locking",
-        quote,
-        swapId: id,
-        secret,
-        lockTx,
-        userCantonParty: quote.cantonParty,
-        userEvmAddress: evm.account.toLowerCase(),
-        waitStartedAt: Date.now()
-      });
+      // 4. WAIT for the INDEPENDENT SOLVER on the dedicated status route.
+      startTracking(id);
     },
     [
       evm,
       expirationSeconds,
       isParticipantManaged,
       persistSwapSecret,
-      handleC2cConfirm
+      handleC2cConfirm,
+      startTracking
     ]
   );
 
@@ -1577,43 +1554,22 @@ export default function SwapPage() {
         const provider = wallet.provider;
         if (!provider)
           throw new Error("Connect your Loop wallet to accept your CBTC.");
-        const reveal = await htlcApi.claimCounter(swapId, preimage); // reveal → verify → deliver
-        if (reveal.delivered) {
-          // Preapproval auto-accepted the transfer — the CBTC is ALREADY in the
-          // user's Loop wallet. Nothing to sign; record and finish.
-          await htlcApi
-            .recordClaim(swapId, preimage, reveal.updateId)
-            .catch(() => {});
-          forgetSecret(swapId);
-          setStage({
-            kind: "htlc-done",
-            swapId,
-            lockTx,
-            wbtcAmount: doneAmounts?.wbtcAmount,
-            cbtcAmount: doneAmounts?.cbtcAmount
-          });
-          return;
-        }
-        const { command, disclosedContracts, synchronizerId } =
-          await htlcApi.prepareAccept(swapId);
-        const userParty =
-          (provider as { party_id?: string }).party_id ?? wallet.partyId ?? "";
-        const result = (await provider.submitAndWaitForTransaction(
-          {
-            commands: [command],
-            disclosedContracts,
-            packageIdSelectionPreference: [],
-            actAs: [userParty],
-            readAs: [userParty],
-            synchronizerId
+        await claimSwap({
+          order: {
+            id: swapId,
+            direction: "evm-to-canton",
+            counterMode: "loop"
           },
-          undefined
-        )) as { updateId?: string; transactionTree?: { updateId?: string } };
-        const updateId =
-          result?.updateId ?? result?.transactionTree?.updateId ?? "submitted";
-        // Reveal the preimage to our node so the solver claims the WBTC (the user's
-        // standard accept above is their only Canton action).
-        await htlcApi.recordClaim(swapId, preimage, updateId);
+          secret,
+          escrow: HTLC_ESCROW,
+          loop: provider as unknown as {
+            party_id?: string;
+            submitAndWaitForTransaction: (
+              payload: unknown,
+              options?: unknown
+            ) => Promise<unknown>;
+          }
+        });
         forgetSecret(swapId);
         setStage({
           kind: "htlc-done",
@@ -1622,6 +1578,7 @@ export default function SwapPage() {
           wbtcAmount: doneAmounts?.wbtcAmount,
           cbtcAmount: doneAmounts?.cbtcAmount
         });
+        return;
       } catch (e) {
         setStage({
           kind: "htlc-claimable",
@@ -1696,83 +1653,82 @@ export default function SwapPage() {
 
       const managed = counterMode === "managed";
       try {
+        if (managed) {
+          setStage({ kind: "redirecting", orderId: id });
+          setAmount("");
+          await htlcApi.lockMain(id);
+          startTracking(id);
+          return;
+        }
+
         setStage({
           kind: "rev-locking",
           swapId: id,
           secret,
           counterMode,
-          phase: managed ? "custody" : undefined,
-          waitStartedAt: managed ? Date.now() : undefined
+          phase: undefined,
+          waitStartedAt: undefined
         });
-        if (managed) {
-          await htlcApi.lockMain(id);
-        } else {
-          const provider = wallet.provider;
-          if (!provider)
-            throw new Error("Connect your Loop wallet to lock your CBTC.");
-          const holdingCids = await listLoopCbtcHoldingCids(
-            provider as unknown as {
-              getActiveContracts: (p?: {
-                interfaceId?: string;
-              }) => Promise<unknown[]>;
-            }
-          );
-          if (!holdingCids.length)
-            throw new Error(
-              "No unlocked CBTC holdings found in your Loop wallet."
-            );
-          const { order: lockOrder } = await htlcApi.getOrder(id);
-          void lockOrder;
-          const prep = await htlcApi.prepareLockLoop(id, holdingCids);
-          const userParty =
-            (provider as { party_id?: string }).party_id ??
-            wallet.partyId ??
-            "";
-          await provider.submitAndWaitForTransaction(
-            {
-              commands: [prep.command],
-              disclosedContracts: prep.disclosedContracts,
-              packageIdSelectionPreference: [],
-              actAs: [userParty],
-              readAs: [userParty],
-              synchronizerId: prep.synchronizerId
-            },
-            undefined
-          );
-          let confirmed = false;
-          for (let i = 0; i < 10; i++) {
-            try {
-              await htlcApi.confirmLockLoop(id);
-              confirmed = true;
-              break;
-            } catch {
-              await sleep(2000);
-            }
+        const provider = wallet.provider;
+        if (!provider)
+          throw new Error("Connect your Loop wallet to lock your CBTC.");
+        const holdingCids = await listLoopCbtcHoldingCids(
+          provider as unknown as {
+            getActiveContracts: (p?: {
+              interfaceId?: string;
+            }) => Promise<unknown[]>;
           }
-          if (!confirmed) {
-            const { order: afterSign } = await htlcApi.getOrder(id);
-            if (
-              (afterSign as { status?: string } | undefined)?.status ===
-              "main_locked"
-            ) {
-              confirmed = true;
-            }
-          }
-          if (!confirmed) {
-            retry(
-              "Your CBTC allocation was signed but not yet visible on-ledger — reopen this swap from Orders in a moment."
-            );
-            return;
+        );
+        if (!holdingCids.length)
+          throw new Error(
+            "No unlocked CBTC holdings found in your Loop wallet."
+          );
+        const { order: lockOrder } = await htlcApi.getOrder(id);
+        void lockOrder;
+        const prep = await htlcApi.prepareLockLoop(id, holdingCids);
+        const userParty =
+          (provider as { party_id?: string }).party_id ??
+          wallet.partyId ??
+          "";
+        await provider.submitAndWaitForTransaction(
+          {
+            commands: [prep.command],
+            disclosedContracts: prep.disclosedContracts,
+            packageIdSelectionPreference: [],
+            actAs: [userParty],
+            readAs: [userParty],
+            synchronizerId: prep.synchronizerId
+          },
+          undefined
+        );
+        let confirmed = false;
+        for (let i = 0; i < 3; i++) {
+          try {
+            await htlcApi.confirmLockLoop(id, {
+              maxAttempts: 1,
+              pollMs: 500
+            });
+            confirmed = true;
+            break;
+          } catch {
+            await sleep(2000);
           }
         }
-        setStage({
-          kind: "rev-locking",
-          swapId: id,
-          secret,
-          phase: "solver",
-          counterMode,
-          waitStartedAt: Date.now()
-        });
+        if (!confirmed) {
+          const { order: afterSign } = await htlcApi.getOrder(id);
+          if (
+            (afterSign as { status?: string } | undefined)?.status ===
+            "main_locked"
+          ) {
+            confirmed = true;
+          }
+        }
+        // Loop accepted the transfer submit, but the transfer/auto-accepted
+        // holding may lag before it is visible from the solver participant. Keep
+        // the order live and let the status page + daemon reconcile it instead
+        // of sending the user back to the quote form while their wallet shows a
+        // pending CBTC send.
+        startTracking(id);
       } catch (e) {
         retry(getSwapErrorMessage(e));
       }
@@ -1783,7 +1739,8 @@ export default function SwapPage() {
       expirationSeconds,
       isParticipantManaged,
       wallet,
-      persistSwapSecret
+      persistSwapSecret,
+      startTracking
     ]
   );
 
@@ -1855,7 +1812,27 @@ export default function SwapPage() {
           userEvmAddress?: string;
           cbtcAmount?: string;
           status?: string;
+          mainClaimTx?: string;
+          direction?: "canton-to-evm";
         } | null;
+        if (
+          o?.status === "main_claimed" ||
+          (o?.status === "counter_claimed" && o?.mainClaimTx)
+        ) {
+          forgetSecret(swapId);
+          const projected = projectHtlcStatus(
+            o as Parameters<typeof projectHtlcStatus>[0]
+          );
+          setStage({
+            kind: "rev-done",
+            swapId,
+            claimTx: o.mainClaimTx ?? "",
+            wbtcAmount: o.wbtcAmount ?? preflight?.wbtcAmount,
+            cbtcAmount: o.cbtcAmount ?? preflight?.cbtcAmount,
+            settling: !projected.proofComplete
+          });
+          return;
+        }
         const probe =
           o?.wbtcAmount && o?.userEvmAddress
             ? await isReverseEvmCounterLockReady({
@@ -2022,43 +1999,14 @@ export default function SwapPage() {
           const recoveredStatus = recovered.order?.status;
           if (
             recoveredStatus === "main_claimed" ||
-            recoveredStatus === "both_claimed"
-          ) {
-            forgetSecret(pending.swapId);
-            setStage({
-              kind: "htlc-done",
-              swapId: pending.swapId,
-              lockTx: pending.lockTx,
-              wbtcAmount: recovered.order?.wbtcAmount,
-              cbtcAmount: recovered.order?.cbtcAmount
-            });
-            return;
-          }
-          if (
+            recoveredStatus === "both_claimed" ||
             recoveredStatus === "refunded" ||
             recoveredStatus === "cancelled" ||
             recoveredStatus === "failed"
           ) {
             forgetSecret(pending.swapId);
-            setStage({
-              kind: "error",
-              message: swapWaitTerminalMessage(recoveredStatus)
-            });
-            return;
           }
-          setStage((prev) =>
-            prev.kind === "htlc-locking" &&
-            prev.swapId === pending.swapId
-              ? {
-                  ...prev,
-                  recordingRecovery: undefined
-                }
-              : {
-                  kind: "htlc-resume",
-                  swapId: pending.swapId,
-                  lockTx: pending.lockTx
-                }
-          );
+          router.push(`/swap/orders/${encodeURIComponent(pending.swapId)}`);
         }
       } catch {
         // Keep retrying silently. The stage itself already says the lock is being
@@ -2079,6 +2027,7 @@ export default function SwapPage() {
     evm.account,
     evm.hydrated,
     identityProbed,
+    router,
     stage,
     wallet.isLoading
   ]);
@@ -2098,108 +2047,16 @@ export default function SwapPage() {
     }
   }, [destinationParty, evm.account, stage]);
 
-  // Resume HTLC claim UI after refresh — detect claimable swap but do NOT auto-trigger
-  // Loop signMessage; the user unlocks the vault with an explicit click.
+  // Legacy active-swap marker: do not resurrect a status screen on /swap.
+  // Submitted orders now live under /swap/orders/:id. Pending EVM-lock recovery
+  // above is the only /swap-side resume path because it protects a submitted
+  // lock before the server has acknowledged it.
   const resumeCheckedRef = useRef<string | null>(null);
   useEffect(() => {
-    if (
-      stage.kind === "htlc-claimable" ||
-      stage.kind === "htlc-claiming" ||
-      stage.kind === "htlc-recording" ||
-      stage.kind === "htlc-resume" ||
-      stage.kind === "rev-claimable" ||
-      stage.kind === "rev-claiming" ||
-      stage.kind === "rev-resume" ||
-      stage.kind === "rev-locking"
-    ) {
-      return;
-    }
-    let cancelled = false;
-    void (async () => {
-      const swapId = readActiveHtlcSwap();
-      if (!swapId || resumeCheckedRef.current === swapId) return;
-      resumeCheckedRef.current = swapId;
-      const { order } = await htlcApi.getOrder(swapId);
-      const o = order as {
-        status?: string;
-        direction?: "evm-to-canton" | "canton-to-evm" | "canton-to-canton";
-        counterMode?: "managed" | "loop";
-        revealedPreimage?: string;
-        mainLockTx?: string;
-        userCantonParty?: string;
-        userEvmAddress?: string;
-        userTimelock?: number;
-        solverTimelock?: number;
-        createdAt?: number;
-      } | null;
-      if (!o) return;
-
-      const direction = o.direction ?? "evm-to-canton";
-      if (
-        direction === "canton-to-canton" &&
-        o.status &&
-        !isHtlcTerminal(o.status as SwapStatus)
-      ) {
-        if (!cancelled) router.push(`/orders?id=${encodeURIComponent(swapId)}`);
-        return;
-      }
-      const claimable =
-        direction !== "canton-to-canton" &&
-        isSwapClaimable({
-          status: o.status as SwapStatus,
-          direction: direction as "evm-to-canton" | "canton-to-evm",
-          counterMode: o.counterMode,
-          revealedPreimage: o.revealedPreimage as `0x${string}` | undefined
-        });
-
-      if (claimable) {
-        if (cancelled) return;
-        if (direction === "canton-to-evm") {
-          setStage({ kind: "rev-resume", swapId });
-        } else {
-          setStage({ kind: "htlc-resume", swapId, lockTx: o.mainLockTx ?? "" });
-        }
-        return;
-      }
-
-      // CBTC locked — pick up where the user left off (same as devnet live flow).
-      if (direction === "canton-to-evm" && o.status === "main_locked") {
-        const secret = await recallSecret(swapId, {
-          ...(await vaultRecallContext()),
-          orderMeta:
-            vaultMetaFromOrder({
-              direction: "canton-to-evm",
-              counterMode: o.counterMode,
-              userCantonParty: o.userCantonParty,
-              userEvmAddress: o.userEvmAddress,
-              userTimelock: o.userTimelock,
-              solverTimelock: o.solverTimelock
-            }) ?? undefined
-        });
-        if (cancelled) return;
-        if (!secret) {
-          setStage({
-            kind: "rev-resume",
-            swapId,
-            unlockError:
-              "Could not unlock the saved secret. Connect the same wallet or use Orders."
-          });
-          return;
-        }
-        setStage({
-          kind: "rev-locking",
-          swapId,
-          secret,
-          phase: "solver",
-          counterMode: o.counterMode,
-          waitStartedAt: (o.createdAt ?? Math.floor(Date.now() / 1000)) * 1000
-        });
-      }
-    })().catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [stage.kind, vaultRecallContext, router]);
+    const swapId = readActiveHtlcSwap();
+    if (!swapId || resumeCheckedRef.current === swapId) return;
+    resumeCheckedRef.current = swapId;
+  }, [stage.kind]);
 
   const unlockResumeSecret = useCallback(
     async (
@@ -2436,12 +2293,15 @@ export default function SwapPage() {
           return;
         }
         if (st === "main_claimed") {
+          const projected = projectHtlcStatus(
+            order as Parameters<typeof projectHtlcStatus>[0]
+          );
           forgetSecret(htlcSolverWait.swapId);
           setStage((prev) =>
             prev.kind === "rev-done" && prev.swapId === htlcSolverWait.swapId
               ? {
                   ...prev,
-                  settling: false,
+                  settling: !projected.proofComplete,
                   wbtcAmount:
                     (order as { wbtcAmount?: string }).wbtcAmount ??
                     prev.wbtcAmount,
@@ -2462,7 +2322,7 @@ export default function SwapPage() {
                     ) ?? "",
                   wbtcAmount: (order as { wbtcAmount?: string }).wbtcAmount,
                   cbtcAmount: (order as { cbtcAmount?: string }).cbtcAmount,
-                  settling: false
+                  settling: !projected.proofComplete
                 }
           );
           return;
@@ -2583,6 +2443,7 @@ export default function SwapPage() {
     stage.kind === "error" ||
     reviewing;
   const swapInProgress =
+    stage.kind === "redirecting" ||
     stage.kind === "htlc-locking" ||
     stage.kind === "htlc-recording" ||
     stage.kind === "rev-locking" ||
@@ -2832,6 +2693,14 @@ export default function SwapPage() {
       )}
 
       <div className="rounded-3xl border border-foreground/10 bg-card p-4 shadow-sm sm:p-5">
+        {stage.kind === "redirecting" && (
+          <div className="flex justify-center px-1 py-10">
+            <div className="flex h-14 w-14 items-center justify-center rounded-full bg-primary/10">
+              <span className="inline-block size-6 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
+            </div>
+          </div>
+        )}
+
         {showForm && (
           <>
             <TokenPanel
@@ -2998,7 +2867,8 @@ export default function SwapPage() {
             <SwapStepper
               steps={forwardLoopHtlcSteps({
                 phase: "solver",
-                networkFeeEnabled: false
+                networkFeeEnabled: false,
+                managed: isParticipantManaged
               })}
             />
             <div className="mb-4 flex items-center gap-3">
@@ -3041,7 +2911,7 @@ export default function SwapPage() {
               mode="solver"
               forwardManaged={isParticipantManaged}
               orderId={stage.swapId}
-              ordersHref={`/orders?id=${encodeURIComponent(stage.swapId)}`}
+              ordersHref={`/swap/orders/${encodeURIComponent(stage.swapId)}`}
               onStartNewSwap={() => dismissToNewSwap(stage.swapId)}
             />
           </div>
@@ -3061,7 +2931,7 @@ export default function SwapPage() {
               Verification has been running for {waitElapsedSec}s.
             </p>
             <Link
-              href={`/orders?id=${encodeURIComponent(stage.swapId)}`}
+              href={`/swap/orders/${encodeURIComponent(stage.swapId)}`}
               className="mt-4 inline-flex text-sm font-medium text-primary hover:underline"
             >
               View order
@@ -3114,7 +2984,7 @@ export default function SwapPage() {
                 mode="solver"
                 reverse
                 orderId={stage.swapId}
-                ordersHref={`/orders?id=${encodeURIComponent(stage.swapId)}`}
+                ordersHref={`/swap/orders/${encodeURIComponent(stage.swapId)}`}
                 onStartNewSwap={() => dismissToNewSwap(stage.swapId)}
               />
             )}
@@ -3378,7 +3248,8 @@ export default function SwapPage() {
               steps={loopC2cSteps({
                 phase: stage.note?.toLowerCase().includes("accept")
                   ? "accept"
-                  : "fill"
+                  : "fill",
+                managed: isParticipantManaged
               })}
             />
             <div className="mb-4 flex items-center gap-3">
@@ -3415,7 +3286,7 @@ export default function SwapPage() {
               elapsedSec={waitElapsedSec}
               mode="settling"
               orderId={stage.orderId}
-              ordersHref={`/orders?id=${encodeURIComponent(stage.orderId)}&kind=canton-swap`}
+              ordersHref={`/swap/orders/${encodeURIComponent(stage.orderId)}`}
               onStartNewSwap={() => dismissToNewSwap()}
             />
           </div>
@@ -3433,7 +3304,11 @@ export default function SwapPage() {
             description={
               stage.walletMode === "managed"
                 ? "Your sell leg was offered to the settlement vault and filled with the counter asset in one backend settlement."
-                : "Your swap is complete on Canton."
+                : stage.directCounterDelivery && stage.toAsset === "CC"
+                  ? `${trimAmount(stage.outAmount)} CC was credited to your Loop wallet via CC auto-accept (no separate Loop accept prompt). Check your CC balance in the header.`
+                  : stage.directCounterDelivery
+                    ? `${trimAmount(stage.outAmount)} ${stage.toAsset} was delivered to your Loop wallet.`
+                    : "Your swap is complete on Canton."
             }
             rows={[
               {
@@ -4348,12 +4223,6 @@ function ReviewModal({
           </div>
           {!isC2c && <DetailRow label="Refundable after" value={refundAt} />}
         </div>
-
-        {quote.quoteNote && !busy && (
-          <div className="mt-4 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-foreground">
-            {quote.quoteNote}
-          </div>
-        )}
 
         {blockingError && !busy && (
           <div className="mt-4 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-foreground">

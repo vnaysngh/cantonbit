@@ -12,6 +12,7 @@ import {
 } from "./canton-swap-leg-verify-logic";
 import { LOOP_USER_LEG_PREAPPROVAL_SETTLED } from "./canton-swap-order-logic";
 import { NETWORK } from "./constants";
+import { buildTransferMeta } from "./transfer-options";
 
 const orderParams = {
   userParty: "user::1",
@@ -135,6 +136,40 @@ test("parseUserLegEvidenceFromEvents: rejects wrong instrument on offer branch",
   assert.equal(evidence, null);
 });
 
+test("parseUserLegEvidenceFromEvents: rejects another order-bound memo", () => {
+  const evidence = parseUserLegEvidenceFromEvents(
+    {
+      "1": {
+        CreatedTreeEvent: {
+          value: {
+            contractId: "other-order-offer",
+            templateId: "pkg:Splice.Api.Token.TransferInstructionV1:TransferInstruction",
+            interfaceViews: [
+              {
+                interfaceId: TRANSFER_IFACE,
+                viewValue: {
+                  transfer: {
+                    sender: "user::1",
+                    receiver: "solver::1",
+                    amount: "0.00100000",
+                    instrumentId: NETWORK.instrumentId,
+                    meta: buildTransferMeta("oranj.c2c.v1.other")
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      ...orderParams,
+      expectedMemo: "oranj.c2c.v1.expected"
+    }
+  );
+  assert.equal(evidence, null);
+});
+
 test("counterOfferConsumedInEvents: detects Accept on counter offer", () => {
   assert.equal(
     counterOfferConsumedInEvents(
@@ -167,6 +202,52 @@ test("counterOfferConsumedInEvents: detects Accept on counter offer", () => {
       "counter-offer"
     ),
     false
+  );
+});
+
+test("counterLegDeliveredToUserInEvents: registry holding may omit instrument admin", () => {
+  assert.equal(
+    counterLegDeliveredToUserInEvents(
+      {
+        "0": {
+          ExercisedTreeEvent: {
+            value: {
+              choice: "TransferRule_DirectTransfer",
+              choiceArgument: {
+                transfer: {
+                  sender: "solver::1",
+                  receiver: "user::1",
+                  amount: "0.0000991600",
+                  instrumentId: NETWORK.instrumentId
+                }
+              },
+              exerciseResult: { receiverHoldingCid: "holding-user" }
+            }
+          }
+        },
+        "1": {
+          CreatedTreeEvent: {
+            value: {
+              contractId: "holding-user",
+              templateId: "pkg:Utility.Registry.Holding.V0.Holding:Holding",
+              createArgument: {
+                owner: "user::1",
+                amount: "0.0000991600",
+                instrumentId: { id: "CBTC" }
+              }
+            }
+          }
+        }
+      },
+      {
+        senderParty: "solver::1",
+        receiverParty: "user::1",
+        amount: "0.00009916",
+        amountDecimals: 8,
+        expectedInstrument: NETWORK.instrumentId
+      }
+    ),
+    true
   );
 });
 
@@ -210,6 +291,57 @@ test("counterLegDeliveredToUserInEvents: requires sender-bound direct settlement
         amount: "10",
         amountDecimals: 10,
         expectedInstrument: { admin: "dso::1", id: "Amulet" }
+      }
+    ),
+    true
+  );
+});
+
+test("counterLegDeliveredToUserInEvents: Amulet preapproval credits without registry holding", () => {
+  const memo = "oranj.c2c.v1.test";
+  assert.equal(
+    counterLegDeliveredToUserInEvents(
+      {
+        "0": {
+          ExercisedTreeEvent: {
+            value: {
+              choice: "TransferPreapproval_SendV2",
+              choiceArgument: {
+                sender: "solver::1",
+                amount: "39.9581754384",
+                description: memo
+              },
+              exerciseResult: {
+                result: {
+                  summary: {
+                    balanceChanges: [
+                      [
+                        "solver::1",
+                        {
+                          changeToInitialAmountAsOfRoundZero: "-46.0310228874"
+                        }
+                      ],
+                      [
+                        "user::1",
+                        {
+                          changeToInitialAmountAsOfRoundZero: "46.3000563728"
+                        }
+                      ]
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        senderParty: "solver::1",
+        receiverParty: "user::1",
+        amount: "39.9581754384",
+        amountDecimals: 10,
+        expectedInstrument: { admin: "dso::1", id: "Amulet" },
+        expectedMemo: memo
       }
     ),
     true
@@ -335,6 +467,63 @@ test("extractCounterOfferCidFromEvents: selects solver→user counter offer", ()
     }
   );
   assert.equal(cid, "counter-offer");
+});
+
+test("extractCounterOfferCidFromEvents: selects exact memo over same-amount counter offer", () => {
+  const cid = extractCounterOfferCidFromEvents(
+    {
+      a: {
+        CreatedTreeEvent: {
+          value: {
+            contractId: "wrong-memo",
+            templateId: "pkg:TransferInstruction",
+            interfaceViews: [
+              {
+                interfaceId: TRANSFER_IFACE,
+                viewValue: {
+                  transfer: {
+                    sender: "solver::1",
+                    receiver: "user::1",
+                    amount: "10",
+                    meta: buildTransferMeta("oranj.c2c.v1.other")
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      b: {
+        CreatedTreeEvent: {
+          value: {
+            contractId: "expected-memo",
+            templateId: "pkg:TransferInstruction",
+            interfaceViews: [
+              {
+                interfaceId: TRANSFER_IFACE,
+                viewValue: {
+                  transfer: {
+                    sender: "solver::1",
+                    receiver: "user::1",
+                    amount: "10",
+                    meta: buildTransferMeta("oranj.c2c.v1.expected")
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      senderParty: "solver::1",
+      receiverParty: "user::1",
+      amount: "10",
+      amountDecimals: 10,
+      expectedMemo: "oranj.c2c.v1.expected"
+    }
+  );
+  assert.equal(cid, "expected-memo");
 });
 
 test("assertFillIncludesUserLegConsumption: blocks deliver-only without pending offer", () => {

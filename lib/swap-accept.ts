@@ -23,6 +23,63 @@
  */
 import type { LoopProvider } from "@/hooks/useLoopWallet";
 
+export type SwapSessionMintResult =
+  | { ok: true }
+  | { ok: false; message: string };
+
+function extractSignature(value: unknown): string | null {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  for (const key of ["signature", "sig", "payload", "result", "data"]) {
+    const nested = extractSignature(record[key]);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+async function responseText(res: Response): Promise<string> {
+  return (await res.text().catch(() => "")).trim();
+}
+
+function loopSignErrorMessage(error: unknown): string {
+  const maybe = error as {
+    name?: unknown;
+    message?: unknown;
+    code?: unknown;
+    errorCode?: unknown;
+  };
+  const code =
+    typeof maybe?.code === "string"
+      ? maybe.code
+      : typeof maybe?.errorCode === "string"
+        ? maybe.errorCode
+        : "";
+  const message =
+    typeof maybe?.message === "string" ? maybe.message.toLowerCase() : "";
+  if (code === "POPUP_CLOSED" || message.includes("popup")) {
+    return "Loop wallet window closed before signing. Keep the Loop wallet tab open, approve the signature, then return here.";
+  }
+  if (
+    message.includes("reject") ||
+    message.includes("declin") ||
+    maybe?.name === "RejectRequestError"
+  ) {
+    return "Signature was declined in Loop wallet. Please approve it to continue.";
+  }
+  if (
+    message.includes("not connected") ||
+    message.includes("cannot reconnect") ||
+    message.includes("failed to reconnect")
+  ) {
+    return "Loop wallet connection expired. Reconnect Loop wallet, then sign again.";
+  }
+  if (message.includes("timeout")) {
+    return "Loop wallet did not return the signature in time. Open the Loop wallet tab and try again.";
+  }
+  return "Loop wallet did not complete the signature. Open Loop wallet and try again.";
+}
+
 /**
  * The "Exchange API Key" components the user's wallet signs. Our server exchanges
  * these for the Loop JWT (api_key) to read the user's /profile and /history (both
@@ -35,10 +92,7 @@ export async function signExchange(
   const epoch = Date.now();
   const message = `Exchange API Key for ${provider.party_id}\nTimestamp: ${epoch}`;
   const sigRaw = await provider.signMessage(message);
-  const signature =
-    typeof sigRaw === "string"
-      ? sigRaw
-      : (sigRaw as { signature?: string })?.signature;
+  const signature = extractSignature(sigRaw);
   if (!signature) return null;
   return { public_key: provider.public_key, signature, epoch };
 }
@@ -52,7 +106,11 @@ export async function swapSessionActive(partyId?: string): Promise<boolean> {
     const url = partyId
       ? `/api/swap/session?party=${encodeURIComponent(partyId)}`
       : "/api/swap/session";
-    const probe = await fetch(url, { method: "GET" });
+    const probe = await fetch(url, {
+      method: "GET",
+      cache: "no-store",
+      signal: AbortSignal.timeout(5000)
+    });
     if (!probe.ok) return false;
     const { active } = (await probe.json()) as { active?: boolean };
     return active === true;
@@ -70,17 +128,39 @@ export async function swapSessionActive(partyId?: string): Promise<boolean> {
 export async function mintSwapSession(
   provider: LoopProvider
 ): Promise<boolean> {
+  return (await mintSwapSessionDetailed(provider)).ok;
+}
+
+export async function mintSwapSessionDetailed(
+  provider: LoopProvider
+): Promise<SwapSessionMintResult> {
   try {
     const exchange = await signExchange(provider);
-    if (!exchange) return false; // user declined the signature
+    if (!exchange) {
+      return {
+        ok: false,
+        message:
+          "Loop wallet did not return a signature. Open the Loop wallet tab and approve the request."
+      };
+    }
     const res = await fetch("/api/swap/session", {
       method: "POST",
       headers: { "content-type": "application/json" },
+      cache: "no-store",
       body: JSON.stringify(exchange)
     });
-    return res.ok;
-  } catch {
-    return false;
+    if (!res.ok) {
+      const body = await responseText(res);
+      return {
+        ok: false,
+        message: body
+          ? `Loop signature could not be verified: ${body}`
+          : "Loop signature could not be verified. Please try again."
+      };
+    }
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, message: loopSignErrorMessage(error) };
   }
 }
 

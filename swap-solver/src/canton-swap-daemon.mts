@@ -12,7 +12,10 @@ const APP_URL_EXPLICIT =
   process.env.CANTON_SWAP_API_URL ?? process.env.NEXT_PUBLIC_APP_URL;
 const APP_URL = APP_URL_EXPLICIT ?? "http://localhost:3000";
 const SECRET = (process.env.HTLC_DAEMON_SECRET ?? "").trim();
-const POLL_MS = Number(process.env.CANTON_SWAP_POLL_MS ?? "5000");
+const POLL_MS = Number(process.env.CANTON_SWAP_POLL_MS ?? "3000");
+const API_TIMEOUT_MS = Number(
+  process.env.CANTON_SWAP_DAEMON_API_TIMEOUT_MS ?? "60000"
+);
 const IS_MAINNET =
   process.env.SWAP_NETWORK === "mainnet" ||
   process.env.ALLOW_MAINNET === "true";
@@ -38,6 +41,12 @@ if (!Number.isFinite(POLL_MS) || POLL_MS <= 0) {
   console.error(`[canton-swap-daemon] FATAL: invalid CANTON_SWAP_POLL_MS`);
   process.exit(1);
 }
+if (!Number.isFinite(API_TIMEOUT_MS) || API_TIMEOUT_MS <= 0) {
+  console.error(
+    `[canton-swap-daemon] FATAL: invalid CANTON_SWAP_DAEMON_API_TIMEOUT_MS`
+  );
+  process.exit(1);
+}
 
 function authHeaders(): HeadersInit {
   return {
@@ -49,7 +58,7 @@ function authHeaders(): HeadersInit {
 async function fillStatus(status: "user_locked" | "filling"): Promise<void> {
   const res = await fetch(
     `${APP_URL}/api/canton/swap/pending?status=${status}`,
-    { headers: authHeaders() }
+    { headers: authHeaders(), signal: AbortSignal.timeout(API_TIMEOUT_MS) }
   );
   if (!res.ok) {
     // P1b: a non-2xx on the pending list means the daemon is NOT actually working
@@ -75,7 +84,8 @@ async function fillStatus(status: "user_locked" | "filling"): Promise<void> {
     }
     const fillRes = await fetch(`${APP_URL}/api/canton/swap/${o.id}/fill`, {
       method: "POST",
-      headers: authHeaders()
+      headers: authHeaders(),
+      signal: AbortSignal.timeout(API_TIMEOUT_MS)
     });
     if (!fillRes.ok) {
       console.warn(
@@ -96,7 +106,8 @@ async function fillPending(): Promise<void> {
 async function expireAndReconcile(): Promise<void> {
   const res = await fetch(`${APP_URL}/api/canton/swap/expire`, {
     method: "POST",
-    headers: authHeaders()
+    headers: authHeaders(),
+    signal: AbortSignal.timeout(API_TIMEOUT_MS)
   });
   if (!res.ok) {
     // P2b: a non-2xx here means the expire/reconcile endpoint is failing (auth/app

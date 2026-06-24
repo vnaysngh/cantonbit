@@ -147,11 +147,6 @@ export async function POST(req: Request) {
       midPrice: impliedPrice(q.grossOutAmount, q.inAmount),
       minReceived: q.outAmount,
       minReceivedToken: toAsset,
-      quoteIndicative: NETWORK.name === "devnet",
-      quoteNote:
-        NETWORK.name === "devnet"
-          ? "Devnet C2C quotes use mainnet Tradecraft pricing and are indicative."
-          : undefined,
       ...networkFeeFields
     });
   } catch (e) {

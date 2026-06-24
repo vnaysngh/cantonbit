@@ -95,7 +95,7 @@ test("buildLoopFillResultFromEvents: counter sender uses settlement vault", () =
   assert.equal(result.counterLegOfferCid, "counter-1");
 });
 
-test("buildLoopFillResultFromEvents: direct transfer not pending accept", () => {
+test("buildLoopFillResultFromEvents: direct transfer not pending accept when delivery proven", () => {
   const order = {
     id: "swap-1",
     solverParty: "solver::1",
@@ -106,10 +106,93 @@ test("buildLoopFillResultFromEvents: direct transfer not pending accept", () => 
   const result = buildLoopFillResultFromEvents(
     order as import("./canton-swap-types").CantonSwapOrder,
     "update-2",
-    {},
-    "direct"
+    {
+      "0": {
+        ExercisedTreeEvent: {
+          value: {
+            choice: "TransferPreapproval_SendV2",
+            choiceArgument: {
+              sender: "solver::1",
+              amount: "10"
+            },
+            exerciseResult: {
+              result: {
+                summary: {
+                  balanceChanges: [
+                    ["solver::1", { changeToInitialAmountAsOfRoundZero: "-10" }],
+                    ["user::1", { changeToInitialAmountAsOfRoundZero: "10" }]
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "direct",
+    { admin: "dso::1", id: "Amulet" }
   );
   assert.equal(result.counterLegPendingAccept, false);
+});
+
+test("buildLoopFillResultFromEvents: direct kind without delivery proof throws", () => {
+  const order = {
+    id: "swap-1",
+    solverParty: "solver::1",
+    userParty: "user::1",
+    toAsset: "CC" as const,
+    outAmount: "10"
+  };
+  assert.throws(
+    () =>
+      buildLoopFillResultFromEvents(
+        order as import("./canton-swap-types").CantonSwapOrder,
+        "update-2",
+        {},
+        "direct"
+      ),
+    /did not deliver to user/
+  );
+});
+
+test("buildLoopFillResultFromEvents: prefers pending offer when direct delivery not proven", () => {
+  const order = {
+    id: "swap-1",
+    solverParty: "solver::1",
+    userParty: "user::1",
+    toAsset: "CC" as const,
+    outAmount: "10"
+  };
+  const result = buildLoopFillResultFromEvents(
+    order as import("./canton-swap-types").CantonSwapOrder,
+    "update-3",
+    {
+      "0": {
+        CreatedTreeEvent: {
+          value: {
+            contractId: "transient-counter-offer",
+            templateId: "pkg:TransferInstruction",
+            interfaceViews: [
+              {
+                interfaceId:
+                  "#splice-api-token-transfer-instruction-v1:Splice.Api.Token.TransferInstructionV1:TransferInstruction",
+                viewValue: {
+                  transfer: {
+                    sender: "solver::1",
+                    receiver: "user::1",
+                    amount: "10"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "direct"
+  );
+  assert.equal(result.counterLegOfferCid, "transient-counter-offer");
+  assert.equal(result.counterLegPendingAccept, true);
 });
 
 test("migration 014 includes filling status in CHECK constraint", () => {

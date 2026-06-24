@@ -79,7 +79,11 @@ export function CantonIdentityProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo((): CantonIdentity => {
-    if (!session.party && loopParty) {
+    // A live Loop wallet connection is an explicit user choice and must win over
+    // any stale Supabase/participant-managed session from the same browser. If
+    // the session party wins here, /swap thinks the user is managed/email and
+    // suppresses the Loop one-time signature gate until a reload or remap.
+    if (loopParty) {
       return {
         party: loopParty,
         ready: true,

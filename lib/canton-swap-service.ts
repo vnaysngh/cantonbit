@@ -37,6 +37,7 @@ import {
   rejectUserLegOffer,
   reissueLoopCounterLeg,
   repairLoopFillFromLedger,
+  repairLoopFillFromSettlement,
   repairManagedFillFromLedger,
   resolveUserLegEvidence,
   settleManagedSwap,
@@ -44,6 +45,7 @@ import {
   verifyCounterLegReceiptProof
 } from "./canton-swap-settle";
 import { formatSettlementError } from "./swap-settlement-messages";
+import { c2cCounterLegProofPresent } from "./swap-product-invariants";
 import {
   SupabaseCantonSwapStore,
   type CantonSwapStore
@@ -699,6 +701,7 @@ export class CantonSwapService {
       o.failureReason =
         "Counter leg pending Loop accept — user must accept incoming transfer";
     } else {
+      o.counterReceiptUpdateId = result.updateId;
       o.failureReason = undefined;
     }
   }
@@ -728,6 +731,7 @@ export class CantonSwapService {
         "Counter leg pending accept — accept incoming transfer to complete swap";
     } else {
       o.status = "filled";
+      o.counterReceiptUpdateId = result.updateId;
       o.failureReason = undefined;
     }
   }
@@ -938,6 +942,7 @@ export class CantonSwapService {
         } else {
           fresh.status = "filled";
           fresh.failureReason = undefined;
+          fresh.counterReceiptUpdateId = result.updateId;
           fresh.counterLegOfferCid = result.counterLegOfferCid;
         }
         if (
@@ -952,6 +957,59 @@ export class CantonSwapService {
       } catch (e) {
         console.warn(
           `[canton-swap] counter reissue failed ${fresh.id.slice(0, 12)}:`,
+          e instanceof Error ? e.message : e
+        );
+      }
+    }
+    return n;
+  }
+
+  /** Repair filled Loop orders missing counter delivery or accept proof. */
+  async reconcileFilledLoopCounterProof(): Promise<number> {
+    const orders = await this.store.byStatus("filled");
+    let n = 0;
+    for (const o of orders) {
+      if (o.walletMode !== "loop") continue;
+      if (c2cCounterLegProofPresent(o)) continue;
+      if (!o.settlementUpdateId) continue;
+
+      try {
+        const repaired =
+          (await repairLoopFillFromSettlement(o)) ??
+          (await repairLoopFillFromLedger(o));
+        if (repaired) {
+          this.applyLoopFillResult(o, repaired);
+          if (await this.transition(o, "filled")) {
+            n++;
+          }
+          continue;
+        }
+
+        console.warn(
+          `[canton-swap] filled counter proof missing — reissuing order=${o.id.slice(0, 12)}…`
+        );
+        const result = await reissueLoopCounterLeg(o);
+        o.counterReissueAttempt = result.counterReissueAttempt;
+        o.counterLegOfferCid = result.counterLegOfferCid;
+        o.counterLegCreatedOffset = result.counterLegPendingAccept
+          ? result.counterLegCreatedOffset
+          : undefined;
+        o.counterPendingClearedAt = undefined;
+        if (result.counterLegPendingAccept) {
+          o.status = "user_locked";
+          o.counterReceiptUpdateId = undefined;
+          o.failureReason =
+            "Counter leg reissued — accept incoming transfer in Loop";
+        } else {
+          o.counterReceiptUpdateId = result.updateId;
+          o.failureReason = undefined;
+        }
+        if (await this.transition(o, "filled")) {
+          n++;
+        }
+      } catch (e) {
+        console.warn(
+          `[canton-swap] filled counter proof repair failed ${o.id.slice(0, 12)}:`,
           e instanceof Error ? e.message : e
         );
       }

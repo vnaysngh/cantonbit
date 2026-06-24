@@ -6,6 +6,7 @@
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
 import { expectedSettlementParty, requireDaemon } from "@/lib/htlc-auth";
+import { htlcCanExposePreimageToSolver } from "@/lib/swap-product-invariants";
 
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -20,11 +21,9 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     if (vault && order.solverCantonParty !== vault) {
       return NextResponse.json({ error: "order vault party mismatch" }, { status: 403 });
     }
-    if (
-      order.status !== "counter_claimed" &&
-      order.status !== "main_claimed"
-    ) {
-      return NextResponse.json({ error: "counter not claimed yet" }, { status: 409 });
+    const gate = htlcCanExposePreimageToSolver(order);
+    if (!gate.ok) {
+      return NextResponse.json({ error: gate.reason }, { status: 409 });
     }
     const preimage = order.revealedPreimage;
     if (!preimage) return NextResponse.json({ error: "not revealed yet" }, { status: 404 });

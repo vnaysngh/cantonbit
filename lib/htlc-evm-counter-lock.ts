@@ -263,7 +263,8 @@ function findLockedLog(
 /** Verify counter-lock tx exists on-chain and emitted a matching Locked event. */
 export async function verifyReverseCounterLockTx(
   counterLockTx: string,
-  req: ReverseCounterLockRequirements
+  req: ReverseCounterLockRequirements,
+  opts?: { requireFinality?: boolean }
 ): Promise<ParsedLockedEvent> {
   const tx = counterLockTx.trim();
   if (!tx.startsWith("0x") || tx.length !== 66) {
@@ -276,7 +277,6 @@ export async function verifyReverseCounterLockTx(
   if (receipt.status !== "0x1") {
     throw new Error(`counter-lock tx reverted on-chain: ${tx}`);
   }
-  await assertEvmTransactionFinalized(tx);
   const locked = findLockedLog(receipt, req.hashLock);
   if (!locked) {
     throw new Error(
@@ -300,7 +300,12 @@ export async function verifyReverseCounterLockTx(
   }
   for (let i = 0; i < 6; i++) {
     const onChain = await readEvmLockMapping(req.hashLock);
-    if (onChain.amount >= BigInt(req.wbtcAmount)) return locked;
+    if (onChain.amount >= BigInt(req.wbtcAmount)) {
+      if (opts?.requireFinality !== false) {
+        await assertEvmTransactionFinalized(tx);
+      }
+      return locked;
+    }
     await new Promise((r) => setTimeout(r, 1500));
   }
   throw new Error("EVM counter-lock not visible in locks() after tx mined");
@@ -391,6 +396,42 @@ export async function hasEvmClaimedForHashLock(
     from = to + 1n;
   }
   return false;
+}
+
+/** Latest Claimed tx hash for this hashLock, if any (newest log in scan range). */
+export async function findEvmClaimTxForHashLock(
+  hashLock: string,
+  opts?: { fromBlockHex?: string; rpcUrl?: string }
+): Promise<string | undefined> {
+  const want = normalizeHashLock(hashLock);
+  const topic1 = `0x${want}`;
+  const rpc = opts?.rpcUrl;
+  const tip = await getBlockNumberHex(rpc);
+  const tipN = BigInt(tip);
+  let from = opts?.fromBlockHex ? BigInt(opts.fromBlockHex) : 0n;
+  if (from < 0n) from = 0n;
+  const chunk = 1990n;
+  let lastTx: string | undefined;
+  while (from <= tipN) {
+    const to = from + chunk - 1n > tipN ? tipN : from + chunk - 1n;
+    const logs = await rpcCall<{ transactionHash?: string }[]>(
+      "eth_getLogs",
+      [
+        {
+          address: HTLC_ESCROW_ADDRESS,
+          topics: [HTLC_CLAIMED_EVENT_TOPIC, topic1],
+          fromBlock: `0x${from.toString(16)}`,
+          toBlock: `0x${to.toString(16)}`
+        }
+      ],
+      rpc
+    );
+    if ((logs?.length ?? 0) > 0) {
+      lastTx = logs[logs.length - 1]?.transactionHash;
+    }
+    from = to + 1n;
+  }
+  return lastTx;
 }
 
 export type ReverseEvmCounterLockProbe = {

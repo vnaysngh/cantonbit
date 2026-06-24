@@ -11,29 +11,35 @@ export function recoverHtlcCounterDeliveryFromEvents(
     receiverParty: string;
     amountBtc: string;
     expectedInstrument: InstrumentId;
+    expectedMemo?: string;
   }
 ): { delivered: boolean; offerCid?: string } | null {
+  const directParams = {
+    senderParty: params.senderParty,
+    receiverParty: params.receiverParty,
+    amount: params.amountBtc,
+    amountDecimals: 8,
+    expectedInstrument: params.expectedInstrument,
+    expectedMemo: params.expectedMemo
+  };
+
+  // Preapproval/direct delivery can still create a TransferInstruction-looking
+  // artifact in the same update tree. Prefer receiver holding + sender-bound
+  // settlement proof over a pending-offer interpretation.
+  if (counterLegDeliveredToUserInEvents(eventsById, directParams)) {
+    return { delivered: true };
+  }
+
   const offerCid =
     extractCounterOfferCidFromEvents(eventsById, {
       senderParty: params.senderParty,
       receiverParty: params.receiverParty,
       amount: params.amountBtc,
       amountDecimals: 8,
-      expectedInstrument: params.expectedInstrument
+      expectedInstrument: params.expectedInstrument,
+      expectedMemo: params.expectedMemo
     }) ?? undefined;
   if (offerCid) return { delivered: false, offerCid };
-
-  if (
-    counterLegDeliveredToUserInEvents(eventsById, {
-      senderParty: params.senderParty,
-      receiverParty: params.receiverParty,
-      amount: params.amountBtc,
-      amountDecimals: 8,
-      expectedInstrument: params.expectedInstrument
-    })
-  ) {
-    return { delivered: true };
-  }
 
   return null;
 }

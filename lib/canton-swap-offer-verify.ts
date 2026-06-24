@@ -3,6 +3,12 @@ import { toBaseUnits, toBaseUnitsFloor } from "./amount-units";
 import type { InstrumentId } from "./constants";
 import type { CantonSwapMvpAssetId } from "./canton-swap-types";
 import { userLegReceiverParty } from "./canton-swap-types";
+import {
+  cantonSwapUserLegMemo,
+  isLegacySwapMemo,
+  isOrderBoundSwapMemo,
+  transferMemoFromMeta
+} from "./swap-transfer-memo";
 
 /** Minimal offer fields used to validate a Loop user sell leg against an order. */
 export interface UserLegOfferSnapshot {
@@ -13,6 +19,7 @@ export interface UserLegOfferSnapshot {
   requestedAt?: string;
   executeBefore?: string;
   instrumentId?: { admin?: string; id?: string };
+  meta?: Record<string, unknown>;
 }
 
 /** Exact amount match at confirm — no silent surplus capture. */
@@ -24,6 +31,9 @@ export function findUserLegOfferForOrder(
     userParty: string;
     solverParty: string;
     settlementParty?: string;
+    id?: string;
+    createdAt?: number;
+    toAsset?: CantonSwapMvpAssetId;
   },
   expectedInstrument: InstrumentId,
   reservedCids?: Set<string>
@@ -55,6 +65,33 @@ export function findUserLegOfferForOrder(
   });
 
   if (matches.length === 0) return null;
+
+  if (order.id && order.createdAt != null && order.toAsset) {
+    const expectedMemo = cantonSwapUserLegMemo({
+      id: order.id,
+      createdAt: order.createdAt,
+      fromAsset: order.fromAsset,
+      toAsset: order.toAsset,
+      userParty: order.userParty,
+      solverParty: order.solverParty,
+      settlementParty: order.settlementParty
+    });
+    const exact = matches.filter((o) => transferMemoFromMeta(o.meta) === expectedMemo);
+    if (exact.length === 1) return exact[0]!.contractId;
+    if (exact.length > 1) return null;
+
+    const legacyCutoffMs = (order.createdAt - 60) * 1000;
+    const legacy = matches.filter((o) => {
+      const memo = transferMemoFromMeta(o.meta);
+      if (isOrderBoundSwapMemo(memo)) return false;
+      if (!isLegacySwapMemo(memo)) return false;
+      const requestedAtMs = Date.parse(o.requestedAt ?? "");
+      return Number.isFinite(requestedAtMs) && requestedAtMs >= legacyCutoffMs;
+    });
+    if (legacy.length === 1) return legacy[0]!.contractId;
+    return null;
+  }
+
   matches.sort((a, b) =>
     (a.requestedAt ?? "") < (b.requestedAt ?? "") ? 1 : -1
   );

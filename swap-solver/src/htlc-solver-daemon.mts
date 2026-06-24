@@ -40,6 +40,7 @@ const API_BASE = process.env.API_BASE ?? "http://localhost:3000";
 const ESCROW = (process.env.HTLC_ESCROW_ADDRESS ??
   "0x1b19a764ab35db1833ae2137544dd84ba5bf8cf1") as Address;
 const POLL_MS = Number(process.env.SOLVER_POLL_MS ?? 4000);
+const API_TIMEOUT_MS = Number(process.env.HTLC_DAEMON_API_TIMEOUT_MS ?? 60_000);
 const API_AUTH_TOKEN = (
   process.env.HTLC_DAEMON_SECRET ??
   process.env.CRON_SECRET ??
@@ -63,6 +64,13 @@ function solverEvmPk(): string {
 }
 const norm = (k: string) => (k.startsWith("0x") ? k : `0x${k}`) as Hex;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+if (!Number.isFinite(POLL_MS) || POLL_MS <= 0) {
+  throw new Error("invalid SOLVER_POLL_MS");
+}
+if (!Number.isFinite(API_TIMEOUT_MS) || API_TIMEOUT_MS <= 0) {
+  throw new Error("invalid HTLC_DAEMON_API_TIMEOUT_MS");
+}
 
 /** Fire-and-forget operational alert to ALERT_WEBHOOK_URL (Slack/Discord). Never
  *  throws. Mirrors lib/alert.ts but inline (the daemon has its own dep tree). */
@@ -105,19 +113,28 @@ interface Order {
   counterLockTx?: string;
   createdAt?: number;
   updatedAt?: number;
+  counterTransferUpdateId?: string;
+  counterTransferOfferCid?: string;
+  counterClaimUpdateId?: string;
 }
 
-/** Forward fills and EVM claims first — reverse watchtower log scans are slow. */
+/** Process user-revealed/claim phases first; those timelocks are actively ticking. */
 function daemonPriority(o: Order): number {
   if (o.direction === "evm-to-canton") {
-    if (o.status === "main_locked") return 0;
-    if (o.status === "counter_claimed") return 1;
+    if (o.status === "counter_claimed") return 0;
+    if (o.status === "main_locked" || o.status === "counter_locking") return 2;
     return 8;
   }
   if (o.direction === "canton-to-evm") {
-    if (o.status === "main_locked" || o.status === "counter_locking") return 2;
-    if (o.status === "counter_locked" || o.status === "counter_claimed")
-      return 6;
+    if (o.status === "counter_claimed") return 0;
+    if (o.status === "counter_locked") return 1;
+    if (
+      o.status === "main_locking" ||
+      o.status === "main_locked" ||
+      o.status === "counter_locking"
+    ) {
+      return 2;
+    }
   }
   return 9;
 }
@@ -126,6 +143,11 @@ function sortDaemonOrders(orders: Order[]): Order[] {
   return [...orders].sort(
     (a, b) => daemonPriority(a) - daemonPriority(b) || a.id.localeCompare(b.id)
   );
+}
+
+function loopForwardDeliveryProven(o: Order): boolean {
+  if (o.direction !== "evm-to-canton" || o.counterMode !== "loop") return true;
+  return !!o.counterTransferUpdateId && !!o.counterClaimUpdateId;
 }
 
 const ERC20_ABI = [
@@ -330,6 +352,7 @@ async function discoverEscrowStartBlock(
 
 async function jget(path: string) {
   const r = await fetch(`${API_BASE}${path}`, {
+    signal: AbortSignal.timeout(API_TIMEOUT_MS),
     headers: API_AUTH_TOKEN
       ? { Authorization: `Bearer ${API_AUTH_TOKEN}` }
       : undefined
@@ -340,6 +363,7 @@ async function jget(path: string) {
 async function jpost(path: string, body?: unknown) {
   const r = await fetch(`${API_BASE}${path}`, {
     method: "POST",
+    signal: AbortSignal.timeout(API_TIMEOUT_MS),
     headers: {
       "Content-Type": "application/json",
       ...(API_AUTH_TOKEN ? { Authorization: `Bearer ${API_AUTH_TOKEN}` } : {})
@@ -349,6 +373,13 @@ async function jpost(path: string, body?: unknown) {
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error ?? `POST ${path} ${r.status}`);
   return j;
+}
+
+function isAwaitingEvmFinality(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    err.message.includes("EVM transaction awaiting finality")
+  );
 }
 
 async function main() {
@@ -427,11 +458,11 @@ async function main() {
     nowMs: () => Date.now()
   });
 
-  // Track which orders we've acted on (avoid double-submits).
-  const lockedCounter = new Set<string>();
-  const claimedMain = new Set<string>();
   const watchtowerLastScan = new Map<string, number>();
-  const WATCHTOWER_MIN_MS = Number(process.env.HTLC_WATCHTOWER_MIN_MS ?? 30_000);
+  const loopCustodyLastLog = new Map<string, number>();
+  const WATCHTOWER_MIN_MS = Number(
+    process.env.HTLC_WATCHTOWER_MIN_MS ?? Math.max(POLL_MS, 4_000)
+  );
   let lastSweep = 0;
 
   for (;;) {
@@ -461,6 +492,9 @@ async function main() {
         orders: Order[];
       };
       const orders = sortDaemonOrders(rawOrders ?? []);
+      // Per-poll only — never carry a failed lock/claim attempt into the next tick.
+      const lockedCounter = new Set<string>();
+      const claimedMain = new Set<string>();
       for (const o of orders) {
         try {
         if (o.direction !== "evm-to-canton" && o.direction !== "canton-to-evm") {
@@ -470,14 +504,42 @@ async function main() {
           !o.solverEvmAddress ||
           o.solverEvmAddress.toLowerCase() !== account.address.toLowerCase()
         ) {
-          throw new Error(
-            `order solver EVM ${o.solverEvmAddress || "missing"} does not match daemon hot key ${account.address}`
-          );
+          continue;
         }
         // ================= REVERSE (canton-to-evm) =================
         // Main leg = user's CBTC (locked by our backend, LONG timelock); counter
         // leg = OUR WBTC (SHORT timelock). See docs/canton-to-evm-design.md.
         if (o.direction === "canton-to-evm") {
+          // LOOP SELLER R-STEP 2b — the user submitted the standard Loop transfer,
+          // but the transfer/auto-accepted custody holding can lag before it is
+          // visible from the solver participant. Reconcile this state from the
+          // daemon so a browser refresh/timeout does not strand the order at
+          // main_locking.
+          if (o.status === "main_locking" && o.counterMode === "loop") {
+            try {
+              const result = (await jpost(
+                `/api/htlc/${o.id}/confirm-lock-loop`,
+                { maxAttempts: 1, pollMs: 500 }
+              )) as { order?: { status?: string } };
+              if (result.order?.status === "main_locked") {
+                console.log(
+                  `[solver] ${o.id.slice(0, 12)} rev: Loop CBTC custody confirmed`
+                );
+              }
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : String(e);
+              if (!/not visible on-ledger yet/i.test(msg)) throw e;
+              const last = loopCustodyLastLog.get(o.id) ?? 0;
+              if (Date.now() - last > 30_000) {
+                loopCustodyLastLog.set(o.id, Date.now());
+                console.log(
+                  `[solver] ${o.id.slice(0, 12)} rev: waiting for Loop CBTC custody visibility`
+                );
+              }
+            }
+            continue;
+          }
+
           // R-STEP 3 — CBTC locked on-ledger (our own backend's write) → lock WBTC
           // on EVM: same hashLock, receiver = the USER's EVM address, SHORT timelock.
           if (
@@ -488,6 +550,33 @@ async function main() {
             const amount = BigInt(o.wbtcAmount);
             const wbtc = resolveWbtcAddress(slug);
             const unlock = BigInt(o.solverTimelock ?? 0);
+            let counterLockFinalized = false;
+            if (
+              o.counterLockTx &&
+              o.counterLockTx.startsWith("0x") &&
+              o.counterLockTx.length === 66
+            ) {
+              try {
+                const recorded = (await jpost(`/api/htlc/${o.id}/counter-lock`, {
+                  counterLockTx: o.counterLockTx
+                })) as { order?: { status?: string } };
+                if (recorded.order?.status === "counter_locked") {
+                  lockedCounter.add(o.id);
+                }
+                continue;
+              } catch (e) {
+                if (isAwaitingEvmFinality(e)) {
+                  console.log(
+                    `[solver] ${o.id.slice(0, 12)} rev: WBTC lock tx awaiting finality — retrying`
+                  );
+                  continue;
+                }
+                console.error(
+                  `[solver] ${o.id.slice(0, 12)} rev: persisted counterLockTx rejected — ${e instanceof Error ? e.message : e}`
+                );
+                continue;
+              }
+            }
             const existing = (await escrow.read.locks([
               o.hashLock
             ])) as readonly [bigint, bigint, Address, Address, Address];
@@ -550,6 +639,33 @@ async function main() {
                 );
                 continue;
               }
+              const recoveredLockTx = await findOrderScopedEventTx(
+                pub,
+                o,
+                "Locked"
+              );
+              if (recoveredLockTx) {
+                try {
+                  const recorded = (await jpost(`/api/htlc/${o.id}/counter-lock`, {
+                    counterLockTx: recoveredLockTx
+                  })) as { order?: { status?: string } };
+                  if (recorded.order?.status === "counter_locked") {
+                    lockedCounter.add(o.id);
+                  }
+                  continue;
+                } catch (e) {
+                  if (isAwaitingEvmFinality(e)) {
+                    console.log(
+                      `[solver] ${o.id.slice(0, 12)} rev: recovered WBTC lock tx awaiting finality — retrying`
+                    );
+                    continue;
+                  }
+                  console.error(
+                    `[solver] ${o.id.slice(0, 12)} rev: recovered WBTC lock tx rejected — SKIP re-lock: ${e instanceof Error ? e.message : e}`
+                  );
+                  continue;
+                }
+              }
               const allowance = (await pub.readContract({
                 address: wbtc,
                 abi: ERC20_ABI,
@@ -582,9 +698,11 @@ async function main() {
                 await jpost(`/api/htlc/${o.id}/abort-counter-lock`);
                 continue;
               }
-              await jpost(`/api/htlc/${o.id}/counter-lock`, {
+              const recorded = (await jpost(`/api/htlc/${o.id}/counter-lock`, {
                 counterLockTx: tx
-              });
+              })) as { order?: { status?: string } };
+              counterLockFinalized =
+                recorded.order?.status === "counter_locked";
             } else {
               // Lock already on-chain (e.g. daemon crashed after lock, before the POST).
               const lockAmount = existing[1];
@@ -607,11 +725,13 @@ async function main() {
                 );
                 continue;
               }
-              await jpost(`/api/htlc/${o.id}/counter-lock`, {
+              const recorded = (await jpost(`/api/htlc/${o.id}/counter-lock`, {
                 counterLockTx: realTx
-              });
+              })) as { order?: { status?: string } };
+              counterLockFinalized =
+                recorded.order?.status === "counter_locked";
             }
-            lockedCounter.add(o.id);
+            if (counterLockFinalized) lockedCounter.add(o.id);
             continue;
           }
 
@@ -783,13 +903,43 @@ async function main() {
           console.log(
             `[solver] ${o.id.slice(0, 12)} WBTC lock verified on-chain → locking CBTC counter`
           );
-          await jpost(`/api/htlc/${o.id}/lock-counter`);
-          lockedCounter.add(o.id);
+          try {
+            const recorded = (await jpost(`/api/htlc/${o.id}/lock-counter`)) as {
+              order?: { status?: string; counterMode?: string };
+            };
+            const st = recorded.order?.status;
+            if (
+              st === "counter_locked" ||
+              (o.counterMode === "loop" &&
+                (st === "main_locked" || st === "counter_claimed"))
+            ) {
+              lockedCounter.add(o.id);
+            } else if (st === "counter_locking") {
+              console.log(
+                `[solver] ${o.id.slice(0, 12)} counter lock in progress — retry next poll`
+              );
+            } else {
+              console.warn(
+                `[solver] ${o.id.slice(0, 12)} lock-counter unexpected status ${st ?? "missing"} — retry next poll`
+              );
+            }
+          } catch (e) {
+            console.error(
+              `[solver] ${o.id.slice(0, 12)} lock-counter failed:`,
+              e instanceof Error ? e.message : e
+            );
+          }
         }
 
         // STEP 7 — order is counter_claimed: the USER revealed the preimage. Read it
         // and ACTUALLY claim the WBTC on EVM.
         if (o.status === "counter_claimed" && !claimedMain.has(o.id)) {
+          if (!loopForwardDeliveryProven(o)) {
+            console.log(
+              `[solver] ${o.id.slice(0, 12)} waiting for Loop CBTC delivery/accept proof before EVM claim`
+            );
+            continue;
+          }
           const { preimage } = (await jget(`/api/htlc/${o.id}/preimage`)) as {
             preimage: Hex;
           };

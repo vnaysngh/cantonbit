@@ -112,7 +112,7 @@ export async function authorizeQuoteParty(
 }
 
 export async function requireOrderOwner(id: string): Promise<GuardOk<{ order: SwapOrder }> | GuardErr> {
-  const order = await htlcService().getOrder(id);
+  const order = await htlcService().peekOrder(id);
   if (!order) return unauthorized("not found", 404);
   const owner = await requirePartyOwner(order.userCantonParty);
   if (owner.error) return owner;
@@ -129,7 +129,7 @@ export async function requireOrderOwner(id: string): Promise<GuardOk<{ order: Sw
 }
 
 export async function requireOrderOwnerOrDaemon(req: Request, id: string): Promise<GuardOk<{ order: SwapOrder; daemon: boolean }> | GuardErr> {
-  const order = await htlcService().getOrder(id);
+  const order = await htlcService().peekOrder(id);
   if (!order) return unauthorized("not found", 404);
   if (isDaemonAuthorized(req)) return { order, daemon: true, error: null };
   const owner = await requirePartyOwner(order.userCantonParty);

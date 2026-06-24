@@ -10,18 +10,19 @@ function step(
 
 /** Reverse HTLC (CBTC → WBTC) progress steps. */
 export function reverseLoopHtlcSteps(opts: {
-  phase: "lock" | "solver" | "claim" | "done";
+  phase: "lock" | "solver" | "claim" | "finalize" | "done";
   chainName: string;
   /** Email / participant-managed: backend locks CBTC — no Loop signature. */
   managed?: boolean;
 }): SwapStep[] {
   const lockDone = opts.phase !== "lock";
-  const solverDone = opts.phase === "claim" || opts.phase === "done";
-  const claimDone = opts.phase === "done";
+  const solverDone =
+    opts.phase === "claim" || opts.phase === "finalize" || opts.phase === "done";
+  const claimDone = opts.phase === "finalize" || opts.phase === "done";
   const lockLabel = opts.managed
     ? "Lock CBTC on Canton"
     : "Sign CBTC transfer in Loop";
-  return [
+  const steps: SwapStep[] = [
     step("review", "Review quote", "done"),
     step(
       "lock",
@@ -45,17 +46,36 @@ export function reverseLoopHtlcSteps(opts: {
       opts.phase === "claim" ? "active" : claimDone ? "done" : "pending"
     )
   ];
+  if (!opts.managed) {
+    steps.push(
+      step(
+        "solver-canton",
+        "Solver settles CBTC on Canton",
+        opts.phase === "finalize"
+          ? "active"
+          : opts.phase === "done"
+            ? "done"
+            : "pending"
+      )
+    );
+  }
+  return steps;
 }
 
 /** Loop forward HTLC (WBTC → CBTC) progress steps. */
 export function forwardLoopHtlcSteps(opts: {
-  phase: "lock" | "solver" | "claim" | "done";
+  phase: "lock" | "solver" | "claim" | "finalize" | "done";
   /** Legacy argument kept for call-site compatibility; Loop HTLC fees are no longer separately charged. */
   networkFeeEnabled: boolean;
+  /** Email / participant-managed: backend claim path, no Loop accept screen. */
+  managed?: boolean;
+  /** EVM chain name for the solver WBTC claim step (Loop forward only). */
+  chainName?: string;
 }): SwapStep[] {
   const lockDone = opts.phase !== "lock";
-  const solverDone = opts.phase === "claim" || opts.phase === "done";
-  const claimDone = opts.phase === "done";
+  const solverDone =
+    opts.phase === "claim" || opts.phase === "finalize" || opts.phase === "done";
+  const claimDone = opts.phase === "finalize" || opts.phase === "done";
   const steps: SwapStep[] = [
     step("review", "Review quote", "done"),
     step(
@@ -76,28 +96,53 @@ export function forwardLoopHtlcSteps(opts: {
     )
   ];
   void opts.networkFeeEnabled;
+  const claimLabel = opts.managed ? "Claim CBTC" : "Claim CBTC in Loop";
   steps.push(
     step(
       "accept",
-      "Claim CBTC in Loop",
+      claimLabel,
       opts.phase === "claim" ? "active" : claimDone ? "done" : "pending"
     )
   );
+  if (!opts.managed) {
+    const chain = opts.chainName ?? "EVM";
+    steps.push(
+      step(
+        "solver-evm",
+        `Solver settles WBTC on ${chain}`,
+        opts.phase === "finalize"
+          ? "active"
+          : opts.phase === "done"
+            ? "done"
+            : "pending"
+      )
+    );
+  }
   return steps;
 }
 
-/** Loop C2C swap progress steps. */
+/** C2C swap progress steps. */
 export function loopC2cSteps(opts: {
   phase: "sign" | "fill" | "accept" | "done";
+  /** Email / participant-managed: backend submits the user leg; no Loop signature. */
+  managed?: boolean;
+  /** Counter asset arrived via preapproval — no Loop accept step. */
+  directCounterDelivery?: boolean;
 }): SwapStep[] {
   const signDone = opts.phase !== "sign";
   const fillDone = opts.phase === "accept" || opts.phase === "done";
   const acceptDone = opts.phase === "done";
+  const signLabel = opts.managed ? "Submit swap" : "Sign transfer offer in Loop";
+  const acceptLabel = opts.managed
+    ? "Receive tokens"
+    : opts.directCounterDelivery && acceptDone
+      ? "Counter asset credited (auto-accept)"
+      : "Accept incoming tokens in Loop (if prompted)";
   return [
     step("review", "Review swap", "done"),
     step(
       "sign",
-      "Sign transfer offer in Loop",
+      signLabel,
       opts.phase === "sign" ? "active" : signDone ? "done" : "pending"
     ),
     step(
@@ -113,7 +158,7 @@ export function loopC2cSteps(opts: {
     ),
     step(
       "accept",
-      "Accept incoming tokens in Loop (if prompted)",
+      acceptLabel,
       opts.phase === "accept" ? "active" : acceptDone ? "done" : "pending"
     )
   ];

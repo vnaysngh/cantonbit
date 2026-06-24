@@ -16,6 +16,7 @@ export interface CantonSwapHistoryRow {
   counterLeg: { asset: string; amount: string };
   counterTransferOfferCid?: string;
   settlementUpdateId?: string;
+  counterReceiptUpdateId?: string;
   networkFeeCc?: string;
   networkFeeExpiresAt?: number;
   /** M-05: whether a network_fee_ledger row exists for this order (fee actually
@@ -46,6 +47,7 @@ export function mapCantonSwapToHistoryRow(
     counterLeg: { asset: o.toAsset, amount: o.outAmount },
     counterTransferOfferCid: o.counterLegOfferCid,
     settlementUpdateId: o.settlementUpdateId,
+    counterReceiptUpdateId: o.counterReceiptUpdateId,
     networkFeeCc: o.networkFeeCc,
     networkFeeExpiresAt: o.networkFeeExpiresAt,
     failureReason: o.failureReason
@@ -69,8 +71,12 @@ export function cantonSwapPayReceive(o: CantonSwapHistoryRow): {
 }
 
 export function needsCantonSwapCounterAccept(o: CantonSwapHistoryRow): boolean {
-  if (o.walletMode !== "loop" || o.status !== "user_locked") return false;
+  if (o.walletMode !== "loop") return false;
   if (!o.counterTransferOfferCid || !o.settlementUpdateId) return false;
+  if (o.counterReceiptUpdateId) return false;
+  if (o.status === "failed" || o.status === "cancelled" || o.status === "expired") {
+    return false;
+  }
   return true;
 }
 

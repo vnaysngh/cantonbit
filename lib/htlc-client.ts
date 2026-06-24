@@ -12,6 +12,8 @@ import {
   encodeRetake
 } from "./htlc-evm-encode";
 import { getBrowserEvmProvider, waitForEvmReceipt } from "./evm-wait-receipt";
+import { htlcForwardLoopDeliveryProven } from "./swap-product-invariants";
+import { getSwapErrorMessage } from "./swap-api";
 
 export interface HtlcOrderInput {
   id: string;
@@ -68,8 +70,8 @@ async function jpost(url: string, body?: unknown) {
   if (!r.ok) throw new Error(j.error ?? `POST ${url} failed (${r.status})`);
   return j;
 }
-async function jget(url: string) {
-  const r = await fetch(url);
+async function jget(url: string, opts?: { signal?: AbortSignal }) {
+  const r = await fetch(url, { signal: opts?.signal, cache: "no-store" });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error ?? `GET ${url} failed (${r.status})`);
   return j;
@@ -131,7 +133,13 @@ export const htlcApi = {
       cantonParty,
       direction: "canton-to-evm"
     }),
-  getOrder: (id: string) => jget(`/api/htlc/${id}`),
+  getOrder: (
+    id: string,
+    opts?: { light?: boolean; signal?: AbortSignal }
+  ) =>
+    jget(`/api/htlc/${id}${opts?.light ? "?light=1" : ""}`, {
+      signal: opts?.signal
+    }),
   accept: (id: string) => jpost(`/api/htlc/${id}/accept`),
   recordMainLock: (id: string, mainLockTx: string) =>
     jpost(`/api/htlc/${id}/main-lock`, { mainLockTx }),
@@ -148,7 +156,10 @@ export const htlcApi = {
     disclosedContracts: unknown[];
     synchronizerId: string;
   }> => jpost(`/api/htlc/${id}/prepare-lock-loop`, { holdingCids }),
-  confirmLockLoop: (id: string) => jpost(`/api/htlc/${id}/confirm-lock-loop`),
+  confirmLockLoop: (
+    id: string,
+    opts?: { maxAttempts?: number; pollMs?: number }
+  ) => jpost(`/api/htlc/${id}/confirm-lock-loop`, opts),
   lockCounter: (id: string) => jpost(`/api/htlc/${id}/lock-counter`),
   // Loop reveal+deliver. delivered=true → the CBTC auto-accepted (preapproval) and
   // there is NOTHING to accept — skip the wallet popup entirely.
@@ -289,6 +300,169 @@ interface LoopLike {
   ) => Promise<unknown>;
 }
 
+export function loopSubmitUpdateId(result: unknown): string | null {
+  if (!result || typeof result !== "object") return null;
+  const obj = result as Record<string, unknown>;
+  for (const key of ["updateId", "update_id"]) {
+    if (typeof obj[key] === "string" && obj[key]) return obj[key] as string;
+  }
+  for (const key of ["transactionTree", "transaction", "result", "data"]) {
+    const nested = loopSubmitUpdateId(obj[key]);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+async function recordClaimWithRetry(
+  orderId: string,
+  preimage: string,
+  updateId: string
+): Promise<void> {
+  let lastError: unknown;
+  for (let i = 0; i < 8; i++) {
+    try {
+      await htlcApi.recordClaim(orderId, preimage, updateId);
+      return;
+    } catch (e) {
+      lastError = e;
+      await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(
+        "Loop accept succeeded but WarpX could not record the proof yet. Keep this page open — it will retry automatically."
+      );
+}
+
+function loopForwardAcceptPending(order: {
+  direction?: string;
+  counterMode?: string;
+  status?: string;
+  counterTransferOfferCid?: string;
+  counterTransferUpdateId?: string;
+  counterClaimUpdateId?: string;
+}): boolean {
+  return (
+    order.direction === "evm-to-canton" &&
+    order.counterMode === "loop" &&
+    order.status === "counter_claimed" &&
+    !!order.counterTransferOfferCid &&
+    !htlcForwardLoopDeliveryProven({
+      direction: "evm-to-canton",
+      counterMode: "loop",
+      counterTransferUpdateId: order.counterTransferUpdateId,
+      counterClaimUpdateId: order.counterClaimUpdateId
+    })
+  );
+}
+
+async function submitLoopForwardAccept(params: {
+  orderId: string;
+  preimage: string;
+  loop: LoopLike;
+}): Promise<void> {
+  const { orderId, preimage, loop } = params;
+  try {
+    const { command, disclosedContracts, synchronizerId } =
+      await htlcApi.prepareAccept(orderId);
+    const userParty = loop.party_id ?? "";
+    if (!userParty) {
+      throw new Error(
+        "Loop wallet party id is missing — reconnect Loop and try again."
+      );
+    }
+    const result = (await loop.submitAndWaitForTransaction(
+      {
+        commands: [command],
+        disclosedContracts,
+        packageIdSelectionPreference: [],
+        actAs: [userParty],
+        readAs: [userParty],
+        synchronizerId
+      },
+      undefined
+    )) as unknown;
+    const acceptUpdateId = loopSubmitUpdateId(result);
+    if (!acceptUpdateId) {
+      throw new Error(
+        "Loop accepted the CBTC transfer, but did not return a ledger update id. Keep this page open while WarpX records the proof."
+      );
+    }
+    await recordClaimWithRetry(orderId, preimage, acceptUpdateId);
+  } catch (e) {
+    const msg = getSwapErrorMessage(e);
+    if (
+      msg.includes("already delivered") ||
+      msg.includes("Transfer Preapproval") ||
+      msg.includes("no longer pending") ||
+      msg.includes("reconcile your accept proof")
+    ) {
+      const { order: fresh } = await htlcApi.getOrder(orderId);
+      const row = fresh as {
+        counterTransferUpdateId?: string;
+        counterClaimUpdateId?: string;
+      };
+      if (
+        htlcForwardLoopDeliveryProven({
+          direction: "evm-to-canton",
+          counterMode: "loop",
+          counterTransferUpdateId: row.counterTransferUpdateId,
+          counterClaimUpdateId: row.counterClaimUpdateId
+        })
+      ) {
+        const proofUpdateId =
+          row.counterClaimUpdateId ?? row.counterTransferUpdateId;
+        if (proofUpdateId) {
+          await recordClaimWithRetry(orderId, preimage, proofUpdateId);
+          return;
+        }
+      }
+    }
+    throw e;
+  }
+}
+
+async function finishLoopForwardClaimAfterReveal(params: {
+  orderId: string;
+  preimage: string;
+  reveal: { updateId: string; delivered: boolean };
+  loop: LoopLike;
+}): Promise<void> {
+  const { orderId, preimage, reveal, loop } = params;
+  if (reveal.delivered) {
+    await recordClaimWithRetry(orderId, preimage, reveal.updateId);
+    return;
+  }
+
+  const { order: afterReveal } = await htlcApi.getOrder(orderId);
+  const deliveryRow = afterReveal as {
+    direction?: string;
+    counterMode?: string;
+    counterTransferUpdateId?: string;
+    counterClaimUpdateId?: string;
+  };
+  if (
+    deliveryRow.direction === "evm-to-canton" &&
+    deliveryRow.counterMode === "loop" &&
+    htlcForwardLoopDeliveryProven({
+      direction: "evm-to-canton",
+      counterMode: "loop",
+      counterTransferUpdateId: deliveryRow.counterTransferUpdateId,
+      counterClaimUpdateId: deliveryRow.counterClaimUpdateId
+    })
+  ) {
+    await recordClaimWithRetry(
+      orderId,
+      preimage,
+      deliveryRow.counterClaimUpdateId ?? deliveryRow.counterTransferUpdateId!
+    );
+    return;
+  }
+
+  await submitLoopForwardAccept({ orderId, preimage, loop });
+}
+
 /**
  * Complete a claimable swap from its preimage — the SAME logic the /swap page runs,
  * extracted so /orders (and any tab) can claim a swap whose secret was persisted.
@@ -328,44 +502,17 @@ export async function claimSwap(opts: {
   // Loop buyer: reveal-first → deliver (auto-accept) or sign a standard accept.
   const loop = opts.loop;
   if (!loop) throw new Error("Connect your Loop wallet to accept your CBTC.");
-  const reveal = await htlcApi.claimCounter(order.id, preimage);
-  if (reveal.delivered) {
-    // CBTC delivered + secret revealed on-ledger. Persist the preimage so the
-    // solver's daemon can claim its WBTC. Don't silently swallow a failure — retry
-    // with backoff; the daemon also reads revealedPreimage server-side, but a dropped
-    // record shouldn't be invisible. (Idempotent: recordClaim re-records the same id.)
-    let recorded = false;
-    for (let i = 0; i < 4 && !recorded; i++) {
-      try {
-        await htlcApi.recordClaim(order.id, preimage, reveal.updateId);
-        recorded = true;
-      } catch {
-        await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
-      }
-    }
-    if (!recorded) {
-      console.error(
-        `[htlc] claim ${order.id}: CBTC delivered but recordClaim failed after retries — solver will recover from on-ledger revealedPreimage; check Orders.`
-      );
-    }
+  const { order: current } = await htlcApi.getOrder(order.id);
+  if (loopForwardAcceptPending(current as Parameters<typeof loopForwardAcceptPending>[0])) {
+    await submitLoopForwardAccept({ orderId: order.id, preimage, loop });
     return {};
   }
-  const { command, disclosedContracts, synchronizerId } =
-    await htlcApi.prepareAccept(order.id);
-  const userParty = loop.party_id ?? "";
-  const result = (await loop.submitAndWaitForTransaction(
-    {
-      commands: [command],
-      disclosedContracts,
-      packageIdSelectionPreference: [],
-      actAs: [userParty],
-      readAs: [userParty],
-      synchronizerId
-    },
-    undefined
-  )) as { updateId?: string; transactionTree?: { updateId?: string } };
-  const updateId =
-    result?.updateId ?? result?.transactionTree?.updateId ?? "submitted";
-  await htlcApi.recordClaim(order.id, preimage, updateId);
+  const reveal = await htlcApi.claimCounter(order.id, preimage);
+  await finishLoopForwardClaimAfterReveal({
+    orderId: order.id,
+    preimage,
+    reveal,
+    loop
+  });
   return {};
 }

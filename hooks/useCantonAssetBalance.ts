@@ -21,12 +21,8 @@ export function useCantonAssetBalance(assetId: CantonSwapAssetId) {
         const asset = getSwapAsset(assetId);
         let instrumentId = asset.instrumentId;
         if (assetId === "CC") {
-          const r = await fetch("/api/parties/balance");
-          if (r.ok) {
-            const j = (await r.json()) as { ccTotal?: string };
-            return j.ccTotal ?? "0";
-          }
-          return "0";
+          const { readLoopCcBalance } = await import("@/lib/loop-holdings");
+          return readLoopCcBalance(provider);
         }
         if (assetId === "CBTC") {
           instrumentId = NETWORK.instrumentId;

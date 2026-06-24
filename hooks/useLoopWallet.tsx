@@ -117,6 +117,14 @@ export function LoopWalletProvider({ children }: { children: ReactNode }) {
         loop.init({
           appName: APP_NAME,
           network: LOOP_NETWORK,
+          options: {
+            // Signing requests must be obvious. Brave/popup blockers can hide the
+            // SDK default popup, which leaves our sign gate waiting and then
+            // reporting a generic decline. A tab makes the Loop approval surface
+            // visible for the one-time session signature and later user-signed
+            // Canton actions.
+            requestSigningMode: "tab"
+          },
           onAccept: (p: unknown) => {
             // p is the SDK Provider; capture it as our identity.
             setProvider(p as LoopProvider);

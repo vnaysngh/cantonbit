@@ -90,8 +90,6 @@ export interface QuoteResponse {
   minReceived?: string;
   minReceivedToken?: string;
   expiresAt?: number;
-  quoteIndicative?: boolean;
-  quoteNote?: string;
 }
 
 export type SwapStatus =
@@ -231,6 +229,9 @@ export function getSwapErrorMessage(e: unknown): string {
   }
   const raw = rawErrorMessage(e);
   const lower = raw.toLowerCase();
+  if (lower === "not found" || (lower.includes("404") && lower.includes("/api/htlc"))) {
+    return "This swap order could not be loaded. Open it again from Orders or refresh the page.";
+  }
   if (
     lower.includes("exceeds max transaction gas limit") ||
     lower.includes("likely to fail")

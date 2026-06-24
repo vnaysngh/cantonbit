@@ -6,6 +6,8 @@ import {
   validateUserLegOfferSnapshot
 } from "./canton-swap-offer-verify";
 import { NETWORK } from "./constants";
+import { cantonSwapUserLegMemo } from "./swap-transfer-memo";
+import { buildTransferMeta } from "./transfer-options";
 
 const order = {
   fromAsset: "CBTC" as const,
@@ -95,4 +97,60 @@ test("findUserLegOfferForOrder: rejects offer on solver when settlement party co
 
 test("allows missing instrument when other fields match", () => {
   validateUserLegOfferSnapshot({ ...baseOffer }, order, NETWORK.instrumentId);
+});
+
+test("findUserLegOfferForOrder: prefers exact order memo over same-amount offers", () => {
+  const createdAt = Math.floor(Date.now() / 1000);
+  const orderWithId = {
+    ...order,
+    id: "c2c-order-1",
+    createdAt,
+    toAsset: "CC" as const
+  };
+  const expectedMemo = cantonSwapUserLegMemo(orderWithId);
+  const cid = findUserLegOfferForOrder(
+    [
+      {
+        ...baseOffer,
+        contractId: "legacy-newer",
+        requestedAt: new Date((createdAt + 10) * 1000).toISOString()
+      },
+      {
+        ...baseOffer,
+        contractId: "memo-bound",
+        requestedAt: new Date(createdAt * 1000).toISOString(),
+        meta: buildTransferMeta(expectedMemo)
+      }
+    ],
+    orderWithId,
+    NETWORK.instrumentId
+  );
+  assert.equal(cid, "memo-bound");
+});
+
+test("findUserLegOfferForOrder: fails closed for ambiguous legacy same-amount offers", () => {
+  const createdAt = Math.floor(Date.now() / 1000);
+  const orderWithId = {
+    ...order,
+    id: "c2c-order-2",
+    createdAt,
+    toAsset: "CC" as const
+  };
+  const cid = findUserLegOfferForOrder(
+    [
+      {
+        ...baseOffer,
+        contractId: "legacy-a",
+        requestedAt: new Date(createdAt * 1000).toISOString()
+      },
+      {
+        ...baseOffer,
+        contractId: "legacy-b",
+        requestedAt: new Date((createdAt + 1) * 1000).toISOString()
+      }
+    ],
+    orderWithId,
+    NETWORK.instrumentId
+  );
+  assert.equal(cid, null);
 });

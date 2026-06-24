@@ -16,6 +16,7 @@ export async function POST(req: Request) {
   const failedLoop = await cantonSwapService().reconcileFailedLoop();
   const filling = await cantonSwapService().reconcileFilling();
   const counters = await cantonSwapService().reconcileLoopCounters();
+  const filledProof = await cantonSwapService().reconcileFilledLoopCounterProof();
   const feeAccounting =
     await cantonSwapService().reconcileNetworkFeeAccounting();
   const expired = await cantonSwapService().expireStale();
@@ -25,6 +26,7 @@ export async function POST(req: Request) {
     failedLoop,
     filling,
     counters,
+    filledProof,
     feeAccounting,
     expired
   });

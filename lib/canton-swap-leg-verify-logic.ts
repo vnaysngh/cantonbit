@@ -7,6 +7,11 @@ import { getSwapAsset, matchesInstrument } from "./canton-assets";
 import type { InstrumentId } from "./constants";
 import type { CantonSwapMvpAssetId, CantonSwapOrder } from "./canton-swap-types";
 import { swapParty } from "./canton-swap-types";
+import {
+  isLegacySwapMemo,
+  isOrderBoundSwapMemo,
+  transferMemoFromMeta
+} from "./swap-transfer-memo";
 import { readTransferInstructionPayload } from "./transfer-instruction-read";
 
 export interface UserLegEvidence {
@@ -22,6 +27,7 @@ export interface CounterOfferMatchParams {
   amount: string;
   amountDecimals: number;
   expectedInstrument?: InstrumentId;
+  expectedMemo?: string;
 }
 
 function isHoldingTemplate(templateId: string): boolean {
@@ -45,6 +51,17 @@ function amountsEqual(expected: string, actual: string, decimals: number): boole
   } catch {
     return false;
   }
+}
+
+function transferMemoMatches(
+  meta: Record<string, unknown> | undefined,
+  expectedMemo: string | undefined
+): boolean {
+  if (!expectedMemo) return true;
+  const memo = transferMemoFromMeta(meta);
+  if (memo === expectedMemo) return true;
+  if (isOrderBoundSwapMemo(memo)) return false;
+  return isLegacySwapMemo(memo);
 }
 
 function createdEventFromNode(node: unknown): {
@@ -103,6 +120,7 @@ export function parseUserLegEvidenceFromEvents(
     inAmount: string;
     fromAsset: CantonSwapMvpAssetId;
     expectedInstrument: InstrumentId;
+    expectedMemo?: string;
   }
 ): UserLegEvidence | null {
   if (!eventsById) return null;
@@ -123,6 +141,7 @@ export function parseUserLegEvidenceFromEvents(
       if (!matchesInstrument(transfer.instrumentId, params.expectedInstrument)) {
         continue;
       }
+      if (!transferMemoMatches(transfer.meta, params.expectedMemo)) continue;
       offerCid = created.contractId;
       continue;
     }
@@ -209,14 +228,49 @@ export function extractCounterOfferCidFromEvents(
     }
     if (
       match.expectedInstrument &&
+      transfer.instrumentId?.id &&
       !matchesInstrument(transfer.instrumentId, match.expectedInstrument)
     ) {
       continue;
     }
+    if (!transferMemoMatches(transfer.meta, match.expectedMemo)) continue;
     hits.push(created.contractId);
   }
 
   return hits.length ? hits[hits.length - 1]! : null;
+}
+
+function amuletMemoMatches(
+  arg: { description?: string; meta?: Record<string, unknown> } | undefined,
+  expectedMemo: string | undefined
+): boolean {
+  if (!expectedMemo) return true;
+  if (arg?.description === expectedMemo) return true;
+  return transferMemoMatches(arg?.meta, expectedMemo);
+}
+
+function amuletReceiverCredited(
+  changes: Array<[string, { changeToInitialAmountAsOfRoundZero?: string }]>,
+  receiverParty: string
+): boolean {
+  return changes.some(([party, change]) => {
+    if (party !== receiverParty) return false;
+    const delta = change?.changeToInitialAmountAsOfRoundZero;
+    if (typeof delta !== "string") return false;
+    const trimmed = delta.trim();
+    return trimmed !== "" && !trimmed.startsWith("-");
+  });
+}
+
+function amuletSenderDebited(
+  changes: Array<[string, { changeToInitialAmountAsOfRoundZero?: string }]>,
+  senderParty: string
+): boolean {
+  return changes.some(([party, change]) => {
+    if (party !== senderParty) return false;
+    const delta = change?.changeToInitialAmountAsOfRoundZero;
+    return typeof delta === "string" && delta.trim().startsWith("-");
+  });
 }
 
 /** True when counter asset reached the user via direct transfer (holding created). */
@@ -228,9 +282,15 @@ export function counterLegDeliveredToUserInEvents(
     amount: string;
     amountDecimals: number;
     expectedInstrument: InstrumentId;
+    expectedMemo?: string;
   }
 ): boolean {
   if (!eventsById) return false;
+
+  if (params.expectedInstrument.id === "Amulet") {
+    if (amuletDirectDeliveryProvenInEvents(eventsById, params)) return true;
+  }
+
   let receiverHoldingProven = false;
   for (const node of Object.values(eventsById)) {
     const created = createdEventFromNode(node);
@@ -248,8 +308,11 @@ export function counterLegDeliveredToUserInEvents(
     if (arg?.owner !== params.receiverParty || !arg.amount) continue;
     if (!amountsEqual(params.amount, arg.amount, params.amountDecimals)) continue;
     const holdingInst = arg.instrumentId ?? arg.instrument;
+    if (holdingInst?.id && holdingInst.id !== params.expectedInstrument.id) {
+      continue;
+    }
     if (
-      holdingInst?.id &&
+      holdingInst?.admin &&
       !matchesInstrument(holdingInst, params.expectedInstrument)
     ) {
       continue;
@@ -257,10 +320,63 @@ export function counterLegDeliveredToUserInEvents(
     receiverHoldingProven = true;
     break;
   }
+
   return (
     receiverHoldingProven &&
     directSettlementBindsSender(eventsById, params)
   );
+}
+
+/** CC/Amulet often credits via balanceChanges — no registry holding in the tree. */
+function amuletDirectDeliveryProvenInEvents(
+  eventsById: Record<string, unknown>,
+  params: {
+    senderParty: string;
+    receiverParty: string;
+    amount: string;
+    amountDecimals: number;
+    expectedMemo?: string;
+  }
+): boolean {
+  for (const node of Object.values(eventsById)) {
+    const ex = exercisedEventFromNode(node);
+    if (!ex?.choice) continue;
+
+    if (ex.choice === "TransferPreapproval_SendV2") {
+      const arg = ex.choiceArgument as
+        | {
+            sender?: string;
+            amount?: string;
+            description?: string;
+            meta?: Record<string, unknown>;
+          }
+        | undefined;
+      if (arg?.sender !== params.senderParty) continue;
+      if (!amountsEqual(params.amount, arg.amount ?? "", params.amountDecimals)) {
+        continue;
+      }
+      if (!amuletMemoMatches(arg, params.expectedMemo)) continue;
+      const result = ex.exerciseResult as
+        | {
+            result?: {
+              summary?: {
+                balanceChanges?: Array<
+                  [string, { changeToInitialAmountAsOfRoundZero?: string }]
+                >;
+              };
+            };
+          }
+        | undefined;
+      const changes = result?.result?.summary?.balanceChanges ?? [];
+      if (
+        amuletSenderDebited(changes, params.senderParty) &&
+        amuletReceiverCredited(changes, params.receiverParty)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function isDirectTransferKind(kind: string): boolean {
@@ -281,6 +397,36 @@ function signedAmountMatches(
   return amountsEqual(amount, absolute, decimals);
 }
 
+function transferFieldsMatchDirectSettlement(
+  transfer:
+    | {
+        sender?: string;
+        receiver?: string;
+        amount?: string;
+        instrumentId?: InstrumentId;
+        meta?: Record<string, unknown>;
+      }
+    | undefined,
+  params: {
+    senderParty: string;
+    receiverParty: string;
+    amount: string;
+    amountDecimals: number;
+    expectedInstrument: InstrumentId;
+    expectedMemo?: string;
+  }
+): boolean {
+  if (!transfer) return false;
+  return (
+    transfer.sender === params.senderParty &&
+    transfer.receiver === params.receiverParty &&
+    amountsEqual(params.amount, transfer.amount ?? "", params.amountDecimals) &&
+    (!transfer.instrumentId ||
+      matchesInstrument(transfer.instrumentId, params.expectedInstrument)) &&
+    transferMemoMatches(transfer.meta, params.expectedMemo)
+  );
+}
+
 /** Prove the direct settlement was debited from the expected sender. */
 function directSettlementBindsSender(
   eventsById: Record<string, unknown>,
@@ -290,6 +436,7 @@ function directSettlementBindsSender(
     amount: string;
     amountDecimals: number;
     expectedInstrument: InstrumentId;
+    expectedMemo?: string;
   }
 ): boolean {
   for (const node of Object.values(eventsById)) {
@@ -301,25 +448,41 @@ function directSettlementBindsSender(
           receiver?: string;
           amount?: string;
           instrumentId?: InstrumentId;
+          meta?: Record<string, unknown>;
           transfer?: {
             sender?: string;
             receiver?: string;
             amount?: string;
             instrumentId?: InstrumentId;
+            meta?: Record<string, unknown>;
           };
-        }
+      }
       | undefined;
     const transfer = arg?.transfer ?? arg;
+
+    if (
+      ex.choice === "TransferRule_DirectTransfer" &&
+      transferFieldsMatchDirectSettlement(transfer, params) &&
+      !!(ex.exerciseResult as { receiverHoldingCid?: string } | undefined)
+        ?.receiverHoldingCid
+    ) {
+      return true;
+    }
+
+    if (
+      ex.choice === "TransferFactory_Transfer" &&
+      transferFieldsMatchDirectSettlement(transfer, params)
+    ) {
+      return true;
+    }
 
     if (
       ex.choice.includes("Transfer") &&
       !ex.choice.includes("Accept") &&
       !ex.choice.includes("Reject") &&
-      transfer?.sender === params.senderParty &&
-      transfer.receiver === params.receiverParty &&
-      amountsEqual(params.amount, transfer.amount ?? "", params.amountDecimals) &&
-      (!transfer.instrumentId ||
-        matchesInstrument(transfer.instrumentId, params.expectedInstrument))
+      !ex.choice.includes("Factory") &&
+      !ex.choice.includes("Rule") &&
+      transferFieldsMatchDirectSettlement(transfer, params)
     ) {
       return true;
     }
@@ -376,25 +539,37 @@ export function buildLoopFillResultFromEvents(
   updateId: string,
   eventsById: Record<string, unknown>,
   deliverTransferKind: string,
-  expectedInstrument?: InstrumentId
+  expectedInstrument?: InstrumentId,
+  expectedMemo?: string
 ): {
   updateId: string;
   counterLegOfferCid?: string;
   counterLegPendingAccept: boolean;
 } {
   const asset = getSwapAsset(order.toAsset);
+  const matchParams = {
+    senderParty: swapParty(order),
+    receiverParty: order.userParty,
+    amount: order.outAmount,
+    amountDecimals: asset.decimals,
+    expectedInstrument: expectedInstrument ?? asset.instrumentId,
+    expectedMemo
+  };
+
+  if (counterLegDeliveredToUserInEvents(eventsById, matchParams)) {
+    return { updateId, counterLegPendingAccept: false };
+  }
+
   const counterLegOfferCid =
-    extractCounterOfferCidFromEvents(eventsById, {
-      senderParty: swapParty(order),
-      receiverParty: order.userParty,
-      amount: order.outAmount,
-      amountDecimals: asset.decimals,
-      expectedInstrument
-    }) ?? undefined;
-  const counterLegPendingAccept = Boolean(
-    counterLegOfferCid && !isDirectTransferKind(deliverTransferKind)
-  );
-  return { updateId, counterLegOfferCid, counterLegPendingAccept };
+    extractCounterOfferCidFromEvents(eventsById, matchParams) ?? undefined;
+  if (counterLegOfferCid) {
+    return { updateId, counterLegOfferCid, counterLegPendingAccept: true };
+  }
+
+  if (isDirectTransferKind(deliverTransferKind)) {
+    throw new Error("counter direct transfer did not deliver to user");
+  }
+  throw new Error("counter leg outcome not found in fill transaction");
 }
 
 /** fillLoopSwap must include Accept for pending user leg — never deliver-only. */

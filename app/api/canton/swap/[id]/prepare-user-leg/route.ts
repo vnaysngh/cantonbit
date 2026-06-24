@@ -13,6 +13,7 @@ import { previewLoopSwapReadiness, isDirectTransferKind } from "@/lib/canton-swa
 import { cantonSwapService } from "@/lib/canton-swap-service";
 import { requireOrderOwner } from "@/lib/canton-swap-auth";
 import { userLegReceiverParty } from "@/lib/canton-swap-types";
+import { cantonSwapUserLegMemo } from "@/lib/swap-transfer-memo";
 import { prepareTransferCommand } from "@/lib/transfer";
 
 export const dynamic = "force-dynamic";
@@ -67,7 +68,8 @@ export async function POST(
       instrumentId,
       registrarAdmin,
       registryKind: registryKindForAsset(order.fromAsset),
-      expirationSeconds: LOOP_USER_LEG_OFFER_TTL_SECONDS
+      expirationSeconds: LOOP_USER_LEG_OFFER_TTL_SECONDS,
+      memo: cantonSwapUserLegMemo(order)
     });
 
     if (isDirectTransferKind(prepared.transferKind)) {

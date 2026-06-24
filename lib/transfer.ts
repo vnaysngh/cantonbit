@@ -16,8 +16,10 @@
 
 import "server-only";
 
+import { toBaseUnitsFloor } from "./amount-units";
 import { getLedgerJwt } from "./auth";
 import { getLedgerEnd, getPendingTransfers } from "./canton";
+import { matchesInstrument } from "./canton-assets";
 import type { InstrumentId } from "./constants";
 import { NETWORK } from "./constants";
 import { fetchCcRegistry } from "./cc-registry";
@@ -27,6 +29,11 @@ import {
   buildTransferMeta,
   DEFAULT_TRANSFER_EXPIRATION_SECONDS
 } from "./transfer-options";
+import {
+  isLegacySwapMemo,
+  isOrderBoundSwapMemo,
+  transferMemoFromMeta
+} from "./swap-transfer-memo";
 import type { Holding } from "./types";
 
 const TAG = "[transfer]";
@@ -178,6 +185,8 @@ export interface CreateTransferResult {
   /** Registry transferKind: "offer" needs a receiver accept; "direct"/"self" means
    *  the transfer COMPLETED in one step (receiver preapproval auto-accepted it). */
   transferKind: string;
+  /** Sender-visible transaction tree from submit-and-wait (parse proof here first). */
+  eventsById?: Record<string, unknown>;
 }
 
 export interface BuiltTransferLeg {
@@ -757,7 +766,12 @@ export async function createTransfer(params: {
   }
 
   console.log(`${TAG} ✅ createTransfer ok updateId=${updateId.slice(0, 20)}... kind=${factory.transferKind} offerCid=${offerContractId.slice(0, 20) || "(none — direct/auto-accepted)"}`);
-  return { updateId, offerContractId, transferKind: factory.transferKind ?? "" };
+  return {
+    updateId,
+    offerContractId,
+    transferKind: factory.transferKind ?? "",
+    eventsById: submitJson.transactionTree?.eventsById
+  };
 }
 
 /**
@@ -769,10 +783,56 @@ export async function createTransfer(params: {
 export async function findOfferFromSender(
   senderParty: string,
   receiverParty: string,
+  expectedMemo?: string,
+  expected?: {
+    amountBtc?: string;
+    amountDecimals?: number;
+    instrumentId?: InstrumentId;
+  }
 ): Promise<string | null> {
   const offers = await listPendingOffersAs(senderParty);
-  const match = offers.filter((o) => o.receiver === receiverParty && o.sender === senderParty);
-  // Newest first by requestedAt — if several, the latest is ours.
+  let match = offers.filter(
+    (o) => o.receiver === receiverParty && o.sender === senderParty
+  );
+
+  if (expected?.amountBtc) {
+    const decimals = expected.amountDecimals ?? 8;
+    const expectedUnits = toBaseUnitsFloor(expected.amountBtc, decimals);
+    match = match.filter((o) => {
+      try {
+        return toBaseUnitsFloor(o.amountBtc, decimals) === expectedUnits;
+      } catch {
+        return false;
+      }
+    });
+  }
+  if (expected?.instrumentId) {
+    match = match.filter((o) =>
+      matchesInstrument(o.instrumentId, expected.instrumentId!)
+    );
+  }
+
+  if (expectedMemo) {
+    const exact = match.filter((o) => transferMemoFromMeta(o.meta) === expectedMemo);
+    if (exact.length > 1) {
+      throw new Error("ambiguous transfer recovery — multiple offers carry the expected order memo");
+    }
+    if (exact.length === 1) return exact[0]!.contractId;
+
+    const legacy = match.filter((o) => {
+      const memo = transferMemoFromMeta(o.meta);
+      if (isOrderBoundSwapMemo(memo)) return false;
+      return isLegacySwapMemo(memo);
+    });
+    if (legacy.length > 1) {
+      throw new Error(
+        "ambiguous legacy transfer recovery — multiple sender/receiver offers lack an order memo"
+      );
+    }
+    return legacy[0]?.contractId ?? null;
+  }
+
+  // Newest first by requestedAt — legacy callers without an order-bound memo.
   match.sort((a, b) => (a.requestedAt < b.requestedAt ? 1 : -1));
   return match[0]?.contractId ?? null;
 }
@@ -802,6 +862,7 @@ export interface PendingOffer {
   executeBefore: string;
   inputHoldingCids: string[];
   instrumentId?: InstrumentId;
+  meta?: Record<string, unknown>;
 }
 
 /**
@@ -815,10 +876,11 @@ export async function listPendingOffers(partyId: string): Promise<PendingOffer[]
     sender: t.payload.sender,
     receiver: t.payload.receiver,
     amountBtc: t.payload.amount,
-    requestedAt: "",
-    executeBefore: "",
-    inputHoldingCids: [] as string[],
-    instrumentId: t.payload.instrumentId
+    requestedAt: t.payload.requestedAt ?? "",
+    executeBefore: t.payload.executeBefore ?? "",
+    inputHoldingCids: t.payload.inputHoldingCids ?? [],
+    instrumentId: t.payload.instrumentId,
+    meta: t.payload.meta
   }));
 }
 
@@ -836,6 +898,7 @@ type RawTransferFields = {
   executeBefore?: string;
   inputHoldingCids?: string[];
   instrumentId?: InstrumentId;
+  meta?: Record<string, unknown>;
 };
 
 function pickTransferInstructionSuffix(interfaceId: string): string {
@@ -970,6 +1033,7 @@ async function listPendingOffersAs(partyId: string): Promise<PendingOffer[]> {
       executeBefore: t.executeBefore ?? "",
       inputHoldingCids: t.inputHoldingCids ?? [],
       instrumentId: t.instrumentId,
+      meta: t.meta
     });
   }
   return out;
@@ -991,6 +1055,7 @@ export async function prepareTransferCommand(params: {
   registrarAdmin?: string;
   registryKind?: TransferRegistryKind;
   expirationSeconds?: number;
+  memo?: string;
 }): Promise<{
   command: unknown;
   disclosedContracts: DisclosedContract[];
@@ -1009,6 +1074,7 @@ export async function prepareTransferCommand(params: {
     1000;
   const now = new Date().toISOString();
   const executeBefore = new Date(Date.now() + ttlMs).toISOString();
+  const transferMeta = buildTransferMeta(params.memo);
   const transfer = {
     sender: params.senderParty,
     receiver: params.receiverParty,
@@ -1018,7 +1084,7 @@ export async function prepareTransferCommand(params: {
     requestedAt: now,
     executeBefore,
     inputHoldingCids: params.inputHoldingCids,
-    meta: { values: {} }
+    meta: transferMeta
   };
   const factoryRes = await fetchTransferFactoryContext(
     registryKind,
@@ -1049,7 +1115,7 @@ export async function prepareTransferCommand(params: {
         transfer,
         extraArgs: {
           context: factory.choiceContext.choiceContextData,
-          meta: { values: {} }
+          meta: transferMeta
         }
       }
     }

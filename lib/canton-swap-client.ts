@@ -42,8 +42,6 @@ export const cantonSwapApi = {
       networkFeePreview?: boolean;
       networkFeeTransactions?: import("@/lib/canton-network-fee-math").NetworkFeeTxLeg[];
       expiresAt?: number;
-      quoteIndicative?: boolean;
-      quoteNote?: string;
     }>("/api/canton/swap/quote", {
       method: "POST",
       body: JSON.stringify({ fromAsset, toAsset, amount, userParty })

@@ -82,6 +82,141 @@ test("counter delivery recovery proves direct delivery from receiver holding", (
   assert.deepEqual(recovered, { delivered: true });
 });
 
+test("counter delivery recovery prefers direct delivery when offer artifact also exists", () => {
+  const recovered = recoverHtlcCounterDeliveryFromEvents(
+    {
+      offer: {
+        CreatedTreeEvent: {
+          value: {
+            contractId: "transient-offer-cid",
+            templateId: "pkg:TransferInstruction",
+            interfaceViews: [
+              {
+                interfaceId:
+                  "#splice-api-token-transfer-instruction-v1:Splice.Api.Token.TransferInstructionV1:TransferInstruction",
+                viewValue: {
+                  transfer: {
+                    sender: params.senderParty,
+                    receiver: params.receiverParty,
+                    amount: params.amountBtc,
+                    instrumentId: instrument
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      transfer: {
+        ExercisedTreeEvent: {
+          value: {
+            templateId: "pkg:TransferFactory",
+            choice: "TransferFactory_Transfer",
+            choiceArgument: {
+              transfer: {
+                sender: params.senderParty,
+                receiver: params.receiverParty,
+                amount: params.amountBtc,
+                instrumentId: instrument
+              }
+            }
+          }
+        }
+      },
+      holding: {
+        CreatedTreeEvent: {
+          value: {
+            contractId: "holding-cid",
+            templateId: "pkg:Utility.Registry.Holding.V0.Holding:Holding",
+            createArgument: {
+              owner: params.receiverParty,
+              amount: params.amountBtc,
+              instrumentId: instrument
+            }
+          }
+        }
+      }
+    },
+    params
+  );
+
+  assert.deepEqual(recovered, { delivered: true });
+});
+
+test("counter delivery recovery proves registry direct transfer with memo and padded amount", () => {
+  const memo =
+    "oranj.htlc.fwd.v1.eyJpZCI6InRlc3QifQ";
+  const recovered = recoverHtlcCounterDeliveryFromEvents(
+    {
+      factory: {
+        ExercisedTreeEvent: {
+          value: {
+            choice: "TransferFactory_Transfer",
+            choiceArgument: {
+              transfer: {
+                sender: params.senderParty,
+                receiver: params.receiverParty,
+                amount: "0.0000991600",
+                instrumentId: instrument,
+                meta: {
+                  values: {
+                    "splice.lfdecentralizedtrust.org/reason": memo
+                  }
+                }
+              }
+            },
+            exerciseResult: {
+              output: {
+                tag: "TransferInstructionResult_Completed",
+                value: { receiverHoldingCids: ["holding-cid"] }
+              }
+            }
+          }
+        }
+      },
+      rule: {
+        ExercisedTreeEvent: {
+          value: {
+            choice: "TransferRule_DirectTransfer",
+            choiceArgument: {
+              transfer: {
+                sender: params.senderParty,
+                receiver: params.receiverParty,
+                amount: "0.0000991600",
+                instrumentId: instrument,
+                meta: {
+                  values: {
+                    "splice.lfdecentralizedtrust.org/reason": memo
+                  }
+                }
+              }
+            },
+            exerciseResult: {
+              receiverHoldingCid: "holding-cid"
+            }
+          }
+        }
+      },
+      holding: {
+        CreatedTreeEvent: {
+          value: {
+            contractId: "holding-cid",
+            templateId: "pkg:Utility.Registry.Holding.V0.Holding:Holding",
+            createArgument: {
+              owner: params.receiverParty,
+              amount: "0.0000991600",
+              instrumentId: instrument
+            }
+          }
+        }
+      }
+    },
+    { ...params, amountBtc: "0.00009916", expectedMemo: memo }
+  );
+
+  assert.deepEqual(recovered, { delivered: true });
+});
+
 test("counter delivery recovery fails closed without matching ledger evidence", () => {
   const recovered = recoverHtlcCounterDeliveryFromEvents(
     {

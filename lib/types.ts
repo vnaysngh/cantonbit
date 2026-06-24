@@ -49,6 +49,9 @@ export interface TransferPayload {
   receiver: string;
   amount: string;
   instrumentId: InstrumentId;
+  requestedAt?: string;
+  executeBefore?: string;
+  inputHoldingCids?: string[];
   /** Status of the transfer instruction (e.g. "pending"). Shape varies. */
   status?: Record<string, unknown>;
   meta?: Record<string, unknown>;

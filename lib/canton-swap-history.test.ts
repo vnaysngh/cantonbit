@@ -52,7 +52,21 @@ test("needsCantonSwapCounterAccept false without settlement update", () => {
   assert.equal(needsCantonSwapCounterAccept(row), false);
 });
 
-test("needsCantonSwapCounterAccept false when filled", () => {
-  const row = mapCantonSwapToHistoryRow({ ...baseOrder, status: "filled" });
+test("needsCantonSwapCounterAccept true for filled row with pending counter offer", () => {
+  const row = mapCantonSwapToHistoryRow({
+    ...baseOrder,
+    status: "filled",
+    settlementUpdateId: "update-1"
+  });
+  assert.equal(needsCantonSwapCounterAccept(row), true);
+});
+
+test("needsCantonSwapCounterAccept false when filled counter offer was accepted", () => {
+  const row = mapCantonSwapToHistoryRow({
+    ...baseOrder,
+    status: "filled",
+    settlementUpdateId: "update-1",
+    counterReceiptUpdateId: "receipt-1"
+  });
   assert.equal(needsCantonSwapCounterAccept(row), false);
 });

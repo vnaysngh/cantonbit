@@ -1,11 +1,43 @@
-import { DELAYED_AFTER_SECONDS } from "./swap-api";
-
-/** Same threshold as Orders progress ("Taking longer than usual"). */
-export const SWAP_WAIT_EXTENDED_AFTER_SECONDS = DELAYED_AFTER_SECONDS;
+/** Only show "taking longer" copy after two minutes on the live swap status UI. */
+export const SWAP_WAIT_EXTENDED_AFTER_SECONDS = 120;
 
 export const SWAP_WAIT_POLL_MS = 4_000;
 
-export type SwapWaitMode = "solver" | "locking" | "settling";
+export type SwapWaitMode = "solver" | "locking" | "settling" | "finalize";
+
+export function swapFinalizeHint(params: {
+  elapsedSec: number;
+  reverse?: boolean;
+  chainName: string;
+}): string {
+  const { elapsedSec, reverse, chainName } = params;
+  if (reverse) {
+    if (elapsedSec < 30) {
+      return "Your WBTC claim is confirmed. The solver is finishing the Canton leg — usually under a minute.";
+    }
+    if (elapsedSec < 120) {
+      return "Still finalizing on Canton. Your WBTC is already claimed — no action needed from you.";
+    }
+    return "This is taking longer than usual. Your WBTC is safe — the solver is completing Canton settlement.";
+  }
+  if (elapsedSec < 30) {
+    return `Your CBTC is delivered. The solver is claiming WBTC on ${chainName} — usually under a minute.`;
+  }
+  if (elapsedSec < 120) {
+    return `Still waiting for the solver to settle WBTC on ${chainName}. Your CBTC is already yours — no wallet action needed.`;
+  }
+  return `Solver settlement on ${chainName} is taking longer than usual. Your CBTC is delivered — this page will update automatically when the on-chain claim completes.`;
+}
+
+export function swapRecordingProofHint(elapsedSec: number): string {
+  if (elapsedSec < 45) {
+    return "Loop confirmed your signature. WarpX is recording the CBTC delivery proof on Canton…";
+  }
+  if (elapsedSec < 120) {
+    return "Still confirming your CBTC delivery on Canton. Leave this page open — it updates automatically.";
+  }
+  return "Canton proof is slow to appear. Refresh or reopen from Orders if this does not advance soon.";
+}
 
 export function swapWaitPrimaryLabel(params: {
   elapsedSec: number;

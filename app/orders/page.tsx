@@ -33,10 +33,8 @@ import {
 import {
   isSmokeTestOrderId,
   isSwapClaimable,
-  shouldPollOrderOnOrdersPage,
   ORDERS_LIVE_POLL_MAX,
   ORDERS_LIVE_POLL_MS,
-  ORDERS_PAGE_TERMINAL_STATUSES,
   htlcUserWbtcClaimTx
 } from "@/lib/htlc-order-logic";
 import { truncatePartyId } from "@/lib/party-display";
@@ -52,6 +50,12 @@ import { listLoopCbtcHoldingCids } from "@/lib/loop-holdings";
 import { getSwapErrorMessage } from "@/lib/swap-api";
 import { SWAP_CHAIN, HTLC_ESCROW_ADDRESS } from "@/lib/swap-evm";
 import { cn } from "@/lib/utils";
+import {
+  projectC2cStatus,
+  projectHtlcStatus,
+  projectedToneClass,
+  type ProjectedSwapStatus
+} from "@/lib/swap-status-projector";
 
 // Shared resolver — fails closed in production if NEXT_PUBLIC_HTLC_ESCROW is unset.
 const HTLC_ESCROW = HTLC_ESCROW_ADDRESS;
@@ -72,6 +76,8 @@ interface HistoryOrder {
   counterTransferOfferCid?: string;
   mainClaimTx?: string;
   counterClaimUpdateId?: string;
+  settlementUpdateId?: string;
+  counterReceiptUpdateId?: string;
   allocationCid?: string;
   htlcCid?: string;
   createdAt: number; // unix seconds
@@ -140,13 +146,24 @@ function needsLoopAccept(o: HistoryOrder): boolean {
     o.direction === "evm-to-canton" &&
     o.counterMode === "loop" &&
     o.status === "counter_claimed" &&
-    !!o.counterTransferOfferCid
+    !!o.counterTransferOfferCid &&
+    !o.counterClaimUpdateId
   );
 }
 
 /** User leg done; waiting for the HTLC solver daemon to claim WBTC on EVM. */
 function isAwaitingSolverFinalize(o: HistoryOrder): boolean {
-  return o.direction === "evm-to-canton" && o.status === "counter_claimed";
+  if (o.direction !== "evm-to-canton" || o.status !== "counter_claimed") {
+    return false;
+  }
+  if (
+    o.counterMode === "loop" &&
+    !!o.counterTransferOfferCid &&
+    !o.counterClaimUpdateId
+  ) {
+    return false;
+  }
+  return true;
 }
 
 /** What recovery action (if any) the user can take on a stuck order, NOW. Only
@@ -160,41 +177,6 @@ function recoveryAction(o: HistoryOrder): "retake-wbtc" | "refund-cbtc" | null {
   if (isCantonSwapOrder(o)) return null;
   return o.direction === "evm-to-canton" ? "retake-wbtc" : "refund-cbtc";
 }
-
-const TERMINAL_STATUSES = ORDERS_PAGE_TERMINAL_STATUSES;
-
-const STATUS_STYLE: Record<string, string> = {
-  main_claimed: "bg-green-500/12 text-green-600 ring-green-500/20",
-  both_claimed: "bg-green-500/12 text-green-600 ring-green-500/20",
-  counter_claimed: "bg-amber-500/12 text-amber-600 ring-amber-500/20",
-  counter_locked: "bg-blue-500/12 text-blue-600 ring-blue-500/20",
-  main_locked: "bg-blue-500/12 text-blue-600 ring-blue-500/20",
-  accepted: "bg-foreground/8 text-foreground/60 ring-foreground/10",
-  open: "bg-foreground/8 text-foreground/60 ring-foreground/10",
-  refunded: "bg-foreground/8 text-foreground/55 ring-foreground/10",
-  cancelled: "bg-foreground/8 text-foreground/55 ring-foreground/10",
-  failed: "bg-red-500/12 text-red-600 ring-red-500/20",
-  filled: "bg-green-500/12 text-green-600 ring-green-500/20",
-  user_locked: "bg-amber-500/12 text-amber-600 ring-amber-500/20",
-  settling: "bg-blue-500/12 text-blue-600 ring-blue-500/20",
-  expired: "bg-foreground/8 text-foreground/55 ring-foreground/10"
-};
-const STATUS_LABEL: Record<string, string> = {
-  open: "Open",
-  accepted: "Pending",
-  main_locked: "In progress",
-  counter_locked: "Claimable",
-  counter_claimed: "Settling",
-  main_claimed: "Completed",
-  both_claimed: "Completed",
-  filled: "Completed",
-  user_locked: "Filling",
-  settling: "Settling",
-  expired: "Expired",
-  refunded: "Refunded",
-  cancelled: "Cancelled",
-  failed: "Failed"
-};
 
 function fmtWbtc(units: string): string {
   try {
@@ -228,16 +210,40 @@ function fmtDateShort(unix: number): string {
   });
 }
 
-function StatusPill({ status }: { status: string }) {
+function projectHistoryStatus(o: HistoryOrder): ProjectedSwapStatus {
+  if (isCantonSwapOrder(o)) {
+    return projectC2cStatus({
+      status: o.status as never,
+      settlementUpdateId: o.settlementUpdateId,
+      counterLegOfferCid: o.counterTransferOfferCid,
+      counterReceiptUpdateId: o.counterReceiptUpdateId
+    });
+  }
+  return projectHtlcStatus({
+    status: o.status as SwapStatus,
+    direction: o.direction as "evm-to-canton" | "canton-to-evm",
+    counterMode:
+      o.counterMode === "loop" || o.counterMode === "managed"
+        ? o.counterMode
+        : undefined,
+    revealedPreimage: o.revealedPreimage as `0x${string}` | undefined,
+    counterTransferUpdateId: o.counterTransferUpdateId,
+    counterTransferOfferCid: o.counterTransferOfferCid,
+    counterClaimUpdateId: o.counterClaimUpdateId,
+    mainClaimTx: o.mainClaimTx
+  });
+}
+
+function StatusPill({ order }: { order: HistoryOrder }) {
+  const status = projectHistoryStatus(order);
   return (
     <span
       className={cn(
         "inline-flex items-center whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset",
-        STATUS_STYLE[status] ??
-          "bg-foreground/8 text-foreground/60 ring-foreground/10"
+        projectedToneClass(status.tone)
       )}
     >
-      {STATUS_LABEL[status] ?? status}
+      {status.label}
     </span>
   );
 }
@@ -390,7 +396,17 @@ function OrdersPageInner() {
         ...o,
         status: optimisticStatus[o.id] ?? o.status
       }))
-      .filter((o) => shouldPollOrderOnOrdersPage(o))
+      .filter((o) => {
+        if (projectHistoryStatus(o).terminal) return false;
+        if (isCantonSwapOrder(o)) {
+          return ["open", "user_locked", "filling", "settling", "filled"].includes(
+            o.status
+          );
+        }
+        // Keep polling until proof-aware projection says the swap is complete —
+        // raw main_claimed is not enough (missing mainClaimTx / Loop accept proof).
+        return !projectHistoryStatus(o).proofComplete;
+      })
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, ORDERS_LIVE_POLL_MAX);
   }, [orders, optimisticStatus]);
@@ -940,7 +956,7 @@ function OrdersPageInner() {
                             </button>
                           )
                         )}
-                        <StatusPill status={displayOrder.status} />
+                        <StatusPill order={displayOrder} />
                       </div>
                     </td>
                   </tr>
@@ -1101,10 +1117,10 @@ function DetailDrawer({
           {/* Headline: route + status */}
           <div className="mb-4 flex items-center justify-between gap-3">
             <Route order={o} />
-            <StatusPill status={o.status} />
+            <StatusPill order={o} />
           </div>
 
-          {cantonSwap && !TERMINAL_STATUSES.has(o.status) && (
+          {cantonSwap && !projectHistoryStatus(o).terminal && (
             <div className="mb-4 rounded-xl bg-foreground/[0.04] px-4 py-3 text-xs text-foreground/60">
               {o.status === "user_locked" &&
                 "Your sell offer is locked — the solver is settling both legs."}

@@ -8,6 +8,9 @@ type RawTransferFields = {
   sender?: string;
   receiver?: string;
   amount?: string;
+  requestedAt?: string;
+  executeBefore?: string;
+  inputHoldingCids?: string[];
   instrumentId?: InstrumentId;
   status?: Record<string, unknown>;
   meta?: Record<string, unknown>;
@@ -38,6 +41,9 @@ export function readTransferInstructionPayload(
       receiver: arg.receiver,
       amount: arg.amount ?? "0",
       instrumentId: arg.instrumentId ?? { admin: "", id: "" },
+      requestedAt: arg.requestedAt,
+      executeBefore: arg.executeBefore,
+      inputHoldingCids: arg.inputHoldingCids,
       status: arg.status,
       meta: arg.meta
     };
@@ -66,6 +72,9 @@ export function readTransferInstructionPayload(
         receiver: t.receiver,
         amount: t.amount ?? "0",
         instrumentId: t.instrumentId ?? { admin: "", id: "" },
+        requestedAt: t.requestedAt,
+        executeBefore: t.executeBefore,
+        inputHoldingCids: t.inputHoldingCids,
         status: t.status,
         meta: t.meta
       };
