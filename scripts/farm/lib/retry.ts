@@ -44,6 +44,7 @@ export function isTransientError(err: unknown): boolean {
     "enotfound",
     "socket hang up",
     "network",
+    "ledger-end failed",
     "429",
     "502",
     "503",

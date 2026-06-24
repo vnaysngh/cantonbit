@@ -15,14 +15,14 @@ import {
   meanIntervalSeconds
 } from "./lib/lighthouse";
 import { auditMainnetConfig, printAudit } from "./lib/mainnet-audit";
-import { isAcsLimitError } from "./lib/ledger";
+import { isAcsLimitError, clearLedgerOffsetCache, runWithLedgerReadSession } from "./lib/ledger";
 import {
   organicInterval,
   pacingFromArgs,
   sleepSecondsAfterSwap,
   sleepMs
 } from "./lib/organic";
-import { MEASURED_BYTES_PER_SWAP, balancePacingAmounts, planNextSwap, type PlannerState } from "./lib/planner";
+import { MEASURED_BYTES_PER_SWAP, balancePacingAmounts, planNextSwap, type FleetFloatSnapshot, type PlannerState } from "./lib/planner";
 import {
   parseFlag,
   parseNumberArg,
@@ -147,6 +147,50 @@ async function recoverFromUtxoPressure(
   console.log(`  consolidate done (vault=${vault} fleet=${fleetMerges} merge round(s))`);
 }
 
+function refreshJwtIfAuthError(msg: string, currentJwt: string): Promise<string> {
+  if (!/401|unauthorized|jwt/i.test(msg)) {
+    return Promise.resolve(currentJwt);
+  }
+  clearLedgerOffsetCache();
+  return retry(() => getLedgerJwt(), { label: "jwt", onRetry: logRetry("jwt") });
+}
+
+async function handlePlanFailure(params: {
+  err: unknown;
+  jwt: string;
+  fleet: ReturnType<typeof loadFleet>;
+}): Promise<string> {
+  const msg = params.err instanceof Error ? params.err.message : String(params.err);
+  console.error(`✗ plan failed:\n${msg.split("\n").map((l) => `  ${l}`).join("\n")}`);
+
+  if (isAcsLimitError(params.err) || needsUtxoConsolidation(params.err)) {
+    try {
+      await recoverFromUtxoPressure(
+        params.jwt,
+        params.fleet,
+        isAcsLimitError(params.err) ? "acs-limit" : "utxo-cap"
+      );
+    } catch (ce) {
+      const cm = ce instanceof Error ? ce.message : String(ce);
+      console.error(`  consolidate failed: ${cm.slice(0, 200)}`);
+    }
+    await sleepMs(5000);
+    return params.jwt;
+  }
+
+  let jwt = await refreshJwtIfAuthError(msg, params.jwt);
+  if (/ledger-end failed/i.test(msg)) {
+    clearLedgerOffsetCache();
+    jwt = await refreshJwtIfAuthError(msg, jwt);
+    await sleepMs(20_000);
+    return jwt;
+  }
+
+  jwt = await refreshJwtIfAuthError(msg, jwt);
+  await sleepMs(isTransientError(params.err) ? 30_000 : 60_000);
+  return jwt;
+}
+
 export async function runFarmBot(): Promise<void> {
   assertMainnetNetwork();
   requireMainnetGuard();
@@ -179,6 +223,7 @@ export async function runFarmBot(): Promise<void> {
     refillBytesPerSec: pacing.refillBytesPerSec
   });
   let plannerState: PlannerState = {};
+  let cachedFloat: FleetFloatSnapshot | null = null;
   const runId = randomUUID();
   const runStartedAt = Date.now();
   let lastSwapLogAt: number | null = null;
@@ -197,13 +242,15 @@ export async function runFarmBot(): Promise<void> {
   console.log(`Planner: alternates direction, balance-aware trader pick`);
 
   if (!dryRun) {
-    await runConsolidateWithRetry("startup consolidate", () =>
-      consolidateFleetUtxos({
-        jwt,
-        fleet,
-        minUtxo: PROACTIVE_CONSOLIDATE_MIN_UTXO,
-        reason: "startup"
-      })
+    await runWithLedgerReadSession(jwt, () =>
+      runConsolidateWithRetry("startup consolidate", () =>
+        consolidateFleetUtxos({
+          jwt,
+          fleet,
+          minUtxo: PROACTIVE_CONSOLIDATE_MIN_UTXO,
+          reason: "startup"
+        })
+      )
     ).catch((e) => {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`  startup consolidate failed after retries: ${msg.slice(0, 200)}`);
@@ -215,36 +262,24 @@ export async function runFarmBot(): Promise<void> {
     try {
       const planned = await retry(
         () =>
-          planNextSwap({
-            jwt,
-            fleet,
-            pacing,
-            state: plannerState
+          runWithLedgerReadSession(jwt, async () => {
+            const result = await planNextSwap({
+              jwt,
+              fleet,
+              pacing,
+              state: plannerState,
+              float: cachedFloat ?? undefined
+            });
+            cachedFloat = result.float;
+            return result;
           }),
-        { label: "plan", onRetry: logRetry("plan") }
+        { label: "plan", onRetry: logRetry("plan"), retries: 6, maxMs: 20_000 }
       );
       pick = planned.pick;
+      plannerState = planned.state;
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.error(`✗ plan failed:\n${msg.split("\n").map((l) => `  ${l}`).join("\n")}`);
-      if (isAcsLimitError(e) || needsUtxoConsolidation(e)) {
-        try {
-          await recoverFromUtxoPressure(
-            jwt,
-            fleet,
-            isAcsLimitError(e) ? "acs-limit" : "utxo-cap"
-          );
-        } catch (ce) {
-          const cm = ce instanceof Error ? ce.message : String(ce);
-          console.error(`  consolidate failed: ${cm.slice(0, 200)}`);
-        }
-        await sleepMs(5000);
-        continue;
-      }
-      if (/401|unauthorized|jwt/i.test(msg)) {
-        jwt = await retry(() => getLedgerJwt(), { label: "jwt", onRetry: logRetry("jwt") });
-      }
-      await sleepMs(isTransientError(e) ? 30_000 : 60_000);
+      cachedFloat = null;
+      jwt = await handlePlanFailure({ err: e, jwt, fleet });
       continue;
     }
 
@@ -262,14 +297,16 @@ export async function runFarmBot(): Promise<void> {
     try {
       const result = await retry(
         () =>
-          executeSwap({
-            jwt,
-            fleet,
-            traderParty: pick.traderParty,
-            fromAsset: pick.fromAsset,
-            toAsset: pick.toAsset,
-            inAmount: pick.inAmount
-          }),
+          runWithLedgerReadSession(jwt, () =>
+            executeSwap({
+              jwt,
+              fleet,
+              traderParty: pick.traderParty,
+              fromAsset: pick.fromAsset,
+              toAsset: pick.toAsset,
+              inAmount: pick.inAmount
+            })
+          ),
         { label: "swap", onRetry: logRetry("swap") }
       );
       swapCount++;
@@ -309,29 +346,34 @@ export async function runFarmBot(): Promise<void> {
           result.fromAsset === "CBTC" ? "CBTC→CC" : "CC→CBTC",
         lastTraderParty: pick.traderParty
       };
+      cachedFloat = null;
       lastSwapLogAt = loggedAt;
 
-      // Vault receives one UTXO per swap — merge before ACS 200 cap.
-      await consolidateVaultUtxos({
-        jwt,
-        fleet,
-        minUtxo: VAULT_CONSOLIDATE_MIN_UTXO,
-        reason: "post-swap"
-      }).catch((e) => {
+      await runWithLedgerReadSession(jwt, () =>
+        consolidateVaultUtxos({
+          jwt,
+          fleet,
+          minUtxo: VAULT_CONSOLIDATE_MIN_UTXO,
+          reason: "post-swap"
+        })
+      ).catch((e) => {
         const msg = e instanceof Error ? e.message : String(e);
         console.warn(`  vault consolidate skipped: ${msg.slice(0, 120)}`);
       });
 
       if (swapCount % CONSOLIDATE_EVERY_SWAPS === 0) {
-        await consolidateFleetUtxos({
-          jwt,
-          fleet,
-          minUtxo: PROACTIVE_CONSOLIDATE_MIN_UTXO,
-          reason: `every-${CONSOLIDATE_EVERY_SWAPS}-swaps`
-        }).catch((e) => {
+        await runWithLedgerReadSession(jwt, () =>
+          consolidateFleetUtxos({
+            jwt,
+            fleet,
+            minUtxo: PROACTIVE_CONSOLIDATE_MIN_UTXO,
+            reason: `every-${CONSOLIDATE_EVERY_SWAPS}-swaps`
+          })
+        ).catch((e) => {
           const msg = e instanceof Error ? e.message : String(e);
           console.warn(`  periodic consolidate skipped: ${msg.slice(0, 120)}`);
         });
+        cachedFloat = null;
       }
 
       if (calibrateSwaps >= pacing.calibrateEvery) {

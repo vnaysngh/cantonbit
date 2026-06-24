@@ -435,16 +435,70 @@ type AcsCreatedEvent = {
   }>;
 };
 
-async function getLedgerOffset(jwt: string): Promise<number> {
-  const endRes = await fetch(`${NETWORK.ledgerHost}/v2/state/ledger-end`, {
-    headers: { Authorization: `Bearer ${jwt}` }
-  });
-  if (!endRes.ok) throw new Error("ledger-end failed");
+/**
+ * Ledger read session — matches Canton JSON API tutorial flow:
+ * 1. GET /v2/state/ledger-end once
+ * 2. POST /v2/state/active-contracts at that activeAtOffset (TemplateFilter, optional ?limit=)
+ *
+ * Docs: active-contracts is expensive; bootstrap once then track changes via /v2/updates.
+ * @see https://docs.canton.network/sdks-tools/api-reference/json-api
+ * @see https://docs.canton.network/appdev/modules/m4-json-api-tutorial
+ * @see https://docs.canton.network/sdks-tools/api-reference/ledger-api-services (State Service)
+ */
+let ledgerReadSession: { jwt: string; offset: number } | null = null;
+
+export function clearLedgerOffsetCache(): void {
+  ledgerReadSession = null;
+}
+
+/** GET /v2/state/ledger-end — standalone fetch (outside a read session). */
+export async function fetchLedgerEnd(jwt: string): Promise<number> {
+  let endRes: Response;
+  try {
+    endRes = await fetch(`${NETWORK.ledgerHost}/v2/state/ledger-end`, {
+      headers: { Authorization: `Bearer ${jwt}` },
+      cache: "no-store"
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`ledger-end failed (network): ${msg.slice(0, 120)}`);
+  }
+
+  if (!endRes.ok) {
+    const body = await endRes.text().catch(() => "");
+    throw new Error(
+      `ledger-end failed (${endRes.status})${body ? `: ${body.slice(0, 120)}` : ""}`
+    );
+  }
   const { offset } = (await endRes.json()) as { offset: number };
   return offset;
 }
 
-/** WarpX caps ACS list responses at 200; stay below when batching merges. */
+/** One ledger-end per batch; all ACS queries in fn share the same activeAtOffset. */
+export async function runWithLedgerReadSession<T>(
+  jwt: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  if (ledgerReadSession?.jwt === jwt) {
+    return fn();
+  }
+  const offset = await fetchLedgerEnd(jwt);
+  ledgerReadSession = { jwt, offset };
+  try {
+    return await fn();
+  } finally {
+    ledgerReadSession = null;
+  }
+}
+
+async function getLedgerOffset(jwt: string): Promise<number> {
+  if (ledgerReadSession?.jwt === jwt) {
+    return ledgerReadSession.offset;
+  }
+  return fetchLedgerEnd(jwt);
+}
+
+/** WarpX node cap (http-list-max-elements-limit). Use ?limit= below this. */
 export const ACS_QUERY_BATCH_LIMIT = 150;
 
 async function queryActiveContractsByTemplate(

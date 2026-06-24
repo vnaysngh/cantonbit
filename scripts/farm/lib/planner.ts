@@ -235,9 +235,13 @@ export async function planNextSwap(params: {
   fleet: FarmFleetConfig;
   pacing: PacingConfig;
   state: PlannerState;
-}): Promise<{ pick: OrganicPick; state: PlannerState }> {
+  /** Reuse between swaps — avoid re-querying ACS every plan (Canton State Service pattern). */
+  float?: FleetFloatSnapshot;
+}): Promise<{ pick: OrganicPick; state: PlannerState; float: FleetFloatSnapshot }> {
   const [float, quotes] = await Promise.all([
-    loadFleetFloat(params.jwt, params.fleet),
+    params.float
+      ? Promise.resolve(params.float)
+      : loadFleetFloat(params.jwt, params.fleet),
     loadDirectionQuotes(params.pacing)
   ]);
 
@@ -284,7 +288,8 @@ export async function planNextSwap(params: {
     state: {
       lastDirection: chosen.direction,
       lastTraderParty: chosen.traderParty
-    }
+    },
+    float
   };
 }
 
