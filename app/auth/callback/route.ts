@@ -8,11 +8,13 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { provisionParticipantManagedPartyForUser } from "@/lib/provision-participant-party";
+import { publicRequestOrigin } from "@/lib/request-origin";
 import { safeRedirectPath } from "@/lib/safe-redirect-path";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export async function GET(request: NextRequest) {
-  const { searchParams, origin } = new URL(request.url);
+  const { searchParams } = new URL(request.url);
+  const origin = publicRequestOrigin(request);
   const code = searchParams.get("code");
   const next = safeRedirectPath(searchParams.get("next"));
 
@@ -27,8 +29,7 @@ export async function GET(request: NextRequest) {
         console.error("[auth/callback] provision failed:", e);
       }
 
-      const requestUrl = new URL(request.url);
-      return NextResponse.redirect(new URL(next, requestUrl.origin));
+      return NextResponse.redirect(new URL(next, origin));
     }
   }
 
