@@ -22,8 +22,7 @@
  * ownership so our server can read the user's own Loop profile/history.
  */
 import type { LoopProvider } from "@/hooks/useLoopWallet";
-import { isLoopPopupBlockedError } from "@/lib/loop-popup";
-import { LOOP_POPUP_BLOCKED_HINT } from "@/lib/swap-wait-copy";
+import { getLoopSignErrorMessage } from "@/lib/swap-api";
 
 export type SwapSessionMintResult =
   | { ok: true }
@@ -42,47 +41,6 @@ function extractSignature(value: unknown): string | null {
 
 async function responseText(res: Response): Promise<string> {
   return (await res.text().catch(() => "")).trim();
-}
-
-function loopSignErrorMessage(error: unknown): string {
-  const maybe = error as {
-    name?: unknown;
-    message?: unknown;
-    code?: unknown;
-    errorCode?: unknown;
-  };
-  const code =
-    typeof maybe?.code === "string"
-      ? maybe.code
-      : typeof maybe?.errorCode === "string"
-        ? maybe.errorCode
-        : "";
-  const message =
-    typeof maybe?.message === "string" ? maybe.message.toLowerCase() : "";
-  if (code === "POPUP_CLOSED" || message.includes("popup")) {
-    if (isLoopPopupBlockedError(error) || message.includes("block")) {
-      return LOOP_POPUP_BLOCKED_HINT;
-    }
-    return "Loop wallet window closed before signing. Keep the Loop wallet tab open, approve the signature, then return here.";
-  }
-  if (
-    message.includes("reject") ||
-    message.includes("declin") ||
-    maybe?.name === "RejectRequestError"
-  ) {
-    return "Signature was declined in Loop wallet. Please approve it to continue.";
-  }
-  if (
-    message.includes("not connected") ||
-    message.includes("cannot reconnect") ||
-    message.includes("failed to reconnect")
-  ) {
-    return "Loop wallet connection expired. Reconnect Loop wallet, then sign again.";
-  }
-  if (message.includes("timeout")) {
-    return "Loop wallet did not return the signature in time. Open the Loop wallet tab and try again.";
-  }
-  return "Loop wallet did not complete the signature. Open Loop wallet and try again.";
 }
 
 /**
@@ -165,7 +123,12 @@ export async function mintSwapSessionDetailed(
     }
     return { ok: true };
   } catch (error) {
-    return { ok: false, message: loopSignErrorMessage(error) };
+    return {
+      ok: false,
+      message:
+        getLoopSignErrorMessage(error) ??
+        "Loop wallet did not complete the signature. Open Loop wallet and try again."
+    };
   }
 }
 

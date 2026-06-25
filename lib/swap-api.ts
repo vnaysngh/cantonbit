@@ -164,6 +164,80 @@ export class ApiError extends Error {
 /** The friendly message for a user-cancelled wallet prompt (CoW: USER_SWAP_REJECTED_ERROR). */
 export const USER_REJECTED_MESSAGE = "You declined the request in your wallet.";
 
+/** Loop reverse: user signed CBTC lock but confirm-lock-loop never ran (refresh / SDK drop). */
+export function needsHtlcLoopLockConfirm(order: {
+  direction?: string;
+  counterMode?: string;
+  status?: string;
+  counterTransferUpdateId?: string;
+  counterTransferOfferCid?: string;
+}): boolean {
+  return (
+    order.direction === "canton-to-evm" &&
+    order.counterMode === "loop" &&
+    (order.status === "accepted" || order.status === "main_locking") &&
+    !order.counterTransferUpdateId &&
+    !order.counterTransferOfferCid
+  );
+}
+
+/** Loop SDK sign failures — prefer over generic EIP-1193 "user rejected" mapping. */
+export function getLoopSignErrorMessage(error: unknown): string | null {
+  const maybe = error as {
+    name?: unknown;
+    message?: unknown;
+    code?: unknown;
+    errorCode?: unknown;
+  };
+  const code =
+    typeof maybe?.code === "string"
+      ? maybe.code
+      : typeof maybe?.errorCode === "string"
+        ? maybe.errorCode
+        : "";
+  const message =
+    typeof maybe?.message === "string" ? maybe.message.toLowerCase() : "";
+  const name = typeof maybe?.name === "string" ? maybe.name : "";
+
+  const looksLikeLoop =
+    code === "POPUP_CLOSED" ||
+    code === "POPUP_BLOCKED" ||
+    name === "PopupClosedError" ||
+    name === "RejectRequestError" ||
+    message.includes("loop") ||
+    message.includes("popup") ||
+    message.includes("cantonloop");
+
+  if (!looksLikeLoop && !isLoopPopupBlockedError(error)) {
+    return null;
+  }
+
+  if (isLoopPopupBlockedError(error) || message.includes("block")) {
+    return LOOP_POPUP_BLOCKED_HINT;
+  }
+  if (code === "POPUP_CLOSED" || name === "PopupClosedError" || message.includes("popup")) {
+    return "Loop approved or closed before WarpX received confirmation. Keep this tab open, click Try again, or finish from Orders.";
+  }
+  if (
+    message.includes("reject") ||
+    message.includes("declin") ||
+    name === "RejectRequestError"
+  ) {
+    return "Signature was declined in Loop wallet. Please approve it to continue.";
+  }
+  if (
+    message.includes("not connected") ||
+    message.includes("cannot reconnect") ||
+    message.includes("failed to reconnect")
+  ) {
+    return "Loop wallet connection expired. Reconnect Loop wallet, then sign again.";
+  }
+  if (message.includes("timeout")) {
+    return "Loop wallet did not return the signature in time. Open the Loop wallet tab and try again.";
+  }
+  return "Loop wallet did not complete the signature. Open Loop wallet and try again.";
+}
+
 // EIP-1193 rejection code + the message allow-list CoW matches on. We
 // deliberately do NOT treat -32000 as a rejection (CoW's note: it would swallow
 // real node errors).
@@ -231,6 +305,8 @@ export function isUserRejection(e: unknown): boolean {
 export function getSwapErrorMessage(e: unknown): string {
   if (isTransientEvmFinalityError(e)) return "";
   if (isLoopPopupBlockedError(e)) return LOOP_POPUP_BLOCKED_HINT;
+  const loopMsg = getLoopSignErrorMessage(e);
+  if (loopMsg) return loopMsg;
   if (isUserRejection(e)) return USER_REJECTED_MESSAGE;
   if (e instanceof ApiError) {
     const m = e.message?.trim();

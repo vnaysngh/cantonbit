@@ -6,6 +6,27 @@ import type { CantonSwapMvpAssetId } from "./canton-swap-types";
 
 const STORAGE_KEY = "oranjswap.pendingLoopCommit";
 
+type PendingStorageLike = {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+};
+
+let pendingStorageOverride: PendingStorageLike | null = null;
+
+/** @internal test hook */
+export function __setPendingLoopCommitStorageForTests(
+  store: PendingStorageLike | null
+): void {
+  pendingStorageOverride = store;
+}
+
+function pendingStorage(): PendingStorageLike | null {
+  if (pendingStorageOverride) return pendingStorageOverride;
+  if (typeof sessionStorage === "undefined") return null;
+  return sessionStorage;
+}
+
 export type PendingC2cLoopCommit = {
   flow: "c2c";
   orderId: string;
@@ -54,9 +75,10 @@ export type PendingLoopCommit =
   | PendingForwardHtlcCommit;
 
 function readRaw(): PendingLoopCommit | null {
-  if (typeof sessionStorage === "undefined") return null;
+  const storage = pendingStorage();
+  if (!storage) return null;
   try {
-    const raw = sessionStorage.getItem(STORAGE_KEY);
+    const raw = storage.getItem(STORAGE_KEY);
     if (!raw) return null;
     return JSON.parse(raw) as PendingLoopCommit;
   } catch {
@@ -65,12 +87,13 @@ function readRaw(): PendingLoopCommit | null {
 }
 
 function writeRaw(next: PendingLoopCommit | null): void {
-  if (typeof sessionStorage === "undefined") return;
+  const storage = pendingStorage();
+  if (!storage) return;
   if (!next) {
-    sessionStorage.removeItem(STORAGE_KEY);
+    storage.removeItem(STORAGE_KEY);
     return;
   }
-  sessionStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  storage.setItem(STORAGE_KEY, JSON.stringify(next));
 }
 
 export function readPendingLoopCommit(): PendingLoopCommit | null {
@@ -99,6 +122,26 @@ export function patchPendingLoopCommit(
 
 export function clearPendingLoopCommit(): void {
   writeRaw(null);
+}
+
+/** HTLC secret still in sessionStorage when lock finished before vault persist. */
+export function recallPendingHtlcSecret(orderId: string): string | null {
+  const pending = readPendingLoopCommit();
+  if (!pending) return null;
+  const id = orderId.trim().toLowerCase();
+  if (
+    (pending.flow === "reverse-htlc" || pending.flow === "forward-htlc") &&
+    pending.hashLock.trim().toLowerCase() === id &&
+    typeof pending.secret === "string" &&
+    pending.secret.length > 0
+  ) {
+    return pending.secret;
+  }
+  return null;
+}
+
+export function hasPendingHtlcSecret(orderId: string): boolean {
+  return recallPendingHtlcSecret(orderId) !== null;
 }
 
 export function pendingC2cMatchesQuote(

@@ -34,8 +34,15 @@ import {
   forgetSecret,
   hasStoredSecret,
   recallSecret,
+  rememberSecret,
   vaultMetaFromOrder
 } from "@/lib/secret-vault";
+import {
+  clearPendingLoopCommit,
+  hasPendingHtlcSecret,
+  readPendingLoopCommit,
+  recallPendingHtlcSecret
+} from "@/lib/swap-pending-loop-commit";
 import { isReverseEvmCounterLockReady } from "@/lib/htlc-evm-counter-lock";
 import {
   forwardLoopHtlcSteps,
@@ -359,18 +366,32 @@ export default function SwapOrderStatusPage() {
 
   const recoverSecret = useCallback(
     async (order: SwapOrder): Promise<string | null> => {
-      return recallSecret(order.id, {
-        ...(await vaultContext()),
-        orderMeta:
-          vaultMetaFromOrder({
-            direction: order.direction,
-            counterMode: order.counterMode,
-            userCantonParty: order.userCantonParty,
-            userEvmAddress: order.userEvmAddress,
-            userTimelock: order.userTimelock,
-            solverTimelock: order.solverTimelock
-          }) ?? undefined
-      });
+      const ctx = await vaultContext();
+      const orderMeta =
+        vaultMetaFromOrder({
+          direction: order.direction,
+          counterMode: order.counterMode,
+          userCantonParty: order.userCantonParty,
+          userEvmAddress: order.userEvmAddress,
+          userTimelock: order.userTimelock,
+          solverTimelock: order.solverTimelock
+        }) ?? undefined;
+
+      let secret = await recallSecret(order.id, { ...ctx, orderMeta });
+      if (secret) return secret;
+
+      const pendingSecret = recallPendingHtlcSecret(order.id);
+      if (!pendingSecret) return null;
+
+      if (orderMeta) {
+        await rememberSecret(order.id, pendingSecret, orderMeta, {
+          ...ctx,
+          orderMeta
+        });
+        secret = await recallSecret(order.id, { ...ctx, orderMeta });
+        if (secret) return secret;
+      }
+      return pendingSecret;
     },
     [vaultContext]
   );
@@ -394,7 +415,7 @@ export default function SwapOrderStatusPage() {
         throw new Error(
           loopAcceptPending
             ? "This swap's revealed preimage is not visible yet. Refresh Orders and try accepting again."
-            : hasStoredSecret(order.id)
+            : hasStoredSecret(order.id) || hasPendingHtlcSecret(order.id)
             ? "Could not unlock the saved secret. Connect the same wallet/account and try again."
             : "This swap's secret is not available on this device."
         );

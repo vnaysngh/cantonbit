@@ -48,6 +48,7 @@ import {
   getQuote,
   submitOrder,
   getSwapErrorMessage,
+  needsHtlcLoopLockConfirm,
   isUserRejection,
   ApiError,
   type QuoteResponse
@@ -100,6 +101,7 @@ import {
   pendingForwardMatchesQuote,
   pendingReverseMatchesQuote,
   readPendingLoopCommit,
+  recallPendingHtlcSecret,
   writePendingLoopCommit
 } from "@/lib/swap-pending-loop-commit";
 import { logNetworkFeeInBrowser } from "@/lib/network-fee-client-log";
@@ -1843,7 +1845,52 @@ export default function SwapPage() {
         startTracking(id);
       } catch (e) {
         if (isLoopPopupBlockedError(e)) setLoopPopupBlocked(true);
-        retry(getSwapErrorMessage(e) || "Could not submit swap.");
+        if (counterMode === "loop") {
+          try {
+            const { order } = await htlcApi.getOrder(id);
+            if (order.status === "main_locked") {
+              await persistSwapSecret(id, secret, {
+                direction: "canton-to-evm",
+                counterMode,
+                userCantonParty: destinationParty,
+                userEvmAddress: evm.account,
+                userTimelock,
+                solverTimelock
+              });
+              clearPendingLoopCommit();
+              startTracking(id);
+              return;
+            }
+            if (needsHtlcLoopLockConfirm(order)) {
+              await htlcApi.confirmLockLoop(id);
+              await persistSwapSecret(id, secret, {
+                direction: "canton-to-evm",
+                counterMode,
+                userCantonParty: destinationParty,
+                userEvmAddress: evm.account,
+                userTimelock,
+                solverTimelock
+              });
+              clearPendingLoopCommit();
+              startTracking(id);
+              return;
+            }
+          } catch {
+            /* fall through to user-facing error */
+          }
+        }
+        retry(
+          (() => {
+            const msg = getSwapErrorMessage(e);
+            if (
+              counterMode === "loop" &&
+              msg === "You declined the request in your wallet."
+            ) {
+              return "Loop may have approved your CBTC lock, but WarpX did not finish linking it. Keep this tab open and click Try again, or finish from Orders.";
+            }
+            return msg || "Could not submit swap.";
+          })()
+        );
       }
     },
     [
@@ -2218,10 +2265,19 @@ export default function SwapPage() {
             userTimelock: o?.userTimelock,
             solverTimelock: o?.solverTimelock
           }) ?? undefined;
-        const secret = await recallSecret(swapId, {
+        let secret = await recallSecret(swapId, {
           ...(await vaultRecallContext()),
           orderMeta
         });
+        if (!secret) {
+          secret = recallPendingHtlcSecret(swapId);
+          if (secret && orderMeta) {
+            await rememberSecret(swapId, secret, orderMeta, {
+              ...(await vaultRecallContext()),
+              orderMeta
+            });
+          }
+        }
         if (!secret) {
           if (direction === "canton-to-evm") {
             setStage({
