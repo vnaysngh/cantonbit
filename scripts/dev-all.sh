@@ -19,8 +19,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOLVER="$ROOT/swap-solver"
 NETWORK="${NETWORK:-devnet}"
 
-# Web stack for chosen network + legacy swap-solver/.env + optional overrides.
-ENV_ARGS=(--env-file="../.env.${NETWORK}" --env-file=.env --env-file=../.env.local)
+# Web stack for chosen network + legacy swap-solver/.env (see docs/ENV.md).
+ENV_ARGS=(--env-file="../.env.${NETWORK}" --env-file=.env)
 
 pids=()
 cleanup() {

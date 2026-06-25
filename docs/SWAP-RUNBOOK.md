@@ -113,7 +113,7 @@ cp swap-solver/.env.htlc-devnet.example swap-solver/.env.htlc-devnet
 cp swap-solver/.env.htlc-mainnet.example swap-solver/.env.htlc-mainnet
 ```
 
-Fill secrets (see §7). **Do not** put `NEXT_PUBLIC_NETWORK`, `HTLC_DAEMON_SECRET`, or `CRON_SECRET` in `.env.local` unless you know why — duplicate keys cause **401 on daemon routes**. Details: [ENV.md](ENV.md).
+Fill secrets (see §7). Stack config lives in `.env.devnet` or `.env.mainnet` only — not `.env.local`. Details: [ENV.md](ENV.md).
 
 ### Devnet-only: C2C settlement vault
 
@@ -235,7 +235,7 @@ Generate a long random `HTLC_DAEMON_SECRET` and use the **same value** in the ma
 
 ### C2C daemon — uses web env only
 
-Loads `../.env.devnet` or `../.env.mainnet` + optional `../.env.local`.
+Loads `../.env.devnet` or `../.env.mainnet` plus `swap-solver/.env.htlc-*` for HTLC.
 
 | Variable | Purpose |
 |----------|---------|
@@ -280,7 +280,7 @@ Full matrix: [MAINNET-DEPLOY.md](MAINNET-DEPLOY.md).
 
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
-| Daemon 401 Unauthorized | `HTLC_DAEMON_SECRET` mismatch or stale `.env.local` | Align secret web ↔ daemon; remove duplicate from `.env.local` |
+| Daemon 401 Unauthorized | `HTLC_DAEMON_SECRET` mismatch or stale `.env.local` | Align secret in `.env.devnet`/`.env.mainnet` ↔ daemon; delete or empty `.env.local` |
 | C2C "settlement party not configured" | Missing `CANTON_SWAP_SETTLEMENT_PARTY` | Run `provision-settlement:*`, fund vault |
 | Loop C2C stuck at `user_locked` | C2C daemon not running | Start `solver:canton-swap` |
 | HTLC stuck after EVM lock | HTLC daemon not running / no `SOLVER_EVM_PK` | Start `solver:htlc`, check solver CBTC float + EVM ETH |

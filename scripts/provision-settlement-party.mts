@@ -154,7 +154,7 @@ async function main(): Promise<void> {
   console.log(`  CanActAs: granted for m2m ledger user`);
   console.log(`  CC TransferPreapproval: ${cc ? "YES (unexpected)" : "NO"}`);
   console.log(`  CBTC transferKind preview (dummy sender→receiver): ${cbtcKind}`);
-  console.log("\nAdd to .env.local:");
+  console.log(`\nAdd to .env.${NETWORK.name}:`);
   console.log(`  CANTON_SWAP_SETTLEMENT_PARTY=${party}`);
   if (cbtcKind === "direct") {
     console.warn(

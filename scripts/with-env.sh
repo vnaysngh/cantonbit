@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Load a network stack (.env.devnet or .env.mainnet), then optional .env.local
-# values, and run a command. Network stack values normally win on duplicate keys;
-# NETWORK_FEE_* and NEXT_PUBLIC_NETWORK_FEE_ENABLED are intentionally overridden
-# from .env.local for quick local fee toggles.
+# Load one network stack (.env.devnet or .env.mainnet) and run a command.
+#
+# Devnet → .env.devnet   |   Mainnet → .env.mainnet
+# Do not duplicate stack config in .env.local (Next.js loads it automatically
+# and stale keys there cause 401s and wrong-network bugs). See docs/ENV.md.
 #
 # Usage (from repo root):
 #   ./scripts/with-env.sh devnet next dev
@@ -32,45 +33,31 @@ if [[ ! -f "$ENV_FILE" ]]; then
   exit 1
 fi
 
-# Next.js Turbopack workers load .env.development.local with higher priority than
-# .env.local. Mirror the selected stack there, but let local network-fee toggles
-# override it so flipping NETWORK_FEE_* in .env.local cannot be masked by a stale
-# generated file.
-DEV_LOCAL="$ROOT/.env.development.local"
-cp "$ENV_FILE" "$DEV_LOCAL"
-if [[ -f "$ROOT/.env.local" ]]; then
-  TMP_DEV_LOCAL="$(mktemp)"
-  grep -Ev '^(NETWORK_FEE_|NEXT_PUBLIC_NETWORK_FEE_ENABLED=)' "$DEV_LOCAL" > "$TMP_DEV_LOCAL" || true
-  grep -E '^(NETWORK_FEE_|NEXT_PUBLIC_NETWORK_FEE_ENABLED=)' "$ROOT/.env.local" >> "$TMP_DEV_LOCAL" || true
-  mv "$TMP_DEV_LOCAL" "$DEV_LOCAL"
+# Next.js Turbopack workers prefer .env.development.local over .env.local.
+# Mirror the selected stack so dev:* always matches .env.devnet / .env.mainnet.
+cp "$ENV_FILE" "$ROOT/.env.development.local"
+
+# Warn when .env.local duplicates stack keys (common source of daemon 401s).
+LOCAL="$ROOT/.env.local"
+if [[ -f "$LOCAL" ]]; then
+  CONFLICTS="$(
+    grep -Ev '^\s*(#|$)' "$LOCAL" | cut -d= -f1 | while read -r key; do
+      [[ -n "$key" ]] || continue
+      grep -q "^${key}=" "$ENV_FILE" && echo "  $key"
+    done
+  )" || true
+  if [[ -n "$CONFLICTS" ]]; then
+    echo "[with-env] WARNING: .env.local duplicates keys in $ENV_FILE:" >&2
+    echo "$CONFLICTS" >&2
+    echo "[with-env] Move those vars into $ENV_FILE only — see docs/ENV.md" >&2
+  fi
 fi
 
-# Also export those same local fee keys into the parent process. dotenv-cli does
-# not reliably give later -e files precedence for already-defined keys, while
-# process env values are respected. Keep this targeted to fee toggles so network
-# stack secrets still come from the selected .env.<network> file by default.
-if [[ -f "$ROOT/.env.local" ]]; then
-  while IFS='=' read -r KEY VALUE; do
-    [[ -n "$KEY" ]] || continue
-    VALUE="${VALUE%%#*}"
-    VALUE="${VALUE%"${VALUE##*[![:space:]]}"}"
-    VALUE="${VALUE#"${VALUE%%[![:space:]]*}"}"
-    export "$KEY=$VALUE"
-  done < <(grep -E '^(NETWORK_FEE_|NEXT_PUBLIC_NETWORK_FEE_ENABLED=)' "$ROOT/.env.local" || true)
-fi
-
-# dotenv-cli: first -e file wins on duplicate keys; later files only fill gaps.
-# Use repo-local binary — bare `dotenv` on PATH may be Python dotenv-cli (different -e semantics).
 DOTENV="$ROOT/node_modules/.bin/dotenv"
 if [[ ! -x "$DOTENV" ]]; then
   echo "Missing $DOTENV — run npm install" >&2
   exit 1
 fi
 
-ARGS=(-e "$ENV_FILE")
-if [[ -f "$ROOT/.env.local" ]]; then
-  ARGS+=(-e "$ROOT/.env.local")
-fi
-
 cd "$ROOT"
-exec "$DOTENV" "${ARGS[@]}" -- "$@"
+exec "$DOTENV" -e "$ENV_FILE" -- "$@"

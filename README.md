@@ -388,8 +388,8 @@ is misconfigured, so users never sign a hidden fee.
 `1000` = +10%, `1500` = +15%. Inline comments in env files are supported.
 
 In local dev, restart `npm run dev:devnet` / `npm run dev:mainnet` after changing
-fee flags. The dev wrapper regenerates `.env.development.local`; stale values in
-that file can otherwise override `.env.local` in Next/Turbopack workers.
+fee flags in `.env.devnet` or `.env.mainnet`. The dev wrapper regenerates
+`.env.development.local` from the selected stack file on each start.
 
 For Loop flows, the separate Oranj-side CC fee prepayment was removed. Loop wallet
 traffic cost is handled by Loop signing/traffic mechanics, and platform costs are
@@ -584,9 +584,10 @@ DevNet references:
 
 ## 10. Running locally
 
-Environment file layout is documented in [`docs/ENV.md`](./docs/ENV.md). Network
-values belong in `.env.devnet` or `.env.mainnet`; `.env.local` should be overrides
-only.
+Environment file layout is documented in [`docs/ENV.md`](./docs/ENV.md).
+
+- **Devnet:** `.env.devnet` only (not `.env.local`)
+- **Mainnet:** `.env.mainnet` only
 
 First-time setup:
 
