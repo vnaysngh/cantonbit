@@ -48,8 +48,6 @@ import {
 } from "@/lib/secret-vault";
 import { listLoopCbtcHoldingCids } from "@/lib/loop-holdings";
 import { getSwapErrorMessage } from "@/lib/swap-api";
-import { preflightLoopPopup } from "@/lib/loop-popup";
-import { LOOP_POPUP_BLOCKED_HINT } from "@/lib/swap-wait-copy";
 import { SWAP_CHAIN, HTLC_ESCROW_ADDRESS } from "@/lib/swap-evm";
 import { cn } from "@/lib/utils";
 import {
@@ -618,10 +616,6 @@ function OrdersPageInner() {
         setError("Connect your Loop wallet to retry the CBTC lock.");
         return;
       }
-      if (!preflightLoopPopup().ok) {
-        setError(LOOP_POPUP_BLOCKED_HINT);
-        return;
-      }
       setBusy(o.id);
       setError(null);
       try {
@@ -736,10 +730,6 @@ function OrdersPageInner() {
         setError("Connect Loop wallet to accept incoming tokens.");
         return;
       }
-      if (!preflightLoopPopup().ok) {
-        setError(LOOP_POPUP_BLOCKED_HINT);
-        return;
-      }
       setBusy(o.id);
       setError(null);
       try {
@@ -776,10 +766,6 @@ function OrdersPageInner() {
       } | null;
       if (!loop) {
         setError("Connect your Loop wallet to accept your CBTC.");
-        return;
-      }
-      if (!preflightLoopPopup().ok) {
-        setError(LOOP_POPUP_BLOCKED_HINT);
         return;
       }
       setBusy(o.id);

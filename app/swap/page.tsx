@@ -127,8 +127,8 @@ import {
 } from "@/lib/swap-wait-copy";
 import {
   isPopupBlocked,
-  openLoopWalletTab,
-  preflightLoopPopup
+  isLoopPopupBlockedError,
+  openLoopWalletTab
 } from "@/lib/loop-popup";
 import {
   timelocksFromExpiration,
@@ -764,15 +764,6 @@ export default function SwapPage() {
     return true;
   }, []);
 
-  const quoteNeedsLoopSign = useCallback(
-    (quote: QuoteResponse) =>
-      !isParticipantManaged &&
-      !!wallet.provider &&
-      (quote.direction === "canton-to-canton" ||
-        quote.direction === "canton-to-evm"),
-    [isParticipantManaged, wallet.provider]
-  );
-
   // --- ENABLE-AUTO-ACCEPT popup. Shown when Review finds preapproval OFF. The
   //     CTA first sends the user to Loop settings; on return it flips to a
   //     "confirm" CTA that re-checks the status. ---
@@ -829,11 +820,6 @@ export default function SwapPage() {
   const handleSign = useCallback(() => {
     if (!wallet.provider) return;
     setSignError(null);
-    if (!preflightLoopPopup().ok) {
-      setLoopPopupBlocked(true);
-      setSignError(LOOP_POPUP_BLOCKED_HINT);
-      return;
-    }
     setLoopPopupBlocked(false);
     setSigning(true);
     void (async () => {
@@ -850,6 +836,7 @@ export default function SwapPage() {
             ? e.message
             : "Something went wrong while signing. Please try again."
         );
+        if (isLoopPopupBlockedError(e)) setLoopPopupBlocked(true);
       } finally {
         setSigning(false);
       }
@@ -1395,7 +1382,9 @@ export default function SwapPage() {
         clearPendingLoopCommit();
         startTracking(orderId);
       } catch (e) {
-        retry(`Could not submit swap: ${getSwapErrorMessage(e)}`);
+        if (isLoopPopupBlockedError(e)) setLoopPopupBlocked(true);
+        const msg = getSwapErrorMessage(e);
+        retry(msg || "Could not submit swap.");
       }
     },
     [
@@ -1873,7 +1862,8 @@ export default function SwapPage() {
         clearPendingLoopCommit();
         startTracking(id);
       } catch (e) {
-        retry(getSwapErrorMessage(e));
+        if (isLoopPopupBlockedError(e)) setLoopPopupBlocked(true);
+        retry(getSwapErrorMessage(e) || "Could not submit swap.");
       }
     },
     [
@@ -3487,10 +3477,6 @@ export default function SwapPage() {
             if (stage.kind !== "quoted") return;
             if (quoteIsExpired(stage.quote)) {
               void handleQuote();
-              return;
-            }
-            if (quoteNeedsLoopSign(stage.quote) && !preflightLoopPopup().ok) {
-              setLoopPopupBlocked(true);
               return;
             }
             setLoopPopupBlocked(false);

@@ -1,9 +1,9 @@
 import { loopWebBase } from "@/lib/constants";
 
-/** Open Loop in a new tab. Must run synchronously inside a user click handler. */
+/** Open Loop in a new tab (manual fallback when the user clicks "Open Loop wallet"). */
 export function openLoopWalletTab(): Window | null {
   if (typeof window === "undefined") return null;
-  // Do not pass noopener — browsers return null on success, which breaks detection.
+  // Do not pass noopener — Chrome returns null on success, which breaks block detection.
   const tab = window.open(loopWebBase(), "_blank");
   if (tab) {
     try {
@@ -15,6 +15,7 @@ export function openLoopWalletTab(): Window | null {
   return tab;
 }
 
+/** True when window.open returned null or the tab was immediately closed (blocked). */
 export function isPopupBlocked(win: Window | null): boolean {
   if (!win) return true;
   try {
@@ -24,15 +25,7 @@ export function isPopupBlocked(win: Window | null): boolean {
   }
 }
 
-/** Pre-open Loop before async prep so the browser keeps the user-gesture chain. */
-export function preflightLoopPopup():
-  | { ok: true; tab: Window | null }
-  | { ok: false } {
-  const tab = openLoopWalletTab();
-  if (isPopupBlocked(tab)) return { ok: false };
-  return { ok: true, tab };
-}
-
+/** True when the Loop SDK failed because the browser blocked its popup. */
 export function isLoopPopupBlockedError(error: unknown): boolean {
   const maybe = error as { name?: unknown; message?: unknown; code?: unknown };
   const name = typeof maybe?.name === "string" ? maybe.name : "";
