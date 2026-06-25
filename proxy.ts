@@ -72,11 +72,10 @@ function buildContentSecurityPolicy(nonce: string): string {
     "frame-ancestors 'none'"
   ];
   if (production) {
-    directives.push(
-      "trusted-types nextjs nextjs#bundler",
-      "require-trusted-types-for 'script'",
-      "upgrade-insecure-requests"
-    );
+    // Next.js may use Trusted Types internally; do NOT set
+    // require-trusted-types-for 'script' — @fivenorth/loop-sdk injects scripts
+    // via script.src and fails with "TrustedScriptURL assignment" in production.
+    directives.push("trusted-types nextjs nextjs#bundler", "upgrade-insecure-requests");
   }
   return directives.join("; ");
 }
