@@ -666,13 +666,6 @@ export class CantonSwapService {
       strictOrderBoundMemo: true
     });
     assertOfferOnlyUserLegEvidence(evidence);
-    if (
-      params.offerCidHint &&
-      evidence.offerCid &&
-      evidence.offerCid !== params.offerCidHint
-    ) {
-      throw new Error("Loop transfer offer does not match the signed transaction");
-    }
     const used = await this.store.usedUserLegOfferCids();
     if (evidence.offerCid && used.has(evidence.offerCid)) {
       throw new Error("user leg offer already reserved by another order");

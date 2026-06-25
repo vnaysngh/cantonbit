@@ -92,7 +92,6 @@ import {
   listLoopCbtcHoldingCids,
   listLoopInstrumentHoldingCids
 } from "@/lib/loop-holdings";
-import { findLoopOutgoingTransferOffer } from "@/lib/loop-transfer-offers";
 import { cantonSwapApi } from "@/lib/canton-swap-client";
 import {
   clearPendingLoopCommit,
@@ -1313,8 +1312,7 @@ export default function SwapPage() {
             ...c2cQuoteKey,
             orderId: pendingC2c.orderId,
             createdAt: pendingC2c.createdAt,
-            submitUpdateId: pendingC2c.submitUpdateId,
-            offerCidHint: pendingC2c.offerCid
+            submitUpdateId: pendingC2c.submitUpdateId
           });
           clearPendingLoopCommit();
           startTracking(pendingC2c.orderId);
@@ -1351,33 +1349,15 @@ export default function SwapPage() {
           retry("Loop did not return a ledger update id — try again.");
           return;
         }
-        let offerCid = extractLoopSubmitOfferCid(submitResult);
-        if (!offerCid) {
-          const asset = getSwapAsset(fromAsset);
-          offerCid =
-            (await findLoopOutgoingTransferOffer(
-              provider,
-              {
-                senderParty: loopParty,
-                receiverParty: SOLVER_CANTON ?? destinationParty,
-                amount: inAmount,
-                instrumentId: asset.instrumentId,
-                amountDecimals: asset.decimals
-              },
-              { maxAttempts: 6, pollMs: 1000 }
-            )) ?? undefined;
-        }
         patchPendingLoopCommit({
           flow: "c2c",
-          submitUpdateId,
-          offerCid
+          submitUpdateId
         });
         await cantonSwapApi.commitUserLeg({
           ...c2cQuoteKey,
           orderId,
           createdAt: legCreatedAt,
-          submitUpdateId,
-          offerCidHint: offerCid
+          submitUpdateId
         });
         clearPendingLoopCommit();
         startTracking(orderId);

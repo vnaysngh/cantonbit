@@ -41,13 +41,6 @@ export async function verifyHtlcReverseLoopCustodySubmit(
       "Loop CBTC transfer is not visible with this order memo — start a new swap"
     );
   }
-  if (
-    params.offerCidHint &&
-    evidence.offerCid &&
-    evidence.offerCid !== params.offerCidHint
-  ) {
-    throw new Error("Loop transfer offer does not match the signed transaction");
-  }
   assertOfferOnlyUserLegEvidence(evidence);
   return evidence;
 }
