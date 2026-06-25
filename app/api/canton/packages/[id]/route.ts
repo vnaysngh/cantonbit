@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getLedgerJwt } from "@/lib/auth";
+import { requireDaemon } from "@/lib/htlc-auth";
 import { NETWORK } from "@/lib/constants";
 
 export const dynamic = "force-dynamic";
@@ -11,19 +12,25 @@ export const dynamic = "force-dynamic";
  * Debug helper: fetches the package reference (name + version) for a single
  * package id, so we can confirm the participant's package list endpoint
  * actually returns sensible metadata.
+ *
+ * AUTH: daemon-only. This exercises the privileged validator ledger JWT, so it
+ * must never be reachable unauthenticated.
  */
 export async function GET(
-  _request: Request,
+  request: Request,
   ctx: { params: Promise<{ id: string }> },
 ) {
+  const auth = requireDaemon(request);
+  if (auth.error) return auth.error;
   const { id } = await ctx.params;
+  const segment = encodeURIComponent(id);
   try {
     const jwt = await getLedgerJwt();
     // Try a few endpoints since Canton versions vary.
     const candidates = [
-      `${NETWORK.ledgerHost}/v2/packages/${id}/reference`,
-      `${NETWORK.ledgerHost}/v2/packages/${id}/status`,
-      `${NETWORK.ledgerHost}/v2/packages/${id}`,
+      `${NETWORK.ledgerHost}/v2/packages/${segment}/reference`,
+      `${NETWORK.ledgerHost}/v2/packages/${segment}/status`,
+      `${NETWORK.ledgerHost}/v2/packages/${segment}`,
     ];
     const probes: Array<{ url: string; status: number; body: string }> = [];
     for (const url of candidates) {

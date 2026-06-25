@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { keccak_256 } from "@noble/hashes/sha3";
 
-import { generateSecret, secretToPreimage } from "./htlc-client";
+import { generateSecret, secretToPreimage, verifySecret } from "./htlc-client";
 
 // EVM HTLCEscrow + Daml CbtcHtlcTest both use this 32-byte preimage and hashLock.
 const KNOWN_PREIMAGE_RAW = "the-cross-chain-secret-32bytes!!";
@@ -27,6 +27,19 @@ test("generateSecret: hashLock == keccak256(secret bytes)", () => {
   const { secret, hashLock } = generateSecret(() => fixed);
   assert.equal(secret, bytesToHex(fixed));
   assert.equal(hashLock.toLowerCase(), KNOWN_H);
+});
+
+test("verifySecret accepts matching secret and rejects wrong secret", () => {
+  const fixed = new TextEncoder().encode(KNOWN_PREIMAGE_RAW);
+  const { secret, hashLock } = generateSecret(() => fixed);
+  assert.equal(verifySecret(secret, hashLock), true);
+  assert.equal(
+    verifySecret(
+      "0x" + "11".repeat(32),
+      hashLock
+    ),
+    false
+  );
 });
 
 test("secretToPreimage: lowercase hex without 0x prefix", () => {

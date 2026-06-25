@@ -43,14 +43,17 @@ import {
   forgetSecret,
   hasStoredSecret,
   purgeExpiredSecrets,
-  recallSecret,
-  rememberSecret,
   vaultMetaFromOrder
 } from "@/lib/secret-vault";
 import {
+  ensureHtlcSecretVaulted,
+  resolveHtlcClaimSecret
+} from "@/lib/htlc-secret-resolver";
+import {
+  canReconnectReverseLoopCommit,
   clearPendingLoopCommit,
-  hasPendingHtlcSecret,
-  readPendingLoopCommit,
+  hasPendingLoopIntent,
+  readPendingLoopCommitByKey,
   recallPendingHtlcSecret
 } from "@/lib/swap-pending-loop-commit";
 import { listLoopCbtcHoldingCids } from "@/lib/loop-holdings";
@@ -67,6 +70,11 @@ import {
 // Shared resolver — fails closed in production if NEXT_PUBLIC_HTLC_ESCROW is unset.
 const HTLC_ESCROW = HTLC_ESCROW_ADDRESS;
 const EVM_CHAIN = SWAP_CHAIN.name;
+const SOLVER_EVM =
+  process.env.NEXT_PUBLIC_SOLVER_EVM ??
+  "0x0B95ec21579aee6Ef7b712976bD86689D68b5A08";
+const SOLVER_CANTON =
+  process.env.NEXT_PUBLIC_CANTON_SWAP_SETTLEMENT_PARTY ?? "";
 
 interface HistoryOrder {
   id: string;
@@ -613,8 +621,19 @@ function OrdersPageInner() {
         solverTimelock: o.solverTimelock
       });
       if (!orderMeta) return;
-      const ctx = await vaultContext();
-      await rememberSecret(o.id, pendingSecret, orderMeta, { ...ctx, orderMeta });
+      await ensureHtlcSecretVaulted(
+        o.id,
+        pendingSecret,
+        {
+          direction: orderMeta.direction,
+          counterMode: orderMeta.counterMode,
+          userCantonParty: orderMeta.userCantonParty,
+          userEvmAddress: orderMeta.userEvmAddress,
+          userTimelock: o.userTimelock!,
+          solverTimelock: o.solverTimelock
+        },
+        await vaultContext()
+      );
     },
     [vaultContext]
   );
@@ -625,6 +644,7 @@ function OrdersPageInner() {
     try {
       await htlcApi.confirmLockLoop(o.id);
       await persistPendingHtlcSecret(o);
+      clearPendingLoopCommit(o.id);
       setReload((n) => n + 1);
       setOpenId(null);
     } catch (e) {
@@ -633,6 +653,53 @@ function OrdersPageInner() {
       setBusy(null);
     }
   }, [persistPendingHtlcSecret]);
+
+  const doReconnectLoopCommit = useCallback(async (o: HistoryOrder) => {
+    const pending = readPendingLoopCommitByKey(o.id);
+    if (
+      !pending ||
+      pending.flow !== "reverse-htlc" ||
+      !pending.submitUpdateId ||
+      !pending.createdAt
+    ) {
+      setError(
+        "No signed Loop transaction was found for this swap on this device."
+      );
+      return;
+    }
+    if (!o.userEvmAddress || !o.userCantonParty || !o.userTimelock || !o.solverTimelock) {
+      setError("This swap is missing order details — refresh and try again.");
+      return;
+    }
+    setBusy(o.id);
+    setError(null);
+    try {
+      await htlcApi.commitReverseLoop({
+        id: o.id,
+        direction: "canton-to-evm",
+        hashLock: o.id,
+        userEvmAddress: o.userEvmAddress,
+        solverEvmAddress: SOLVER_EVM,
+        wbtcAmount: o.wbtcAmount,
+        userTimelock: o.userTimelock,
+        userCantonParty: o.userCantonParty,
+        solverCantonParty: o.solverCantonParty ?? SOLVER_CANTON,
+        cbtcAmount: o.cbtcAmount,
+        solverTimelock: o.solverTimelock,
+        counterMode: "loop",
+        createdAt: pending.createdAt,
+        submitUpdateId: pending.submitUpdateId,
+        offerCidHint: pending.offerCidHint
+      });
+      clearPendingLoopCommit(o.id);
+      setReload((n) => n + 1);
+      setOpenId(null);
+    } catch (e) {
+      setError(getSwapErrorMessage(e));
+    } finally {
+      setBusy(null);
+    }
+  }, []);
 
   /** Re-sign the CBTC transfer in Loop when confirm finds no on-ledger offer
    *  (page refresh before submit, or a failed Loop transaction). */
@@ -688,10 +755,6 @@ function OrdersPageInner() {
   // the /swap page runs, so a swap can be completed from /orders / after a refresh.
   const resolveClaimSecret = useCallback(
     async (o: HistoryOrder, manualSecret?: string): Promise<string | null> => {
-      const trimmed = manualSecret?.trim();
-      if (trimmed) return trimmed;
-
-      const ctx = await vaultContext();
       const orderMeta =
         vaultMetaFromOrder({
           direction: o.direction as "evm-to-canton" | "canton-to-evm",
@@ -701,19 +764,11 @@ function OrdersPageInner() {
           userTimelock: o.userTimelock,
           solverTimelock: o.solverTimelock
         }) ?? undefined;
-
-      let secret = await recallSecret(o.id, { ...ctx, orderMeta });
-      if (secret) return secret;
-
-      const pendingSecret = recallPendingHtlcSecret(o.id);
-      if (!pendingSecret) return null;
-
-      if (orderMeta) {
-        await rememberSecret(o.id, pendingSecret, orderMeta, { ...ctx, orderMeta });
-        secret = await recallSecret(o.id, { ...ctx, orderMeta });
-        if (secret) return secret;
-      }
-      return pendingSecret;
+      return resolveHtlcClaimSecret(o.id, o.id, {
+        manualSecret,
+        ctx: await vaultContext(),
+        orderMeta
+      });
     },
     [vaultContext]
   );
@@ -731,8 +786,8 @@ function OrdersPageInner() {
             ? o.counterMode === "loop"
               ? "Could not unlock this swap's secret. Connect your Loop wallet and approve the unlock sign, or paste your saved secret below."
               : "Could not unlock this swap's secret. Sign in with the same account or paste your saved secret below."
-            : hasPendingHtlcSecret(o.id)
-              ? "This swap's secret is still in this browser tab but could not be read. Refresh and try again, or paste your saved secret below."
+            : hasPendingLoopIntent(o.id)
+              ? "This swap has an unfinished sign step on this device. Use Reconnect below, or paste your saved secret."
               : o.counterMode === "loop"
                 ? "This swap's secret was not saved on this device — paste the secret from when you started the swap (open the row for the field below)."
                 : "This swap's secret isn't available on this device. Sign in with the same account or paste your saved secret."
@@ -760,14 +815,7 @@ function OrdersPageInner() {
           } | null
         });
         forgetSecret(o.id);
-        const pending = readPendingLoopCommit();
-        if (
-          pending &&
-          (pending.flow === "reverse-htlc" || pending.flow === "forward-htlc") &&
-          pending.hashLock.toLowerCase() === o.id.toLowerCase()
-        ) {
-          clearPendingLoopCommit();
-        }
+        clearPendingLoopCommit(o.id);
         setOptimisticStatus((prev) => ({ ...prev, [o.id]: "counter_claimed" }));
         setReload((n) => n + 1);
         setOpenId(null);
@@ -1041,6 +1089,7 @@ function OrdersPageInner() {
             onClaim={doClaim}
             onConfirmLock={doConfirmLock}
             onRetryLoopLock={doRetryLoopLock}
+            onReconnectLoopCommit={doReconnectLoopCommit}
             onLoopAccept={doLoopAccept}
             onCantonCounterAccept={doCantonCounterAccept}
             loopConnected={!!wallet.provider}
@@ -1062,6 +1111,7 @@ function DetailDrawer({
   onClaim,
   onConfirmLock,
   onRetryLoopLock,
+  onReconnectLoopCommit,
   onLoopAccept,
   onCantonCounterAccept,
   loopConnected,
@@ -1076,6 +1126,7 @@ function DetailDrawer({
   onClaim: (o: HistoryOrder, manualSecret?: string) => void;
   onConfirmLock: (o: HistoryOrder) => void;
   onRetryLoopLock: (o: HistoryOrder) => void;
+  onReconnectLoopCommit: (o: HistoryOrder) => void;
   onLoopAccept: (o: HistoryOrder) => void;
   onCantonCounterAccept: (o: HistoryOrder) => void;
   loopConnected: boolean;
@@ -1086,10 +1137,12 @@ function DetailDrawer({
   const action = recoveryAction(o);
   const claimable = isClaimableOrder(o);
   const lockConfirm = !cantonSwap && needsLoopLockConfirm(o);
+  const loopCommitReconnect =
+    !cantonSwap && canReconnectReverseLoopCommit(o.id, o);
   const loopAccept = !cantonSwap && needsLoopAccept(o);
   const awaitingSolver = !cantonSwap && isAwaitingSolverFinalize(o);
   const cantonCounterAccept = cantonSwap && needsCantonSwapCounterAccept(o);
-  const vaultReady = hasStoredSecret(o.id) || hasPendingHtlcSecret(o.id);
+  const vaultReady = hasStoredSecret(o.id) || hasPendingLoopIntent(o.id);
   const [manualSecret, setManualSecret] = useState("");
   const cantonAmounts = cantonSwap ? cantonSwapPayReceive(o) : null;
 
@@ -1378,6 +1431,21 @@ function DetailDrawer({
                   : loopConnected
                     ? "Accept CBTC in Loop"
                     : "Connect Loop to accept CBTC"}
+              </button>
+            </div>
+          ) : loopCommitReconnect ? (
+            <div className="mt-4 space-y-2">
+              <p className="rounded-xl bg-amber-500/10 px-4 py-3 text-center text-xs text-amber-700">
+                Loop approved your CBTC lock, but linking the swap did not finish.
+                Reconnect uses the signed transaction saved on this device — no new
+                Loop sign required.
+              </p>
+              <button
+                onClick={() => onReconnectLoopCommit(o)}
+                disabled={busy}
+                className="w-full rounded-xl bg-[#b04a2a] px-4 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+              >
+                {busy ? "Reconnecting…" : "Reconnect signed transaction"}
               </button>
             </div>
           ) : lockConfirm ? (

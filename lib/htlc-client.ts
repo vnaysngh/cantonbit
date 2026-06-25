@@ -59,6 +59,15 @@ export function secretToPreimage(secret: string): string {
   return (secret.startsWith("0x") ? secret.slice(2) : secret).toLowerCase();
 }
 
+/** True when keccak256(raw secret bytes) matches the order hashLock. */
+export function verifySecret(secret: string, hashLock: string): boolean {
+  const hex = secret.startsWith("0x") ? secret.slice(2) : secret;
+  if (!/^[0-9a-fA-F]{64}$/.test(hex)) return false;
+  const raw = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) raw[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return bytesToHex(keccak_256(raw)).toLowerCase() === hashLock.toLowerCase();
+}
+
 // --- API calls ---
 async function jpost(url: string, body?: unknown) {
   const r = await fetch(url, {

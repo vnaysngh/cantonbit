@@ -509,6 +509,73 @@ model:
    for CC and CBTC, especially for Loop, while keeping the settlement vault
    preapproval-free.
 
+### PR1 — HTLC secret gate (shipped; plan P0 Item 2)
+
+**P0 Item 2 — secret before irreversible action** is the same work as PR1. It fixes
+the devnet incident where Loop showed “Transaction Approved” but claim failed with
+“Could not unlock this swap's secret”: the preimage was written to the encrypted
+vault **after** `commitReverseLoop`, so refresh/claim saw an empty vault.
+
+Ordering is now:
+
+```text
+generateSecret → ensureHtlcSecretVaulted (remember + recall verify) → wallet / EVM / server commit
+```
+
+Implementation:
+
+| Piece | Location |
+| --- | --- |
+| Pre-wallet persist + readback verify | `lib/htlc-secret-resolver.ts` → `ensureHtlcSecretVaulted` |
+| Shared claim resolver (vault → session pending → manual paste) | `resolveHtlcClaimSecret` — used by `/swap`, `/orders`, `/swap/orders/[id]` |
+| Hash verification before claim | `lib/htlc-client.ts` → `verifySecret` |
+| Forward EVM lock gate | `app/swap/page.tsx` — before `prepareForwardIntent` / `evmApproveAndLock` |
+| Reverse managed + Loop gate | same — before `commitReverseManaged` / `prepareLockIntent` / Loop submit |
+
+Loop wallets may prompt for an unlock **signMessage** once at Confirm (vault
+readback) before the Loop transaction — that is expected, not a second swap sign.
+
+### PR2 — Durable pending intents (shipped; plan P0 Item 1)
+
+**P0 Item 1 — durable Loop recovery metadata** is now in `lib/swap-pending-loop-commit.ts`:
+
+| Change | Detail |
+| --- | --- |
+| Storage | localStorage multi-intent store (`oranjswap.pendingLoopCommit.v2`), keyed by order id / hashLock |
+| No plaintext secret | HTLC secrets live only in `secret-vault`; pending holds quote terms + `submitUpdateId` |
+| Legacy migration | Old single-slot `sessionStorage` entries migrate on read; legacy secret fallback until migrated |
+| Reconnect from Orders | “Reconnect signed transaction” calls `commitReverseLoop` when pending has `submitUpdateId` |
+| Resume confirm | `/swap` recalls secret from vault when resuming a pending HTLC quote |
+
+Still deferred within PR2 scope: full `WalletActionState` UI taxonomy, new API
+`ledger_proof_pending` error codes (existing idempotent routes are retried as-is).
+
+### PR3 — Optional polish (not shipped)
+
+Manual “Save recovery secret” export, forward Loop delivery UI proof tweaks, and
+expanded devnet smoke checklist.
+
+### Other session fixes (shipped)
+
+| Fix | Location |
+| --- | --- |
+| OAuth redirect to localhost on Railway | `app/auth/callback/route.ts` uses `publicRequestOrigin(request)`; `lib/request-origin.ts` reads `x-forwarded-host` / `Host` (no `NEXT_PUBLIC_APP_URL` dependency) |
+| Unauthenticated privileged package debug routes | `app/api/canton/packages/route.ts` and `[id]/route.ts` — `requireDaemon(request)` before ledger calls |
+
+Proof-gating and status projection from the June 24 atomicity audit are documented in
+[`docs/WHOLE-APP-ATOMICITY-WIRING-AUDIT-2026-06-24.md`](./docs/WHOLE-APP-ATOMICITY-WIRING-AUDIT-2026-06-24.md).
+
+### Deferred client recovery refactor (post-PR2)
+
+PR1 and PR2 are shipped. Remaining optional work:
+
+| Item | Why deferred | Target |
+| --- | --- | --- |
+| `WalletActionState` UI taxonomy | Full state machine across swap/orders; reconnect handlers cover the main cases | `lib/swap-api.ts`, swap UI |
+| API `ledger_proof_pending` errors | Client retries idempotent routes without new error codes | HTLC API routes |
+| Manual “Save recovery secret” export | Optional advanced UI for browser-data-loss edge case | Swap review modal (**PR3**) |
+| Full multi-flow devnet smoke matrix | Manual ops checklist, not a code gate | `docs/SWAP-CRASH-RECOVERY-DRILLS.md` (**PR3**) |
+
 Do not prioritize Dutch auctions or solver competition until these controls have
 production evidence from funded smoke tests.
 
@@ -569,6 +636,7 @@ Other deployment invariants:
 | Quote engines | `lib/htlc-quote.ts`, `lib/canton-quote.ts` | Price, fee, freshness, and floor enforcement |
 | Fee engine | `lib/canton-network-fee.ts` | Managed network-fee estimate/collection/accounting |
 | Secret vault | `lib/secret-vault.ts` | Client-side HTLC preimage storage |
+| HTLC secret gate + claim resolver | `lib/htlc-secret-resolver.ts` | Pre-wallet vault persist and shared claim-time resolution |
 | UI | `app/swap/page.tsx`, `app/orders/page.tsx` | Swap, claim, history, and recovery UX |
 | Daemons | `swap-solver/src/*.mts` | HTLC and C2C background workers |
 
@@ -702,5 +770,6 @@ Detailed rollout checklist: [`docs/MAINNET-DEPLOY.md`](./docs/MAINNET-DEPLOY.md)
 | [`docs/SWAP-QUOTE-DESIGN.md`](./docs/SWAP-QUOTE-DESIGN.md) | Quote architecture and deferred Dutch-auction work |
 | [`docs/SWAP-CRASH-RECOVERY-DRILLS.md`](./docs/SWAP-CRASH-RECOVERY-DRILLS.md) | Funded crash-recovery drill checklist |
 | [`docs/HTLC-SECRET-VAULT.md`](./docs/HTLC-SECRET-VAULT.md) | Browser preimage vault threat model |
+| [`docs/WHOLE-APP-ATOMICITY-WIRING-AUDIT-2026-06-24.md`](./docs/WHOLE-APP-ATOMICITY-WIRING-AUDIT-2026-06-24.md) | Proof-gating, status projector, and daemon wiring audit |
 | [`docs/MAINNET-DEPLOY.md`](./docs/MAINNET-DEPLOY.md) | Deployment guide |
 | [`docs/canton-to-evm-design.md`](./docs/canton-to-evm-design.md) | Reverse HTLC design notes |

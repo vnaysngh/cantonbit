@@ -101,20 +101,17 @@ import {
   pendingForwardMatchesQuote,
   pendingReverseMatchesQuote,
   readPendingLoopCommit,
-  recallPendingHtlcSecret,
   writePendingLoopCommit
 } from "@/lib/swap-pending-loop-commit";
+import { ensureHtlcSecretVaulted, HTLC_VAULT_FAIL_MSG, recallHtlcConfirmSecret, resolveHtlcClaimSecret } from "@/lib/htlc-secret-resolver";
 import { logNetworkFeeInBrowser } from "@/lib/network-fee-client-log";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { htlcUserWbtcClaimTx } from "@/lib/htlc-order-logic";
 import { isReverseEvmCounterLockReady } from "@/lib/htlc-evm-counter-lock";
 import {
   forgetSecret,
-  rememberSecret,
-  recallSecret,
   readActiveHtlcSwap,
   dismissActiveHtlcSwap,
-  vaultExpiryFromTimelock,
   vaultMetaFromOrder,
   type SecretVaultMeta
 } from "@/lib/secret-vault";
@@ -371,7 +368,7 @@ export default function SwapPage() {
     sessionPartyId: sessionParty
   });
 
-  const persistSwapSecret = useCallback(
+  const ensureSwapSecret = useCallback(
     async (
       swapId: string,
       secret: string,
@@ -380,23 +377,12 @@ export default function SwapPage() {
         solverTimelock?: number;
       }
     ) => {
-      const ok = await rememberSecret(
+      await ensureHtlcSecretVaulted(
         swapId,
         secret,
-        {
-          ...meta,
-          expiresAt: vaultExpiryFromTimelock(meta.userTimelock, {
-            direction: meta.direction,
-            solverTimelock: meta.solverTimelock
-          })
-        },
+        meta,
         await vaultRecallContext()
       );
-      if (!ok) {
-        throw new Error(
-          "Could not save the swap secret on this device. Reconnect your wallet/account and try again before locking funds."
-        );
-      }
     },
     [vaultRecallContext]
   );
@@ -1316,7 +1302,7 @@ export default function SwapPage() {
             createdAt: pendingC2c.createdAt,
             submitUpdateId: pendingC2c.submitUpdateId
           });
-          clearPendingLoopCommit();
+          clearPendingLoopCommit(pendingC2c.orderId);
           startTracking(pendingC2c.orderId);
           return;
         }
@@ -1361,7 +1347,7 @@ export default function SwapPage() {
           createdAt: legCreatedAt,
           submitUpdateId
         });
-        clearPendingLoopCommit();
+        clearPendingLoopCommit(orderId);
         startTracking(orderId);
       } catch (e) {
         if (isLoopPopupBlockedError(e)) setLoopPopupBlocked(true);
@@ -1430,23 +1416,32 @@ export default function SwapPage() {
       let secret: string;
       let hashLock: string;
       let id: string;
+      const forwardVaultMeta = {
+        direction: "evm-to-canton" as const,
+        counterMode,
+        userCantonParty: quote.cantonParty,
+        userEvmAddress: evm.account,
+        userTimelock,
+        solverTimelock
+      };
       if (
         pendingForward?.flow === "forward-htlc" &&
         pendingForwardMatchesQuote(pendingForward, forwardQuoteKey)
       ) {
-        secret = pendingForward.secret;
         hashLock = pendingForward.hashLock;
         id = hashLock;
+        secret = await recallHtlcConfirmSecret(
+          id,
+          forwardVaultMeta,
+          await vaultRecallContext()
+        );
       } else {
         ({ secret, hashLock } = generateSecret());
         id = hashLock;
-        writePendingLoopCommit({
-          flow: "forward-htlc",
-          hashLock,
-          secret,
-          ...forwardQuoteKey
-        });
       }
+      const resumedForward =
+        pendingForward?.flow === "forward-htlc" &&
+        pendingForwardMatchesQuote(pendingForward, forwardQuoteKey);
       const orderInput = {
         id,
         direction: "evm-to-canton" as const,
@@ -1464,6 +1459,14 @@ export default function SwapPage() {
 
       let lockTx = "";
       try {
+        await ensureSwapSecret(id, secret, forwardVaultMeta);
+        if (!resumedForward) {
+          writePendingLoopCommit({
+            flow: "forward-htlc",
+            hashLock,
+            ...forwardQuoteKey
+          });
+        }
         setStage({ kind: "submitting", quote });
         if (
           !(
@@ -1514,15 +1517,7 @@ export default function SwapPage() {
         try {
           await evm.waitForReceipt(lockTx);
           await htlcApi.commitForward({ ...orderInput, mainLockTx: lockTx });
-          await persistSwapSecret(id, secret, {
-            direction: "evm-to-canton",
-            counterMode,
-            userCantonParty: quote.cantonParty,
-            userEvmAddress: evm.account,
-            userTimelock,
-            solverTimelock
-          });
-          clearPendingLoopCommit();
+          clearPendingLoopCommit(id);
           forgetPendingMainLock(id);
         } finally {
           if (activeMainLockRecordingRef.current === id) {
@@ -1556,6 +1551,13 @@ export default function SwapPage() {
           return;
         }
         if (reverted) forgetPendingMainLock(id);
+        if (
+          e instanceof Error &&
+          e.message === HTLC_VAULT_FAIL_MSG &&
+          !resumedForward
+        ) {
+          clearPendingLoopCommit(id);
+        }
         retry(
           isUserRejection(e)
             ? "Lock cancelled. Approve + lock your WBTC to start the swap."
@@ -1571,9 +1573,10 @@ export default function SwapPage() {
       evm,
       expirationSeconds,
       isParticipantManaged,
-      persistSwapSecret,
+      ensureSwapSecret,
       handleC2cConfirm,
-      startTracking
+      startTracking,
+      vaultRecallContext
     ]
   );
 
@@ -1702,23 +1705,32 @@ export default function SwapPage() {
       let secret: string;
       let hashLock: string;
       let id: string;
+      const reverseVaultMeta = {
+        direction: "canton-to-evm" as const,
+        counterMode,
+        userCantonParty: destinationParty,
+        userEvmAddress: evm.account,
+        userTimelock,
+        solverTimelock
+      };
       if (
         pendingReverse?.flow === "reverse-htlc" &&
         pendingReverseMatchesQuote(pendingReverse, reverseQuoteKey, wbtcAmount)
       ) {
-        secret = pendingReverse.secret;
         hashLock = pendingReverse.hashLock;
         id = hashLock;
+        secret = await recallHtlcConfirmSecret(
+          id,
+          reverseVaultMeta,
+          await vaultRecallContext()
+        );
       } else {
         ({ secret, hashLock } = generateSecret());
         id = hashLock;
-        writePendingLoopCommit({
-          flow: "reverse-htlc",
-          hashLock,
-          secret,
-          ...reverseQuoteKey
-        });
       }
+      const resumedReverse =
+        pendingReverse?.flow === "reverse-htlc" &&
+        pendingReverseMatchesQuote(pendingReverse, reverseQuoteKey, wbtcAmount);
       const orderInput = {
         id,
         direction: "canton-to-evm" as const,
@@ -1735,20 +1747,20 @@ export default function SwapPage() {
       };
 
       try {
+        await ensureSwapSecret(id, secret, reverseVaultMeta);
+        if (!resumedReverse) {
+          writePendingLoopCommit({
+            flow: "reverse-htlc",
+            hashLock,
+            ...reverseQuoteKey
+          });
+        }
         setStage({ kind: "submitting", quote });
         if (counterMode === "managed") {
           setStage({ kind: "redirecting", orderId: id });
           setAmount("");
           await htlcApi.commitReverseManaged(orderInput);
-          await persistSwapSecret(id, secret, {
-            direction: "canton-to-evm",
-            counterMode,
-            userCantonParty: destinationParty,
-            userEvmAddress: evm.account,
-            userTimelock,
-            solverTimelock
-          });
-          clearPendingLoopCommit();
+          clearPendingLoopCommit(id);
           startTracking(id);
           return;
         }
@@ -1765,15 +1777,7 @@ export default function SwapPage() {
             submitUpdateId: pendingReverse.submitUpdateId,
             offerCidHint: pendingReverse.offerCidHint
           });
-          await persistSwapSecret(id, secret, {
-            direction: "canton-to-evm",
-            counterMode,
-            userCantonParty: destinationParty,
-            userEvmAddress: evm.account,
-            userTimelock,
-            solverTimelock
-          });
-          clearPendingLoopCommit();
+          clearPendingLoopCommit(id);
           startTracking(id);
           return;
         }
@@ -1833,15 +1837,7 @@ export default function SwapPage() {
           submitUpdateId,
           offerCidHint
         });
-        await persistSwapSecret(id, secret, {
-          direction: "canton-to-evm",
-          counterMode,
-          userCantonParty: destinationParty,
-          userEvmAddress: evm.account,
-          userTimelock,
-          solverTimelock
-        });
-        clearPendingLoopCommit();
+        clearPendingLoopCommit(id);
         startTracking(id);
       } catch (e) {
         if (isLoopPopupBlockedError(e)) setLoopPopupBlocked(true);
@@ -1849,35 +1845,26 @@ export default function SwapPage() {
           try {
             const { order } = await htlcApi.getOrder(id);
             if (order.status === "main_locked") {
-              await persistSwapSecret(id, secret, {
-                direction: "canton-to-evm",
-                counterMode,
-                userCantonParty: destinationParty,
-                userEvmAddress: evm.account,
-                userTimelock,
-                solverTimelock
-              });
-              clearPendingLoopCommit();
+              clearPendingLoopCommit(id);
               startTracking(id);
               return;
             }
             if (needsHtlcLoopLockConfirm(order)) {
               await htlcApi.confirmLockLoop(id);
-              await persistSwapSecret(id, secret, {
-                direction: "canton-to-evm",
-                counterMode,
-                userCantonParty: destinationParty,
-                userEvmAddress: evm.account,
-                userTimelock,
-                solverTimelock
-              });
-              clearPendingLoopCommit();
+              clearPendingLoopCommit(id);
               startTracking(id);
               return;
             }
           } catch {
             /* fall through to user-facing error */
           }
+        }
+        if (
+          e instanceof Error &&
+          e.message === HTLC_VAULT_FAIL_MSG &&
+          !resumedReverse
+        ) {
+          clearPendingLoopCommit(id);
         }
         retry(
           (() => {
@@ -1899,8 +1886,9 @@ export default function SwapPage() {
       expirationSeconds,
       isParticipantManaged,
       wallet,
-      persistSwapSecret,
-      startTracking
+      ensureSwapSecret,
+      startTracking,
+      vaultRecallContext
     ]
   );
 
@@ -2265,19 +2253,10 @@ export default function SwapPage() {
             userTimelock: o?.userTimelock,
             solverTimelock: o?.solverTimelock
           }) ?? undefined;
-        let secret = await recallSecret(swapId, {
-          ...(await vaultRecallContext()),
+        const secret = await resolveHtlcClaimSecret(swapId, swapId, {
+          ctx: await vaultRecallContext(),
           orderMeta
         });
-        if (!secret) {
-          secret = recallPendingHtlcSecret(swapId);
-          if (secret && orderMeta) {
-            await rememberSecret(swapId, secret, orderMeta, {
-              ...(await vaultRecallContext()),
-              orderMeta
-            });
-          }
-        }
         if (!secret) {
           if (direction === "canton-to-evm") {
             setStage({

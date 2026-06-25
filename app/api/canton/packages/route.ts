@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { getLedgerJwt } from "@/lib/auth";
+import { requireDaemon } from "@/lib/htlc-auth";
 import { NETWORK } from "@/lib/constants";
 
 export const dynamic = "force-dynamic";
@@ -12,8 +13,13 @@ export const dynamic = "force-dynamic";
  * substring-matches package names so you can verify specific DARs are uploaded:
  *
  *   curl 'http://localhost:3000/api/canton/packages?filter=splice-api-token'
+ *
+ * AUTH: daemon-only. This exercises the privileged validator ledger JWT and
+ * leaks the installed-package list, so it must never be reachable unauthenticated.
  */
 export async function GET(request: Request) {
+  const auth = requireDaemon(request);
+  if (auth.error) return auth.error;
   const url = new URL(request.url);
   const filter = url.searchParams.get("filter")?.toLowerCase() ?? null;
 
