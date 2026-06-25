@@ -22,7 +22,7 @@ export function reverseLoopHtlcSteps(opts: {
   const lockLabel = opts.managed
     ? "Lock CBTC on Canton"
     : "Sign CBTC transfer in Loop";
-  const steps: SwapStep[] = [
+  return [
     step("review", "Review quote", "done"),
     step(
       "lock",
@@ -46,20 +46,6 @@ export function reverseLoopHtlcSteps(opts: {
       opts.phase === "claim" ? "active" : claimDone ? "done" : "pending"
     )
   ];
-  if (!opts.managed) {
-    steps.push(
-      step(
-        "solver-canton",
-        "Solver settles CBTC on Canton",
-        opts.phase === "finalize"
-          ? "active"
-          : opts.phase === "done"
-            ? "done"
-            : "pending"
-      )
-    );
-  }
-  return steps;
 }
 
 /** Loop forward HTLC (WBTC → CBTC) progress steps. */
@@ -104,20 +90,6 @@ export function forwardLoopHtlcSteps(opts: {
       opts.phase === "claim" ? "active" : claimDone ? "done" : "pending"
     )
   );
-  if (!opts.managed) {
-    const chain = opts.chainName ?? "EVM";
-    steps.push(
-      step(
-        "solver-evm",
-        `Solver settles WBTC on ${chain}`,
-        opts.phase === "finalize"
-          ? "active"
-          : opts.phase === "done"
-            ? "done"
-            : "pending"
-      )
-    );
-  }
   return steps;
 }
 

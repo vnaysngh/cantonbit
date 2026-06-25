@@ -5,28 +5,23 @@ export const SWAP_WAIT_POLL_MS = 4_000;
 
 export type SwapWaitMode = "solver" | "locking" | "settling" | "finalize";
 
-export function swapFinalizeHint(params: {
-  elapsedSec: number;
-  reverse?: boolean;
-  chainName: string;
-}): string {
-  const { elapsedSec, reverse, chainName } = params;
-  if (reverse) {
-    if (elapsedSec < 30) {
-      return "Your WBTC claim is confirmed. The solver is finishing the Canton leg — usually under a minute.";
-    }
-    if (elapsedSec < 120) {
-      return "Still finalizing on Canton. Your WBTC is already claimed — no action needed from you.";
-    }
-    return "This is taking longer than usual. Your WBTC is safe — the solver is completing Canton settlement.";
-  }
+/** Shown before opening Loop for a transfer/signing prompt. */
+export const LOOP_WALLET_POPUP_HINT =
+  "Loop may open in a new tab — allow pop-ups for this site in your browser if you do not see it.";
+
+/** Shown after a Loop transaction has been requested. */
+export const LOOP_WALLET_PENDING_HINT =
+  "Check your Loop wallet for the pending transaction. If Loop is already open, the signature may already be waiting there.";
+
+export function swapFinalizeHint(params: { elapsedSec: number }): string {
+  const { elapsedSec } = params;
   if (elapsedSec < 30) {
-    return `Your CBTC is delivered. The solver is claiming WBTC on ${chainName} — usually under a minute.`;
+    return "Your part is done. Finishing the swap — usually under a minute.";
   }
   if (elapsedSec < 120) {
-    return `Still waiting for the solver to settle WBTC on ${chainName}. Your CBTC is already yours — no wallet action needed.`;
+    return "Still finishing your swap. No wallet action needed — this page updates automatically.";
   }
-  return `Solver settlement on ${chainName} is taking longer than usual. Your CBTC is delivered — this page will update automatically when the on-chain claim completes.`;
+  return "This is taking longer than usual. Your funds are safe — leave this page open or check Orders for updates.";
 }
 
 export function swapRecordingProofHint(elapsedSec: number): string {

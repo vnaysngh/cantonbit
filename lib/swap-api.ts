@@ -205,6 +205,12 @@ function rawErrorMessage(e: unknown): string {
   }
 }
 
+/** Internal EVM confirmation polling — not a user-facing failure. */
+export function isTransientEvmFinalityError(e: unknown): boolean {
+  const raw = rawErrorMessage(e).toLowerCase();
+  return raw.includes("awaiting finality");
+}
+
 /** True if the error is a user-rejected wallet prompt (CoW: isRejectRequestProviderError). */
 export function isUserRejection(e: unknown): boolean {
   const code = (e as { code?: number })?.code;
@@ -220,6 +226,7 @@ export function isUserRejection(e: unknown): boolean {
  * provider message.
  */
 export function getSwapErrorMessage(e: unknown): string {
+  if (isTransientEvmFinalityError(e)) return "";
   if (isUserRejection(e)) return USER_REJECTED_MESSAGE;
   if (e instanceof ApiError) {
     const m = e.message?.trim();

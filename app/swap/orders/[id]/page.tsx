@@ -598,6 +598,7 @@ export default function SwapOrderStatusPage() {
     const reverse = order.direction === "canton-to-evm";
     const claimInFlight = busy === "claim" || busy === "confirming";
     const phase = htlcPhase(order, { claiming: claimInFlight });
+    const stepperPhase = phase === "finalize" ? "done" : phase;
     const { pay, receive } = htlcPayReceive(order);
     const projected = projectHtlcStatus(order);
     const loopAcceptPending =
@@ -646,7 +647,7 @@ export default function SwapOrderStatusPage() {
       if (order.status === "refunded") return "Swap refunded";
       if (claimInFlight) return reverse ? "Claiming WBTC..." : loopAcceptPending ? "Accepting CBTC..." : "Claiming CBTC...";
       if (recordingProof) return "Confirming CBTC delivery…";
-      if (finalizing) return "Finalizing swap";
+      if (finalizing) return "Finishing your swap";
       if (claimable) {
         if (loopAcceptPending) return "Accept your CBTC";
         return reverse
@@ -688,11 +689,7 @@ export default function SwapOrderStatusPage() {
         );
       }
       if (finalizing) {
-        return swapFinalizeHint({
-          elapsedSec: finalizeElapsedSec,
-          reverse,
-          chainName: SWAP_CHAIN.name
-        });
+        return swapFinalizeHint({ elapsedSec: finalizeElapsedSec });
       }
       if (claimable) {
         if (loopAcceptPending) {
@@ -704,7 +701,7 @@ export default function SwapOrderStatusPage() {
       }
       if (reverseLocking) {
         return order.counterMode === "loop"
-          ? "Your Loop transfer was submitted. Waiting for it to become visible on Canton so the solver can continue."
+          ? "Your Loop transfer was submitted. Waiting for it to become visible on Canton so the swap can continue."
           : "Your CBTC is being locked on Canton by the platform.";
       }
       return reverse
@@ -721,12 +718,12 @@ export default function SwapOrderStatusPage() {
       receive,
       steps: reverse
         ? reverseLoopHtlcSteps({
-            phase,
+            phase: stepperPhase,
             chainName: SWAP_CHAIN.name,
             managed: order.counterMode === "managed"
           })
         : forwardLoopHtlcSteps({
-            phase,
+            phase: stepperPhase,
             networkFeeEnabled: false,
             managed: order.counterMode === "managed",
             chainName: SWAP_CHAIN.name
@@ -738,7 +735,11 @@ export default function SwapOrderStatusPage() {
       c2cAccept: false,
       recoverable,
       reverse,
-      mode: reverseLocking ? ("locking" as const) : ("solver" as const)
+      mode: finalizing
+        ? ("settling" as const)
+        : reverseLocking
+          ? ("locking" as const)
+          : ("solver" as const)
     };
   }, [busy, elapsedSec, finalizeStartedAt, loaded, now, startedAt]);
 
@@ -811,16 +812,12 @@ export default function SwapOrderStatusPage() {
         </div>
       )}
 
-      {!main.claiming && (main.finalizing || main.recordingProof) && (
+      {main.recordingProof && !main.claiming && (
         <div className="mt-4 flex items-start gap-3 rounded-xl border border-amber-500/20 bg-amber-500/5 px-4 py-3">
           <span className="mt-0.5 inline-block size-5 shrink-0 animate-spin rounded-full border-2 border-amber-600/30 border-t-amber-600" />
           <div className="min-w-0">
             <p className="text-sm font-medium text-foreground">
-              {main.recordingProof
-                ? "Confirming CBTC delivery"
-                : main.reverse
-                  ? "Waiting for solver settlement on Canton"
-                  : "Waiting for solver settlement"}
+              Confirming CBTC delivery
             </p>
             <p className="mt-1 text-sm leading-6 text-muted-foreground">
               {main.subtitle}

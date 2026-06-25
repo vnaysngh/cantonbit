@@ -13,7 +13,7 @@ import {
 } from "./htlc-evm-encode";
 import { getBrowserEvmProvider, waitForEvmReceipt } from "./evm-wait-receipt";
 import { htlcForwardLoopDeliveryProven } from "./swap-product-invariants";
-import { getSwapErrorMessage } from "./swap-api";
+import { getSwapErrorMessage, isTransientEvmFinalityError } from "./swap-api";
 
 export interface HtlcOrderInput {
   id: string;
@@ -490,7 +490,15 @@ export async function claimSwap(opts: {
     const provider = getBrowserEvmProvider();
     if (!provider) throw new Error("no EVM provider");
     await waitForEvmReceipt(provider, tx);
-    await htlcApi.recordClaim(order.id, preimage, tx);
+    for (let attempt = 0; attempt < 12; attempt++) {
+      try {
+        await htlcApi.recordClaim(order.id, preimage, tx);
+        break;
+      } catch (e) {
+        if (!isTransientEvmFinalityError(e) || attempt === 11) throw e;
+        await sleep(2500);
+      }
+    }
     return { tx };
   }
 

@@ -108,6 +108,8 @@ import {
 } from "@/lib/secret-vault";
 import {
   SWAP_WAIT_POLL_MS,
+  LOOP_WALLET_PENDING_HINT,
+  LOOP_WALLET_POPUP_HINT,
   swapWaitTerminalMessage
 } from "@/lib/swap-wait-copy";
 import {
@@ -123,14 +125,10 @@ import {
   resolveSwapKind
 } from "@/lib/swap-leg";
 import { formatCantonQuoteError } from "@/lib/canton-quote-messages";
-import {
-  formatSettlementError,
-  reverseSolverWaitDetail
-} from "@/lib/swap-settlement-messages";
+import { formatSettlementError } from "@/lib/swap-settlement-messages";
 import {
   forwardLoopHtlcSteps,
-  loopC2cSteps,
-  reverseLoopHtlcSteps
+  loopC2cSteps
 } from "@/lib/swap-stepper-state";
 import { projectC2cStatus, projectHtlcStatus } from "@/lib/swap-status-projector";
 import {
@@ -1661,14 +1659,6 @@ export default function SwapPage() {
           return;
         }
 
-        setStage({
-          kind: "rev-locking",
-          swapId: id,
-          secret,
-          counterMode,
-          phase: undefined,
-          waitStartedAt: undefined
-        });
         const provider = wallet.provider;
         if (!provider)
           throw new Error("Connect your Loop wallet to lock your CBTC.");
@@ -1842,15 +1832,7 @@ export default function SwapPage() {
               }).catch(() => ({ ready: false as const, reason: msg }))
             : { ready: false as const, reason: msg };
         if (!probe.ready && o?.status === "main_locked") {
-          setStage({
-            kind: "rev-locking",
-            swapId,
-            secret,
-            phase: "solver",
-            waitStartedAt: Date.now(),
-            solverNote:
-              "Solver WBTC lock was not confirmed on-chain — waiting for the solver to retry."
-          });
+          startTracking(swapId);
           return;
         }
         setStage({
@@ -1865,7 +1847,7 @@ export default function SwapPage() {
         });
       }
     },
-    [evm]
+    [evm, startTracking]
   );
 
   // RETAKE (EVM refund) — if a swap is stuck, the user reclaims their locked WBTC
@@ -2125,14 +2107,7 @@ export default function SwapPage() {
                 })
               : { ready: false as const, reason: "Missing order fields." };
           if (!probe.ready) {
-            setStage({
-              kind: "rev-locking",
-              swapId,
-              secret,
-              phase: "solver",
-              waitStartedAt: Date.now(),
-              solverNote: probe.reason
-            });
+            startTracking(swapId);
             return;
           }
           setStage({
@@ -2161,7 +2136,7 @@ export default function SwapPage() {
         }
       }
     },
-    [vaultRecallContext]
+    [vaultRecallContext, startTracking]
   );
 
   // NOTE: the CBTC accept is detected AUTOMATICALLY by the solver (accept-watch
@@ -2387,24 +2362,7 @@ export default function SwapPage() {
             userEvmAddress: meta.userEvmAddress ?? evm.account ?? ""
           });
           if (!probe.ready) {
-            setStage((prev) =>
-              prev.kind === "rev-locking" &&
-              prev.swapId === htlcSolverWait.swapId
-                ? {
-                    ...prev,
-                    phase: "solver" as const,
-                    solverNote:
-                      "Order marked ready but WBTC is not locked on-chain yet — waiting for the solver."
-                  }
-                : {
-                    kind: "rev-locking",
-                    swapId: htlcSolverWait.swapId,
-                    secret: htlcSolverWait.secret,
-                    phase: "solver",
-                    waitStartedAt: Date.now(),
-                    solverNote: probe.reason
-                  }
-            );
+            startTracking(htlcSolverWait.swapId);
             return;
           }
           setStage({
@@ -2429,7 +2387,7 @@ export default function SwapPage() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [htlcSolverWait, evm.account]);
+  }, [htlcSolverWait, evm.account, startTracking]);
 
   // The form stays mounted for idle/quoting/error and while the review modal is open.
   const reviewing =
@@ -2939,58 +2897,6 @@ export default function SwapPage() {
           </div>
         )}
 
-        {stage.kind === "rev-locking" && (
-          <div className="px-1 pb-1 pt-2 text-left">
-            <SwapStepper
-              steps={reverseLoopHtlcSteps({
-                phase: stage.phase === "solver" ? "solver" : "lock",
-                chainName: SWAP_CHAIN.name,
-                managed:
-                  stage.counterMode === "managed" ||
-                  (stage.counterMode !== "loop" && isParticipantManaged)
-              })}
-            />
-            <div className="mb-4 flex items-center gap-3">
-              <div className="flex size-12 items-center justify-center rounded-2xl bg-primary/10">
-                <span className="inline-block size-5 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
-              </div>
-              <div>
-                <h3 className="text-xl font-semibold text-foreground">
-                  {stage.phase === "solver"
-                    ? swapWaitButtonLabel(waitElapsedSec, "solver", true)
-                    : stage.counterMode === "managed" ||
-                        (stage.counterMode !== "loop" && isParticipantManaged)
-                      ? "Locking CBTC on Canton…"
-                      : "Sign in Loop wallet…"}
-                </h3>
-                <p className="mt-0.5 text-sm text-muted-foreground">
-                  {stage.phase === "solver"
-                    ? reverseSolverWaitDetail(SWAP_CHAIN.name)
-                    : stage.counterMode === "managed" ||
-                        (stage.counterMode !== "loop" && isParticipantManaged)
-                      ? "Your CBTC is being locked on Canton by the platform"
-                      : "Sign the CBTC transfer in your Loop wallet to lock your side."}
-                </p>
-              </div>
-            </div>
-            {stage.phase === "solver" && stage.solverNote && (
-              <p className="mb-3 text-sm text-amber-700 dark:text-amber-400">
-                {stage.solverNote}
-              </p>
-            )}
-            {stage.phase === "solver" && (
-              <SwapWaitBanner
-                elapsedSec={waitElapsedSec}
-                mode="solver"
-                reverse
-                orderId={stage.swapId}
-                ordersHref={`/swap/orders/${encodeURIComponent(stage.swapId)}`}
-                onStartNewSwap={() => dismissToNewSwap(stage.swapId)}
-              />
-            )}
-          </div>
-        )}
-
         {stage.kind === "htlc-resume" && (
           <div className="px-1 pb-1 pt-4 text-center">
             <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/15 text-2xl">
@@ -3354,7 +3260,9 @@ export default function SwapPage() {
                         ? "Verifying your transfer…"
                         : "Sign in Loop wallet…"
                     : stage.quote.direction === "canton-to-evm"
-                      ? "Locking CBTC on Canton…"
+                      ? isParticipantManaged
+                        ? "Locking CBTC on Canton…"
+                        : "Sign in Loop wallet…"
                       : `Locking WBTC on ${SWAP_CHAIN.name}…`
                   : null
           }
@@ -4117,6 +4025,11 @@ function ReviewModal({
     ? "This quote expired. Get a fresh quote before confirming so the swap uses current pricing."
     : null;
   const blockingError = retryError ?? quoteExpiredError ?? setupError;
+  const needsLoopSignOnConfirm =
+    !!isLoopWallet &&
+    !isParticipantManaged &&
+    (isC2c || quote.direction === "canton-to-evm");
+  const loopBusy = !!busy && busy.toLowerCase().includes("loop");
 
   let actionLabel = "Confirm swap";
   let actionDisabled = !!busy;
@@ -4230,6 +4143,12 @@ function ReviewModal({
           </div>
         )}
 
+        {needsLoopSignOnConfirm && !busy && !blockingError && (
+          <p className="mt-4 text-sm leading-6 text-muted-foreground">
+            {LOOP_WALLET_POPUP_HINT}
+          </p>
+        )}
+
         {/* Primary action — turns into an inline progress state while busy. */}
         <button
           onClick={actionOnClick}
@@ -4245,6 +4164,12 @@ function ReviewModal({
             actionLabel
           )}
         </button>
+
+        {loopBusy && (
+          <p className="mt-3 text-sm leading-6 text-muted-foreground">
+            {LOOP_WALLET_PENDING_HINT}
+          </p>
+        )}
       </div>
     </div>
   );
@@ -4280,6 +4205,9 @@ function SignGateModal({
           settings and track delivery. It&rsquo;s a one-time signature and{" "}
           <span className="font-medium text-foreground">moves no funds</span>.
         </p>
+        <p className="mt-2 text-sm text-on-surface-variant">
+          {LOOP_WALLET_POPUP_HINT}
+        </p>
 
         {error && (
           <div className="mt-4 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
@@ -4294,6 +4222,11 @@ function SignGateModal({
         >
           {signing ? "Check your Loop wallet…" : "Sign in Loop wallet"}
         </button>
+        {signing && (
+          <p className="mt-3 text-sm leading-6 text-muted-foreground">
+            {LOOP_WALLET_PENDING_HINT}
+          </p>
+        )}
       </div>
     </div>
   );

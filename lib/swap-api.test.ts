@@ -10,6 +10,15 @@ test("getSwapErrorMessage maps EIP-1193 user rejection objects", () => {
   );
 });
 
+test("getSwapErrorMessage suppresses transient EVM finality polling errors", () => {
+  assert.equal(
+    getSwapErrorMessage(
+      new Error("EVM transaction awaiting finality (1/3 confirmations)")
+    ),
+    ""
+  );
+});
+
 test("getSwapErrorMessage maps phantom EVM claim / gas limit errors", () => {
   assert.equal(
     getSwapErrorMessage(new Error("RPC submit: exceeds max transaction gas limit")),
