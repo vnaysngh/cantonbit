@@ -6,6 +6,7 @@ import { TRANSFER_REASON_META_KEY } from "./transfer-options";
 
 export const CANTON_SWAP_MEMO_PREFIX = "oranj.c2c.v1.";
 export const HTLC_LOOP_COUNTER_MEMO_PREFIX = "oranj.htlc.fwd.v1.";
+export const HTLC_REVERSE_LOOP_MEMO_PREFIX = "oranj.htlc.rev.v1.";
 export const LEGACY_SWAP_MEMO = "OranjSwap";
 
 export function partyMemoTag(party: string): string {
@@ -38,12 +39,35 @@ export function isOrderBoundSwapMemo(memo: string): boolean {
   return (
     memo.startsWith(CANTON_SWAP_MEMO_PREFIX) ||
     memo.startsWith(HTLC_LOOP_COUNTER_MEMO_PREFIX) ||
-    memo.startsWith("oranj.htlc.rev.v1.")
+    memo.startsWith(HTLC_REVERSE_LOOP_MEMO_PREFIX)
   );
 }
 
 export function isLegacySwapMemo(memo: string): boolean {
   return memo === "" || memo === LEGACY_SWAP_MEMO;
+}
+
+export function cantonSwapUserLegMemoFromTerms(
+  terms: Pick<
+    CantonSwapOrder,
+    | "id"
+    | "createdAt"
+    | "fromAsset"
+    | "toAsset"
+    | "userParty"
+    | "solverParty"
+    | "settlementParty"
+  >
+): string {
+  return encodeTransferMemo(CANTON_SWAP_MEMO_PREFIX, {
+    id: terms.id,
+    leg: "user",
+    ts: terms.createdAt,
+    from: terms.fromAsset,
+    to: terms.toAsset,
+    user: partyMemoTag(terms.userParty),
+    vault: partyMemoTag(terms.settlementParty ?? terms.solverParty)
+  });
 }
 
 export function cantonSwapUserLegMemo(
@@ -58,14 +82,20 @@ export function cantonSwapUserLegMemo(
     | "settlementParty"
   >
 ): string {
-  return encodeTransferMemo(CANTON_SWAP_MEMO_PREFIX, {
-    id: order.id,
-    leg: "user",
-    ts: order.createdAt,
-    from: order.fromAsset,
-    to: order.toAsset,
-    user: partyMemoTag(order.userParty),
-    vault: partyMemoTag(order.settlementParty ?? order.solverParty)
+  return cantonSwapUserLegMemoFromTerms(order);
+}
+
+export function htlcReverseLoopCustodyMemoFromTerms(params: {
+  id: string;
+  createdAt: number;
+  userCantonParty: string;
+  solverCantonParty: string;
+}): string {
+  return encodeTransferMemo(HTLC_REVERSE_LOOP_MEMO_PREFIX, {
+    id: params.id.startsWith("0x") ? params.id.slice(2) : params.id,
+    ts: params.createdAt,
+    user: partyMemoTag(params.userCantonParty),
+    solver: partyMemoTag(params.solverCantonParty)
   });
 }
 

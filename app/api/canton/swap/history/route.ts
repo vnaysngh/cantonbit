@@ -5,6 +5,7 @@ import { NextResponse } from "next/server";
 
 import { cantonSwapService } from "@/lib/canton-swap-service";
 import { isSmokeTestOrderId } from "@/lib/htlc-order-logic";
+import { filterVisibleC2cHistoryOrders } from "@/lib/swap-order-visibility";
 import { requirePartyOwner } from "@/lib/htlc-auth";
 import {
   hasNetworkFeeLedgerEntry,
@@ -21,8 +22,10 @@ export async function GET(req: Request) {
     }
     const auth = await requirePartyOwner(party);
     if (auth.error) return auth.error;
-    const raw = (await cantonSwapService().history(party)).filter(
-      (o) => !isSmokeTestOrderId(o.id)
+    const raw = filterVisibleC2cHistoryOrders(
+      (await cantonSwapService().history(party)).filter(
+        (o) => !isSmokeTestOrderId(o.id)
+      )
     );
     // M-05: surface whether the network fee was actually collected (ledger row),
     // mirroring /api/htlc/history. Only fee-bearing orders are looked up.

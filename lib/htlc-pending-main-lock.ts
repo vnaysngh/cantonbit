@@ -14,6 +14,11 @@ export type PendingMainLock = {
   userEvmAddress: string;
   expiresAt: number;
   createdAt: number;
+  wbtcAmount?: string;
+  cbtcAmount?: string;
+  userTimelock?: number;
+  solverTimelock?: number;
+  counterMode?: "managed" | "loop";
 };
 
 type StorageLike = {

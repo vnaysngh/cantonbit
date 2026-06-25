@@ -3,6 +3,7 @@
  * it can be unit-tested directly (same pattern as htlc-auth-logic.ts).
  */
 import type { SwapOrder } from "./htlc-types";
+import { filterVisibleHtlcHistoryOrders, htlcOrderHasUserPaymentProof, htlcOrderVisibleInHistory } from "./swap-order-visibility";
 
 /** C-02 guard: zero EVM lock amount alone must not flip reverse order to counter_claimed. */
 export function reverseZeroLockReconcileOutcome(
@@ -34,7 +35,7 @@ export function isSwapClaimable(
   return false;
 }
 
-/** Forward swap that never locked WBTC — a Review/accept-only draft, not a live swap. */
+/** Forward swap that never locked WBTC — hidden from history via swap-order-visibility. */
 export function isAbandonedSwapDraft(
   o: Pick<SwapOrder, "direction" | "status" | "mainLockTx">,
 ): boolean {
@@ -42,21 +43,23 @@ export function isAbandonedSwapDraft(
 }
 
 /**
- * User-facing history filter — drop never-started drafts and (optionally) other
- * wallets' orders on the same Canton party (dev/testing shared-party edge case).
+ * User-facing history filter — only orders with user payment proof; optionally
+ * filter to one EVM wallet on shared-party dev accounts.
  */
 export function filterHistoryOrders<
-  T extends Pick<SwapOrder, "direction" | "status" | "mainLockTx" | "userEvmAddress"> & {
-    id?: string;
-  }
+  T extends Pick<
+    SwapOrder,
+    | "direction"
+    | "status"
+    | "mainLockTx"
+    | "counterTransferOfferCid"
+    | "counterTransferUpdateId"
+    | "allocationCid"
+    | "htlcCid"
+    | "userEvmAddress"
+  > & { id?: string }
 >(orders: T[], opts?: { userEvmAddress?: string | null }): T[] {
-  const evm = opts?.userEvmAddress?.trim().toLowerCase();
-  return orders.filter((o) => {
-    if (isSmokeTestOrderId(o.id)) return false;
-    if (isAbandonedSwapDraft(o)) return false;
-    if (evm && o.userEvmAddress?.toLowerCase() !== evm) return false;
-    return true;
-  });
+  return filterVisibleHtlcHistoryOrders(orders, opts);
 }
 
 /** Terminal statuses — no background refresh on /orders. */
@@ -88,8 +91,19 @@ export function shouldPollOrderOnOrdersPage(o: {
     return ["user_locked", "filling", "settling"].includes(o.status);
   }
   if (
-    isAbandonedSwapDraft(
-      o as Pick<SwapOrder, "direction" | "status" | "mainLockTx">
+    !htlcOrderVisibleInHistory(
+      o as Pick<
+        SwapOrder,
+        | "direction"
+        | "status"
+        | "mainLockTx"
+        | "counterTransferOfferCid"
+        | "counterTransferUpdateId"
+        | "allocationCid"
+        | "htlcCid"
+        | "counterMode"
+        | "evmFloatReserved"
+      >
     )
   ) {
     return false;

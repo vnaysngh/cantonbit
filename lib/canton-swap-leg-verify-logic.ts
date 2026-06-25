@@ -121,6 +121,7 @@ export function parseUserLegEvidenceFromEvents(
     fromAsset: CantonSwapMvpAssetId;
     expectedInstrument: InstrumentId;
     expectedMemo?: string;
+    strictOrderBoundMemo?: boolean;
   }
 ): UserLegEvidence | null {
   if (!eventsById) return null;
@@ -171,8 +172,44 @@ export function parseUserLegEvidenceFromEvents(
   }
 
   if (offerCid) return { offerCid, inboundHoldingCid };
-  if (inboundHoldingCid) return { inboundHoldingCid };
+  if (inboundHoldingCid) {
+    if (
+      params.strictOrderBoundMemo &&
+      params.expectedMemo &&
+      !transferExerciseWithOrderMemo(eventsById, params.expectedMemo)
+    ) {
+      return null;
+    }
+    return { inboundHoldingCid };
+  }
   return null;
+}
+
+function transferExerciseWithOrderMemo(
+  eventsById: Record<string, unknown> | null | undefined,
+  expectedMemo: string
+): boolean {
+  if (!eventsById) return false;
+  for (const node of Object.values(eventsById)) {
+    const exercised = exercisedEventFromNode(node);
+    if (!exercised?.choice) continue;
+    if (
+      !exercised.choice.includes("Transfer") ||
+      exercised.choice.includes("Accept") ||
+      exercised.choice.includes("Reject")
+    ) {
+      continue;
+    }
+    const arg = exercised.choiceArgument as
+      | {
+          meta?: Record<string, unknown>;
+          transfer?: { meta?: Record<string, unknown> };
+        }
+      | undefined;
+    const meta = arg?.transfer?.meta ?? arg?.meta;
+    if (transferMemoFromMeta(meta) === expectedMemo) return true;
+  }
+  return false;
 }
 
 /** True when a transaction tree consumed a counter offer via Accept. */

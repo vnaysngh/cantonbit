@@ -98,6 +98,54 @@ export async function requirePartyOwner(party: string): Promise<GuardOk<{ partyI
   return { partyId: loopParty, error: null };
 }
 
+/** Rate limit for prepare-* intent routes (reserves solver float / builds sign payloads). */
+export async function requireHtlcPrepareRateLimit(
+  partyId: string
+): Promise<GuardErr | null> {
+  if (
+    !(await distributedRateLimitOk({
+      scope: "htlc-prepare",
+      key: partyId,
+      limit: 12
+    }))
+  ) {
+    return unauthorized("rate limit exceeded", 429);
+  }
+  return null;
+}
+
+/** Rate limit for commit-* routes (idempotent retries included). */
+export async function requireHtlcCommitRateLimit(
+  partyId: string
+): Promise<GuardErr | null> {
+  if (
+    !(await distributedRateLimitOk({
+      scope: "htlc-commit",
+      key: partyId,
+      limit: 30
+    }))
+  ) {
+    return unauthorized("rate limit exceeded", 429);
+  }
+  return null;
+}
+
+/** Rate limit for Loop C2C prepare/commit intent routes. */
+export async function requireC2cLoopIntentRateLimit(
+  partyId: string
+): Promise<GuardErr | null> {
+  if (
+    !(await distributedRateLimitOk({
+      scope: "c2c-loop-intent",
+      key: partyId,
+      limit: 12
+    }))
+  ) {
+    return unauthorized("rate limit exceeded", 429);
+  }
+  return null;
+}
+
 /**
  * Read-only quote / fee-estimate auth. Participant-managed still needs email session;
  * Loop wallet parties only need a valid party id (submit paths keep requirePartyOwner).

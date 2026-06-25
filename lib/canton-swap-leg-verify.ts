@@ -51,6 +51,7 @@ export async function verifyUserLegFromSubmitUpdate(
     fromAsset: CantonSwapMvpAssetId;
     expectedInstrument: InstrumentId;
     expectedMemo?: string;
+    strictOrderBoundMemo?: boolean;
   }
 ): Promise<UserLegEvidence> {
   const events = await fetchUpdateEventsById(updateId, [

@@ -5,6 +5,7 @@
 import { NextResponse } from "next/server";
 import { requireOrderOwnerOrDaemon } from "@/lib/htlc-auth";
 import { htlcService } from "@/lib/htlc-service-singleton";
+import { htlcCanExposePreimageToSolver } from "@/lib/swap-product-invariants";
 
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -16,12 +17,15 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     if (!order) {
       return NextResponse.json({ error: "not found" }, { status: 404 });
     }
-    return NextResponse.json({
-      order:
-        order.counterMode === "loop"
-          ? { ...order, networkFeeCc: undefined }
-          : order
-    });
+    let out = order.counterMode === "loop" ? { ...order, networkFeeCc: undefined } : order;
+    if (
+      auth.daemon &&
+      out.direction === "evm-to-canton" &&
+      !htlcCanExposePreimageToSolver(out).ok
+    ) {
+      out = { ...out, revealedPreimage: undefined };
+    }
+    return NextResponse.json({ order: out });
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 });
   }

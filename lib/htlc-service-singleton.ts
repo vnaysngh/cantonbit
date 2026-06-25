@@ -48,6 +48,13 @@ import {
 import { SupabaseSwapStore, type SwapStore } from "./htlc-order-store";
 import { resolveCreateOrder } from "./htlc-order-logic";
 import {
+  assertValidPrepareCreatedAt
+} from "./swap-prepare-intent";
+import {
+  isCustodyEvidenceConflictError,
+  isSafeReversePrelockReleaseCause
+} from "./htlc-loop-custody-logic";
+import {
   assertEvmLockSafeForReveal,
   EVM_CLAIM_MARGIN_SECONDS
 } from "./htlc-evm-lock-guard";
@@ -76,7 +83,8 @@ import {
 import { matchesInstrument } from "./canton-assets";
 import { assertHtlcSettlementQuoteFresh } from "./htlc-quote";
 import { TRANSFER_REASON_META_KEY } from "./transfer-options";
-import { htlcLoopCounterDeliveryMemo } from "./swap-transfer-memo";
+import { htlcLoopCounterDeliveryMemo, htlcReverseLoopCustodyMemoFromTerms, HTLC_REVERSE_LOOP_MEMO_PREFIX } from "./swap-transfer-memo";
+import { verifyHtlcReverseLoopCustodySubmit } from "./htlc-reverse-custody-verify";
 
 export type { SwapOrder, SwapStatus, SwapDirection };
 
@@ -123,15 +131,24 @@ export { EVM_CLAIM_MARGIN_SECONDS };
  *  the sweep returns the custody early (no point holding the user's funds). */
 const LOOP_CUSTODY_GRACE_SECONDS = 30 * 60;
 /** Accepted orders that never produce a main lock must not reserve float forever. */
-const ACCEPTED_DRAFT_TTL_SECONDS = 30 * 60;
+const ACCEPTED_DRAFT_TTL_SECONDS = Number(
+  process.env.HTLC_ACCEPTED_DRAFT_TTL_SECONDS ?? 10 * 60
+);
+/** Max concurrent forward accepted drafts (reserved CBTC, no EVM lock yet) per party. */
+const FORWARD_ACCEPTED_DRAFT_CAP = Number(
+  process.env.HTLC_FORWARD_ACCEPTED_DRAFT_CAP ?? 2
+);
+/** Max concurrent reverse Loop pre-locks (reserved WBTC, no custody yet) per party. */
+const REVERSE_PRELOCK_DRAFT_CAP = Number(
+  process.env.HTLC_REVERSE_PRELOCK_DRAFT_CAP ?? 2
+);
 /** Reverse pre-lock reservation TTL: no durable custody/Allocation evidence => release. */
 const REVERSE_PRELOCK_RESERVATION_TTL_SECONDS = Number(
-  process.env.HTLC_REVERSE_PRELOCK_RESERVATION_TTL_SECONDS ?? 30 * 60
+  process.env.HTLC_REVERSE_PRELOCK_RESERVATION_TTL_SECONDS ?? 10 * 60
 );
 
 /** Marker when Loop transfer auto-settled via solver TransferPreapproval (no pending offer). */
 const LOOP_PREAPPROVAL_SETTLED = "transfer-preapproval-settled";
-const LOOP_CUSTODY_MEMO_PREFIX = "oranj.htlc.rev.v1.";
 
 function cbtcAmountsMatch(a: string, b: string): boolean {
   try {
@@ -141,26 +158,13 @@ function cbtcAmountsMatch(a: string, b: string): boolean {
   }
 }
 
-function memoPartyTag(party: string): string {
-  if (party.length <= 24) return party;
-  return `${party.slice(0, 10)}-${party.slice(-10)}`;
-}
-
 function reverseLoopCustodyMemo(order: SwapOrder): string {
-  const payload = {
-    id: order.id.startsWith("0x") ? order.id.slice(2) : order.id,
-    ts: order.createdAt,
-    user: memoPartyTag(order.userCantonParty),
-    solver: memoPartyTag(order.solverCantonParty)
-  };
-  const memo = `${LOOP_CUSTODY_MEMO_PREFIX}${Buffer.from(
-    JSON.stringify(payload),
-    "utf8"
-  ).toString("base64url")}`;
-  if (memo.length > 256) {
-    throw new Error("Loop custody memo exceeds Canton transfer metadata limit");
-  }
-  return memo;
+  return htlcReverseLoopCustodyMemoFromTerms({
+    id: order.id,
+    createdAt: order.createdAt,
+    userCantonParty: order.userCantonParty,
+    solverCantonParty: order.solverCantonParty
+  });
 }
 
 function transferOfferMemo(offer: { meta?: Record<string, unknown> }): string {
@@ -173,38 +177,6 @@ function transferOfferMemo(offer: { meta?: Record<string, unknown> }): string {
 function transferOfferRequestedAtMs(offer: { requestedAt?: string }): number {
   const ms = Date.parse(offer.requestedAt ?? "");
   return Number.isFinite(ms) ? ms : 0;
-}
-
-function isSafeReversePrelockReleaseCause(cause: unknown): boolean {
-  const msg = cause instanceof Error ? cause.message : String(cause);
-  return /transfer offer not visible|no input holdings|insufficient|not found|not visible|missing|expired/i.test(
-    msg
-  );
-}
-
-/** Loop sellers: transfer may auto-accept on the solver (preapproval) — custody is a Holding, not an offer. */
-async function detectLoopSellerCustodyHolding(
-  solverParty: string,
-  amountBtc: string,
-  baselineCids: Set<string>,
-  reservedCids: Set<string>
-): Promise<string | null> {
-  const holdings = await getHoldings(solverParty);
-  const matches = holdings
-    .filter(
-      (h) =>
-        cbtcAmountsMatch(h.payload.amount, amountBtc) &&
-        !baselineCids.has(h.contractId) &&
-        !reservedCids.has(h.contractId)
-    )
-    .sort((a, b) => a.contractId.localeCompare(b.contractId));
-  if (matches.length > 1) {
-    throw new Error(
-      "ambiguous Loop custody deposit — multiple exact new holdings match this order"
-    );
-  }
-  if (matches.length === 1) return matches[0].contractId;
-  return null;
 }
 
 /** Raw read of the escrow's lock for a hashLock: { unlockTime, amount, receiver }. */
@@ -408,14 +380,15 @@ class HtlcService {
   }
 
   async createOrder(
-    o: Omit<SwapOrder, "status" | "createdAt">
+    o: Omit<SwapOrder, "status" | "createdAt">,
+    opts?: { createdAt?: number }
   ): Promise<SwapOrder> {
     // No-overwrite + idempotent (audit 2026-06-12) — see resolveCreateOrder.
     const existing = await this.store.get(o.id);
     const { order, isNew } = resolveCreateOrder(
       existing,
       o,
-      Math.floor(Date.now() / 1000)
+      opts?.createdAt ?? Math.floor(Date.now() / 1000)
     );
     if (!isNew) return order;
     try {
@@ -433,6 +406,218 @@ class HtlcService {
   }
   async peekOrder(id: string): Promise<SwapOrder | undefined> {
     return this.store.get(id);
+  }
+
+  /** Forward HTLC: reserve CBTC float before the user locks WBTC on EVM. */
+  async prepareForwardIntent(
+    incoming: Omit<SwapOrder, "status" | "createdAt">
+  ): Promise<SwapOrder> {
+    if (incoming.direction !== "evm-to-canton") {
+      throw new Error("prepare-forward-intent is for evm-to-canton orders only");
+    }
+    await this.createOrder(incoming);
+    let o = await this.must(incoming.id);
+    if (o.mainLockTx || o.status === "main_locked") {
+      throw new Error("forward HTLC order is already committed");
+    }
+    if (o.status === "open") {
+      await this.assertForwardAcceptedDraftCap(o.userCantonParty, o.id);
+      await assertHtlcSettlementQuoteFresh(o);
+      await this.accept(incoming.id);
+      o = await this.must(incoming.id);
+    }
+    if (o.status !== "accepted") {
+      throw new Error(`forward CBTC pre-lock failed (${o.status})`);
+    }
+    return o;
+  }
+
+  private async assertForwardAcceptedDraftCap(
+    party: string,
+    excludeId: string
+  ): Promise<void> {
+    if (FORWARD_ACCEPTED_DRAFT_CAP <= 0) return;
+    const orders = await this.store.byParty(party, 100);
+    const active = orders.filter(
+      (o) =>
+        o.direction === "evm-to-canton" &&
+        o.status === "accepted" &&
+        !o.mainLockTx &&
+        o.id !== excludeId
+    ).length;
+    if (active >= FORWARD_ACCEPTED_DRAFT_CAP) {
+      throw new Error(
+        `too many in-progress forward swaps (${active} pending CBTC reservations) — complete one or wait for it to expire`
+      );
+    }
+  }
+
+  private async assertReversePrelockDraftCap(
+    party: string,
+    excludeId: string
+  ): Promise<void> {
+    if (REVERSE_PRELOCK_DRAFT_CAP <= 0) return;
+    const orders = await this.store.byParty(party, 100);
+    const active = orders.filter(
+      (o) =>
+        o.direction === "canton-to-evm" &&
+        o.counterMode === "loop" &&
+        o.status === "main_locking" &&
+        o.evmFloatReserved === true &&
+        !o.counterTransferOfferCid &&
+        !o.counterTransferUpdateId &&
+        o.id !== excludeId
+    ).length;
+    if (active >= REVERSE_PRELOCK_DRAFT_CAP) {
+      throw new Error(
+        `too many in-progress reverse swaps (${active} pending WBTC reservations) — complete one or wait for it to expire`
+      );
+    }
+  }
+
+  /** Forward HTLC: bind verified WBTC lock after prepareForwardIntent. */
+  async commitForwardOrder(
+    incoming: Omit<SwapOrder, "status" | "createdAt">,
+    mainLockTx: string
+  ): Promise<SwapOrder> {
+    let o = await this.peekOrder(incoming.id);
+    if (o?.status === "main_locked") return o;
+    if (!o || o.status === "open") {
+      // Recovery / legacy path: WBTC may already be locked without a prior prepare.
+      await this.createOrder(incoming);
+      const fresh = await this.must(incoming.id);
+      if (fresh.status === "open") {
+        await this.accept(incoming.id);
+      }
+    } else if (o.status !== "accepted" && o.status !== "main_locking") {
+      throw new Error(`order not accepted (${o.status})`);
+    }
+    return this.recordMainLock(incoming.id, mainLockTx);
+  }
+
+  /** Reverse Loop: reserve WBTC float and build CBTC transfer before Loop signs. */
+  async prepareReverseLoopLockIntent(
+    incoming: Omit<SwapOrder, "status" | "createdAt">,
+    holdingCids: string[]
+  ): Promise<{
+    command: unknown;
+    disclosedContracts: unknown[];
+    synchronizerId: string;
+    createdAt: number;
+    expectedMemo: string;
+  }> {
+    if (!holdingCids?.length) throw new Error("no input holdings supplied");
+    await this.createOrder(incoming);
+    let o = await this.must(incoming.id);
+    if (o.status === "main_locked") {
+      throw new Error("reverse Loop order is already committed");
+    }
+    if (o.status === "open") {
+      await this.accept(incoming.id);
+      o = await this.must(incoming.id);
+    }
+    if (o.status === "accepted") {
+      await this.assertReversePrelockDraftCap(o.userCantonParty, o.id);
+      await assertHtlcSettlementQuoteFresh(o);
+      o = await this.reserveReverseFloatBeforeMainLock(o);
+    }
+    if (o.status !== "main_locking" || !o.evmFloatReserved) {
+      throw new Error(`WBTC pre-lock failed (${o.status})`);
+    }
+    const expectedMemo = reverseLoopCustodyMemo(o);
+    const built = await prepareTransferCommand({
+      senderParty: o.userCantonParty,
+      receiverParty: o.solverCantonParty,
+      amountBtc: o.cbtcAmount!,
+      inputHoldingCids: holdingCids,
+      memo: expectedMemo
+    });
+    return { ...built, createdAt: o.createdAt, expectedMemo };
+  }
+
+  /** Reverse Loop: verify Loop payment and bind custody after WBTC pre-lock. */
+  async commitReverseLoopOrder(
+    incoming: Omit<SwapOrder, "status" | "createdAt">,
+    params: {
+      createdAt: number;
+      submitUpdateId: string;
+      offerCidHint?: string;
+    }
+  ): Promise<SwapOrder> {
+    const createdAt = assertValidPrepareCreatedAt(params.createdAt);
+    let o = await this.must(incoming.id);
+    if (o.status === "main_locked") return o;
+    if (o.status !== "main_locking" || !o.evmFloatReserved) {
+      throw new Error(
+        "reverse Loop order is not in WBTC pre-lock state — prepare lock intent first"
+      );
+    }
+    if (createdAt !== o.createdAt) {
+      throw new Error("prepare createdAt does not match the pre-locked order");
+    }
+    const expectedMemo = htlcReverseLoopCustodyMemoFromTerms({
+      id: incoming.id,
+      createdAt: o.createdAt,
+      userCantonParty: incoming.userCantonParty,
+      solverCantonParty: incoming.solverCantonParty
+    });
+    const evidence = await verifyHtlcReverseLoopCustodySubmit(
+      params.submitUpdateId,
+      {
+        userParty: incoming.userCantonParty,
+        solverParty: incoming.solverCantonParty,
+        cbtcAmount: incoming.cbtcAmount!,
+        expectedMemo,
+        offerCidHint: params.offerCidHint
+      }
+    );
+    if (!evidence.offerCid) {
+      throw new Error(
+        "Loop CBTC custody must be a pending transfer offer — preapproval holdings are not supported"
+      );
+    }
+    o.counterTransferOfferCid = evidence.offerCid;
+    if (!(await this.store.putIfStatus(o, "main_locking"))) {
+      const fresh = await this.must(incoming.id);
+      if (fresh.status === "main_locked") return fresh;
+      if (fresh.counterTransferOfferCid) {
+        o = fresh;
+      } else {
+        throw new Error("could not bind Loop custody offer to pre-locked order");
+      }
+    }
+    let updateId: string;
+    try {
+      ({ updateId } = await acceptTransfer({
+        receiverParty: o.solverCantonParty,
+        offerContractId: evidence.offerCid
+      }));
+    } catch (e) {
+      if (!isExpiredTransferInstructionError(e)) throw e;
+      o.status = "failed";
+      o.evmFloatReserved = false;
+      o.counterTransferOfferCid = undefined;
+      await this.store.putIfStatus(o, "main_locking").catch(() => {});
+      throw new Error(
+        "Loop CBTC transfer expired before the solver could accept it — start a new swap."
+      );
+    }
+    o = await this.must(incoming.id);
+    o.counterTransferUpdateId = updateId;
+    o.status = "main_locked";
+    if (!(await this.store.putIfStatus(o, "main_locking"))) {
+      return this.must(incoming.id);
+    }
+    return o;
+  }
+
+  /** Reverse managed: create + accept + lock only when backend custody succeeds. */
+  async commitReverseManagedOrder(
+    incoming: Omit<SwapOrder, "status" | "createdAt">
+  ): Promise<SwapOrder> {
+    await this.createOrder(incoming);
+    await this.accept(incoming.id);
+    return this.lockMainCanton(incoming.id);
   }
 
   private reconcileInflight = new Map<string, Promise<SwapOrder>>();
@@ -854,6 +1039,7 @@ class HtlcService {
 
   async accept(id: string) {
     const o = await this.must(id);
+    if (o.status === "accepted") return this.must(id);
     if (o.status !== "open") throw new Error(`order not open (${o.status})`);
     // SOLVENCY GATE (M1): refuse BEFORE the user locks anything if the solver can't
     // fill its leg. Forward (evm→canton): the solver must have the CBTC float.
@@ -909,6 +1095,29 @@ class HtlcService {
       throw new Error(`order not open (${fresh.status})`);
     }
     return this.must(id);
+  }
+
+  /** Release a reverse pre-lock reservation when Loop signing failed or custody
+   *  never landed. Only valid while main_locking with no custody evidence linked. */
+  async releaseReversePrelockWithoutCustody(id: string): Promise<SwapOrder> {
+    const o = await this.must(id);
+    if (o.status !== "main_locking") return o;
+    if (
+      o.counterTransferOfferCid ||
+      o.counterTransferUpdateId ||
+      o.allocationCid ||
+      o.htlcCid
+    ) {
+      throw new Error(
+        "cannot release pre-lock — custody or lock evidence is already linked"
+      );
+    }
+    o.status = "failed";
+    o.evmFloatReserved = false;
+    if (!(await this.store.putIfStatus(o, "main_locking"))) {
+      return this.must(id);
+    }
+    return o;
   }
 
   /** CANCEL — the maker cancels before any HTLC locks (Cancore: no on-chain
@@ -2301,32 +2510,13 @@ class HtlcService {
     if (o.status !== "main_locking")
       throw new Error(`order not accepted (${o.status})`);
 
+    const expectedMemo = reverseLoopCustodyMemo(o);
+    let usedCustodyCids = await this.store.usedCounterTransferOfferCids();
+    if (o.counterTransferOfferCid) {
+      usedCustodyCids.delete(o.counterTransferOfferCid);
+    }
     const maxAttempts = opts?.maxAttempts ?? 15;
     const pollMs = opts?.pollMs ?? 2000;
-    if (!o.solverCustodyBaselineCids) {
-      throw new Error(
-        "custody baseline missing — refusing to infer a Loop deposit from current vault holdings"
-      );
-    }
-    const baselineCids = new Set(o.solverCustodyBaselineCids);
-    const expectedMemo = reverseLoopCustodyMemo(o);
-
-    // Holdings already linked to other in-flight loop-seller orders (same amount).
-    const active = await this.store.active();
-    const reservedCids = new Set(
-      active
-        .filter(
-          (x) =>
-            x.id !== id &&
-            x.counterTransferOfferCid &&
-            x.direction === "canton-to-evm" &&
-            x.counterMode === "loop" &&
-            !["refunded", "cancelled", "failed", "main_claimed", "both_claimed"].includes(
-              x.status
-            )
-        )
-        .map((x) => x.counterTransferOfferCid as string)
-    );
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const offers = await listPendingOffers(o.solverCantonParty);
@@ -2336,34 +2526,18 @@ class HtlcService {
           x.receiver === o.solverCantonParty &&
           cbtcAmountsMatch(x.amountBtc, o.cbtcAmount!) &&
           !!x.instrumentId &&
-          matchesInstrument(x.instrumentId, NETWORK.instrumentId)
+          matchesInstrument(x.instrumentId, NETWORK.instrumentId) &&
+          !usedCustodyCids.has(x.contractId)
       );
       const memoMatchingOffers = baseMatchingOffers.filter(
         (x) => transferOfferMemo(x) === expectedMemo
       );
-      const legacyCutoffMs = ((o.updatedAt ?? o.createdAt) - 60) * 1000;
-      const legacyMatchingOffers =
-        memoMatchingOffers.length > 0
-          ? []
-          : baseMatchingOffers.filter((x) => {
-              const memo = transferOfferMemo(x);
-              if (memo.startsWith(LOOP_CUSTODY_MEMO_PREFIX)) return false;
-              if (memo) return false;
-              const requestedAtMs = transferOfferRequestedAtMs(x);
-              return !requestedAtMs || requestedAtMs >= legacyCutoffMs;
-            });
-      const matchingOffers =
-        memoMatchingOffers.length > 0
-          ? memoMatchingOffers
-          : legacyMatchingOffers;
-      if (matchingOffers.length > 1) {
+      if (memoMatchingOffers.length > 1) {
         throw new Error(
-          memoMatchingOffers.length > 0
-            ? "ambiguous Loop custody transfer — multiple offers carry this order memo"
-            : "ambiguous Loop custody transfer — multiple legacy offers match this order"
+          "ambiguous Loop custody transfer — multiple offers carry this order memo"
         );
       }
-      const offer = matchingOffers[0];
+      const offer = memoMatchingOffers[0];
       if (offer) {
         let updateId: string;
         try {
@@ -2386,28 +2560,18 @@ class HtlcService {
         o.counterTransferOfferCid = offer.contractId;
         o.counterTransferUpdateId = updateId;
         o.status = "main_locked";
-        if (!(await this.store.putIfStatus(o, "main_locking"))) {
-          return this.must(id);
+        try {
+          if (!(await this.store.putIfStatus(o, "main_locking"))) {
+            return this.must(id);
+          }
+          return o;
+        } catch (e) {
+          if (!isCustodyEvidenceConflictError(e)) throw e;
+          usedCustodyCids.add(offer.contractId);
+          o = await this.must(id);
+          if (o.status !== "main_locking") return o;
+          continue;
         }
-        return o;
-      }
-
-      // TransferPreapproval on the solver can auto-accept cross-participant Loop
-      // transfers — CBTC lands as a Holding with no pending TransferInstruction.
-      const custodyHolding = await detectLoopSellerCustodyHolding(
-        o.solverCantonParty,
-        o.cbtcAmount!,
-        baselineCids,
-        reservedCids
-      );
-      if (custodyHolding) {
-        o.counterTransferOfferCid = custodyHolding;
-        o.counterTransferUpdateId = LOOP_PREAPPROVAL_SETTLED;
-        o.status = "main_locked";
-        if (!(await this.store.putIfStatus(o, "main_locking"))) {
-          return this.must(id);
-        }
-        return o;
       }
 
       if (attempt < maxAttempts - 1) {
@@ -2961,6 +3125,7 @@ class HtlcService {
       order.direction !== "canton-to-evm" ||
       order.allocationCid ||
       order.htlcCid ||
+      order.counterTransferOfferCid ||
       order.counterTransferUpdateId
     ) {
       return false;

@@ -22,6 +22,8 @@
  * ownership so our server can read the user's own Loop profile/history.
  */
 import type { LoopProvider } from "@/hooks/useLoopWallet";
+import { isLoopPopupBlockedError } from "@/lib/loop-popup";
+import { LOOP_POPUP_BLOCKED_HINT } from "@/lib/swap-wait-copy";
 
 export type SwapSessionMintResult =
   | { ok: true }
@@ -58,6 +60,9 @@ function loopSignErrorMessage(error: unknown): string {
   const message =
     typeof maybe?.message === "string" ? maybe.message.toLowerCase() : "";
   if (code === "POPUP_CLOSED" || message.includes("popup")) {
+    if (isLoopPopupBlockedError(error) || message.includes("block")) {
+      return LOOP_POPUP_BLOCKED_HINT;
+    }
     return "Loop wallet window closed before signing. Keep the Loop wallet tab open, approve the signature, then return here.";
   }
   if (

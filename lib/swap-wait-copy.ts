@@ -13,6 +13,14 @@ export const LOOP_WALLET_POPUP_HINT =
 export const LOOP_WALLET_PENDING_HINT =
   "Check your Loop wallet for the pending transaction. If Loop is already open, the signature may already be waiting there.";
 
+/** Browser blocked window.open — user must allow pop-ups or open Loop manually. */
+export const LOOP_POPUP_BLOCKED_HINT =
+  "Your browser blocked the Loop wallet tab. Click the pop-up blocked icon in the address bar, allow pop-ups for this site, then try again.";
+
+/** Shown while waiting if Loop never appeared (often a blocked pop-up). */
+export const LOOP_POPUP_STALLED_HINT =
+  "Loop did not open? Your browser may have blocked it — allow pop-ups for this site or open Loop manually below.";
+
 export function swapFinalizeHint(params: { elapsedSec: number }): string {
   const { elapsedSec } = params;
   if (elapsedSec < 30) {

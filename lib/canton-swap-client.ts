@@ -79,6 +79,47 @@ export const cantonSwapApi = {
     });
   },
 
+  prepareUserLegIntent(params: {
+    fromAsset: CantonSwapMvpAssetId;
+    toAsset: CantonSwapMvpAssetId;
+    inAmount: string;
+    outAmount: string;
+    userParty: string;
+    inputHoldingCids: string[];
+    orderId?: string;
+  }) {
+    return json<{
+      orderId: string;
+      createdAt: number;
+      command: unknown;
+      disclosedContracts: unknown[];
+      synchronizerId: string;
+      transferKind: string;
+      counterRequiresAccept: boolean;
+      expectedMemo: string;
+    }>("/api/canton/swap/prepare-user-leg-intent", {
+      method: "POST",
+      body: JSON.stringify(params)
+    });
+  },
+
+  commitUserLeg(params: {
+    fromAsset: CantonSwapMvpAssetId;
+    toAsset: CantonSwapMvpAssetId;
+    inAmount: string;
+    outAmount: string;
+    userParty: string;
+    orderId: string;
+    createdAt: number;
+    submitUpdateId: string;
+    offerCidHint?: string;
+  }) {
+    return json<{ order: CantonSwapOrder }>("/api/canton/swap/commit-user-leg", {
+      method: "POST",
+      body: JSON.stringify(params)
+    });
+  },
+
   /** Managed: atomic create + settle (single HTTP round-trip). */
   submitManaged(params: {
     fromAsset: CantonSwapMvpAssetId;

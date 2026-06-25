@@ -134,6 +134,8 @@ export interface CantonSwapStore {
     expectedCounterLegOfferCid: string | null
   ): Promise<boolean>;
   byStatus(status: CantonSwapStatus): Promise<CantonSwapOrder[]>;
+  /** All user-leg offer CIDs ever linked (including completed). */
+  usedUserLegOfferCids(): Promise<Set<string>>;
   byParty(party: string, limit?: number): Promise<CantonSwapOrder[]>;
   pendingNetworkFeeAccounting(): Promise<CantonSwapOrder[]>;
   /** Atomically reserve current vault float and transition the order. */
@@ -298,5 +300,22 @@ export class SupabaseCantonSwapStore implements CantonSwapStore {
       reservedUnits: BigInt(result.reservedUnits ?? "0"),
       needUnits: BigInt(result.needUnits ?? "0")
     };
+  }
+
+  async usedUserLegOfferCids(): Promise<Set<string>> {
+    const sb = await createSupabaseServiceClient();
+    const { data, error } = await sb
+      .from(TABLE)
+      .select("user_leg_offer_cid")
+      .not("user_leg_offer_cid", "is", null);
+    if (error) {
+      throw new Error(enrichSchemaError("usedUserLegOfferCids", error.message));
+    }
+    const used = new Set<string>();
+    for (const row of data ?? []) {
+      const cid = row.user_leg_offer_cid;
+      if (typeof cid === "string" && cid) used.add(cid);
+    }
+    return used;
   }
 }

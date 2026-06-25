@@ -9,19 +9,25 @@ import { NETWORK } from "./constants";
 import { cantonSwapUserLegMemo } from "./swap-transfer-memo";
 import { buildTransferMeta } from "./transfer-options";
 
+const createdAt = Math.floor(Date.now() / 1000);
 const order = {
+  id: "c2c-test-order",
+  createdAt,
   fromAsset: "CBTC" as const,
+  toAsset: "CC" as const,
   inAmount: "0.001",
   userParty: "user::1",
   solverParty: "solver::1"
 };
+const expectedMemo = cantonSwapUserLegMemo(order);
 
 const baseOffer = {
   contractId: "offer-1",
   sender: "user::1",
   receiver: "solver::1",
   amountBtc: "0.00100000",
-  executeBefore: new Date(Date.now() + 60_000).toISOString()
+  executeBefore: new Date(Date.now() + 60_000).toISOString(),
+  meta: buildTransferMeta(expectedMemo)
 };
 
 test("accepts matching CBTC instrument", () => {
@@ -78,9 +84,20 @@ test("rejects CC offer on CBTC sell order", () => {
 });
 
 test("findUserLegOfferForOrder: matches settlement receiver party", () => {
+  const settlementOrder = {
+    ...order,
+    settlementParty: "settle::1",
+    solverParty: "settle::1"
+  };
   const cid = findUserLegOfferForOrder(
-    [{ ...baseOffer, receiver: "settle::1" }],
-    { ...order, settlementParty: "settle::1" },
+    [
+      {
+        ...baseOffer,
+        receiver: "settle::1",
+        meta: buildTransferMeta(cantonSwapUserLegMemo(settlementOrder))
+      }
+    ],
+    settlementOrder,
     NETWORK.instrumentId
   );
   assert.equal(cid, "offer-1");
@@ -95,8 +112,13 @@ test("findUserLegOfferForOrder: rejects offer on solver when settlement party co
   assert.equal(cid, null);
 });
 
-test("allows missing instrument when other fields match", () => {
-  validateUserLegOfferSnapshot({ ...baseOffer }, order, NETWORK.instrumentId);
+test("findUserLegOfferForOrder: rejects offers without order memo", () => {
+  const cid = findUserLegOfferForOrder(
+    [{ ...baseOffer, meta: buildTransferMeta("OranjSwap") }],
+    order,
+    NETWORK.instrumentId
+  );
+  assert.equal(cid, null);
 });
 
 test("findUserLegOfferForOrder: prefers exact order memo over same-amount offers", () => {

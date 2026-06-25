@@ -146,6 +146,8 @@ export interface SwapStore {
     reservedUnits: bigint;
     needUnits: bigint;
   }>;
+  /** All custody evidence CIDs ever linked to an order (including completed). */
+  usedCounterTransferOfferCids(): Promise<Set<string>>;
   /** Reserve reverse WBTC before locking the user's Canton leg. */
   reserveReverseEvmFloatBeforeMainLock(
     orderId: string,
@@ -332,5 +334,21 @@ export class SupabaseSwapStore implements SwapStore {
       .not("status", "in", "(main_claimed,refunded,cancelled,failed)");
     if (error) throw new Error(`htlc_orders active: ${error.message}`);
     return (data ?? []).map(rowToOrder);
+  }
+  async usedCounterTransferOfferCids(): Promise<Set<string>> {
+    const sb = await createSupabaseServiceClient();
+    const { data, error } = await sb
+      .from(TABLE)
+      .select("counter_transfer_offer_cid")
+      .not("counter_transfer_offer_cid", "is", null);
+    if (error) {
+      throw new Error(`htlc_orders usedCounterTransferOfferCids: ${error.message}`);
+    }
+    const used = new Set<string>();
+    for (const row of data ?? []) {
+      const cid = row.counter_transfer_offer_cid;
+      if (typeof cid === "string" && cid) used.add(cid);
+    }
+    return used;
   }
 }

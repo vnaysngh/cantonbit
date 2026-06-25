@@ -62,6 +62,10 @@ import { expectedCantonSwapParty } from "./htlc-auth";
 import { swapParty } from "./canton-swap-types";
 import { NETWORK } from "./constants";
 import { assertSwapPayAmountLimit } from "./swap-amount-limits";
+import {
+  assertValidPrepareCreatedAt,
+  issuePrepareCreatedAt
+} from "./swap-prepare-intent";
 import { randomUUID } from "crypto";
 
 function isUniqueConstraintViolation(err: unknown): boolean {
@@ -83,6 +87,8 @@ export class CantonSwapService {
     userParty: string;
     walletMode: CantonSwapWalletMode;
     orderId?: string;
+    /** Server-validated prepare timestamp — do not pass from raw client input. */
+    createdAt?: number;
   }): Promise<CantonSwapOrder> {
     const vaultParty = expectedCantonSwapParty();
     if (!vaultParty) {
@@ -150,7 +156,7 @@ export class CantonSwapService {
       };
     }
 
-    const now = Math.floor(Date.now() / 1000);
+    const now = params.createdAt ?? Math.floor(Date.now() / 1000);
     if (params.walletMode === "managed") {
       // Quote/fee work happens before persist — anchor expiry from write time, not RFQ start.
       incoming = {
@@ -547,15 +553,144 @@ export class CantonSwapService {
   }
 
   private async reservedUserLegCids(excludeOrderId: string): Promise<Set<string>> {
-    const active = await this.store.byStatus("user_locked");
-    const openLoop = await this.store.byStatus("open");
-    const cids = new Set<string>();
-    for (const row of [...active, ...openLoop]) {
-      if (row.id === excludeOrderId) continue;
-      if (row.walletMode !== "loop") continue;
-      if (row.userLegOfferCid) cids.add(row.userLegOfferCid);
+    const used = await this.store.usedUserLegOfferCids();
+    const self = await this.store.get(excludeOrderId);
+    if (self?.userLegOfferCid) used.delete(self.userLegOfferCid);
+    return used;
+  }
+
+  async prepareUserLegIntent(params: {
+    fromAsset: CantonSwapMvpAssetId;
+    toAsset: CantonSwapMvpAssetId;
+    inAmount: string;
+    outAmount: string;
+    userParty: string;
+    inputHoldingCids: string[];
+    orderId?: string;
+  }): Promise<{
+    orderId: string;
+    createdAt: number;
+    command: unknown;
+    disclosedContracts: unknown[];
+    synchronizerId: string;
+    transferKind: string;
+    counterRequiresAccept: boolean;
+    expectedMemo: string;
+  }> {
+    const vaultParty = expectedCantonSwapParty();
+    if (!vaultParty) {
+      throw new Error("CANTON_SWAP_SETTLEMENT_PARTY not configured");
     }
-    return cids;
+    assertSwapPayAmountLimit(params.fromAsset, params.inAmount);
+    await assertMvpOrderAmounts(
+      params.fromAsset,
+      params.toAsset,
+      params.inAmount,
+      params.outAmount
+    );
+    const q = await quoteMvpCantonSwap(
+      params.fromAsset,
+      params.toAsset,
+      params.inAmount
+    );
+    const to = getSwapAsset(params.toAsset);
+    if (toBaseUnits(params.outAmount, to.decimals) > q.outUnits) {
+      throw new Error(`outAmount ${params.outAmount} exceeds quote`);
+    }
+    const orderId = params.orderId ?? randomUUID();
+    const createdAt = issuePrepareCreatedAt();
+    const draft: CantonSwapOrder = {
+      id: orderId,
+      status: "open",
+      fromAsset: params.fromAsset,
+      toAsset: params.toAsset,
+      inAmount: params.inAmount,
+      outAmount: params.outAmount,
+      minOut: settlementMinOutAmount(params.outAmount, to.decimals),
+      quoteExpiresAt: q.expiresAt,
+      userParty: params.userParty,
+      solverParty: vaultParty,
+      settlementParty: vaultParty,
+      walletMode: "loop",
+      createdAt
+    };
+    const prep = await prepareLoopUserLegWithCids(draft, params.inputHoldingCids);
+    const { cantonSwapUserLegMemoFromTerms } = await import("./swap-transfer-memo");
+    return {
+      orderId,
+      createdAt,
+      expectedMemo: cantonSwapUserLegMemoFromTerms(draft),
+      ...prep
+    };
+  }
+
+  async commitUserLegOrder(params: {
+    fromAsset: CantonSwapMvpAssetId;
+    toAsset: CantonSwapMvpAssetId;
+    inAmount: string;
+    outAmount: string;
+    userParty: string;
+    orderId: string;
+    createdAt: number;
+    submitUpdateId: string;
+    offerCidHint?: string;
+  }): Promise<CantonSwapOrder> {
+    const vaultParty = expectedCantonSwapParty();
+    if (!vaultParty) {
+      throw new Error("CANTON_SWAP_SETTLEMENT_PARTY not configured");
+    }
+    const createdAt = assertValidPrepareCreatedAt(params.createdAt);
+    const { resolveSwapInstrumentId } = await import("./canton-swap-holdings");
+    const expectedInstrument = await resolveSwapInstrumentId(params.fromAsset);
+    const { cantonSwapUserLegMemoFromTerms } = await import("./swap-transfer-memo");
+    const expectedMemo = cantonSwapUserLegMemoFromTerms({
+      id: params.orderId,
+      createdAt,
+      fromAsset: params.fromAsset,
+      toAsset: params.toAsset,
+      userParty: params.userParty,
+      solverParty: vaultParty,
+      settlementParty: vaultParty
+    });
+    const { verifyUserLegFromSubmitUpdate } = await import("./canton-swap-leg-verify");
+    const { assertOfferOnlyUserLegEvidence } = await import(
+      "./canton-swap-leg-verify-logic"
+    );
+    const evidence = await verifyUserLegFromSubmitUpdate(params.submitUpdateId, {
+      userParty: params.userParty,
+      solverParty: vaultParty,
+      inAmount: params.inAmount,
+      fromAsset: params.fromAsset,
+      expectedInstrument,
+      expectedMemo,
+      strictOrderBoundMemo: true
+    });
+    assertOfferOnlyUserLegEvidence(evidence);
+    if (
+      params.offerCidHint &&
+      evidence.offerCid &&
+      evidence.offerCid !== params.offerCidHint
+    ) {
+      throw new Error("Loop transfer offer does not match the signed transaction");
+    }
+    const used = await this.store.usedUserLegOfferCids();
+    if (evidence.offerCid && used.has(evidence.offerCid)) {
+      throw new Error("user leg offer already reserved by another order");
+    }
+    await this.createOrder({
+      fromAsset: params.fromAsset,
+      toAsset: params.toAsset,
+      inAmount: params.inAmount,
+      outAmount: params.outAmount,
+      userParty: params.userParty,
+      walletMode: "loop",
+      orderId: params.orderId,
+      createdAt
+    });
+    return this.confirmUserLeg(params.orderId, {
+      offerCid: evidence.offerCid,
+      submitUpdateId: params.submitUpdateId
+    });
   }
 
   async fillLoop(id: string): Promise<CantonSwapOrder> {

@@ -121,6 +121,21 @@ export async function fetchMergedSwapHistory(opts: {
 
 export const htlcApi = {
   createOrder: (o: HtlcOrderInput) => jpost("/api/htlc", o),
+  prepareForwardIntent: (body: HtlcOrderInput) =>
+    jpost("/api/htlc/prepare-forward-intent", body),
+  commitForward: (body: HtlcOrderInput & { mainLockTx: string }) =>
+    jpost("/api/htlc/commit-forward", body),
+  prepareLockIntent: (body: HtlcOrderInput & { holdingCids: string[] }) =>
+    jpost("/api/htlc/prepare-lock-intent", body),
+  commitReverseLoop: (
+    body: HtlcOrderInput & {
+      createdAt: number;
+      submitUpdateId: string;
+      offerCidHint?: string;
+    }
+  ) => jpost("/api/htlc/commit-reverse-loop", body),
+  commitReverseManaged: (body: HtlcOrderInput) =>
+    jpost("/api/htlc/commit-reverse-managed", body),
   // RFQ quote (both directions, live WBTC/BTC price, 60s TTL, de-peg breaker).
   quoteReverse: (
     user: string,
@@ -160,6 +175,8 @@ export const htlcApi = {
     id: string,
     opts?: { maxAttempts?: number; pollMs?: number }
   ) => jpost(`/api/htlc/${id}/confirm-lock-loop`, opts),
+  /** Reverse Loop: release WBTC float when Loop sign failed before custody. */
+  releasePrelock: (id: string) => jpost(`/api/htlc/${id}/release-prelock`),
   lockCounter: (id: string) => jpost(`/api/htlc/${id}/lock-counter`),
   // Loop reveal+deliver. delivered=true → the CBTC auto-accepted (preapproval) and
   // there is NOTHING to accept — skip the wallet popup entirely.

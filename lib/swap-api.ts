@@ -13,6 +13,9 @@
  *     the public internet in split-service deploys (e.g. Railway).
  */
 
+import { isLoopPopupBlockedError } from "./loop-popup";
+import { LOOP_POPUP_BLOCKED_HINT } from "./swap-wait-copy";
+
 export const SWAP_API_URL =
   process.env.NEXT_PUBLIC_SWAP_API_URL ?? "/api/solver";
 
@@ -227,6 +230,7 @@ export function isUserRejection(e: unknown): boolean {
  */
 export function getSwapErrorMessage(e: unknown): string {
   if (isTransientEvmFinalityError(e)) return "";
+  if (isLoopPopupBlockedError(e)) return LOOP_POPUP_BLOCKED_HINT;
   if (isUserRejection(e)) return USER_REJECTED_MESSAGE;
   if (e instanceof ApiError) {
     const m = e.message?.trim();

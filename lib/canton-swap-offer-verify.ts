@@ -5,8 +5,6 @@ import type { CantonSwapMvpAssetId } from "./canton-swap-types";
 import { userLegReceiverParty } from "./canton-swap-types";
 import {
   cantonSwapUserLegMemo,
-  isLegacySwapMemo,
-  isOrderBoundSwapMemo,
   transferMemoFromMeta
 } from "./swap-transfer-memo";
 
@@ -79,23 +77,10 @@ export function findUserLegOfferForOrder(
     const exact = matches.filter((o) => transferMemoFromMeta(o.meta) === expectedMemo);
     if (exact.length === 1) return exact[0]!.contractId;
     if (exact.length > 1) return null;
-
-    const legacyCutoffMs = (order.createdAt - 60) * 1000;
-    const legacy = matches.filter((o) => {
-      const memo = transferMemoFromMeta(o.meta);
-      if (isOrderBoundSwapMemo(memo)) return false;
-      if (!isLegacySwapMemo(memo)) return false;
-      const requestedAtMs = Date.parse(o.requestedAt ?? "");
-      return Number.isFinite(requestedAtMs) && requestedAtMs >= legacyCutoffMs;
-    });
-    if (legacy.length === 1) return legacy[0]!.contractId;
     return null;
   }
 
-  matches.sort((a, b) =>
-    (a.requestedAt ?? "") < (b.requestedAt ?? "") ? 1 : -1
-  );
-  return matches[0]!.contractId;
+  return null;
 }
 
 export function validateUserLegOfferSnapshot(

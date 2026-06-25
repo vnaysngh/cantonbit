@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 
 import { ChainIcon } from "@/components/ChainIcon";
+import { LoopWalletHint } from "@/components/LoopWalletHint";
 import {
   SwapWaitBanner,
   swapWaitButtonLabel
@@ -84,7 +85,8 @@ import {
   forgetPendingMainLock,
   readPendingMainLocks,
   rememberPendingMainLock,
-  selectPendingMainLock
+  selectPendingMainLock,
+  type PendingMainLock
 } from "@/lib/htlc-pending-main-lock";
 import {
   listLoopCbtcHoldingCids,
@@ -92,6 +94,15 @@ import {
 } from "@/lib/loop-holdings";
 import { findLoopOutgoingTransferOffer } from "@/lib/loop-transfer-offers";
 import { cantonSwapApi } from "@/lib/canton-swap-client";
+import {
+  clearPendingLoopCommit,
+  patchPendingLoopCommit,
+  pendingC2cMatchesQuote,
+  pendingForwardMatchesQuote,
+  pendingReverseMatchesQuote,
+  readPendingLoopCommit,
+  writePendingLoopCommit
+} from "@/lib/swap-pending-loop-commit";
 import { logNetworkFeeInBrowser } from "@/lib/network-fee-client-log";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { htlcUserWbtcClaimTx } from "@/lib/htlc-order-logic";
@@ -108,10 +119,17 @@ import {
 } from "@/lib/secret-vault";
 import {
   SWAP_WAIT_POLL_MS,
+  LOOP_POPUP_BLOCKED_HINT,
+  LOOP_POPUP_STALLED_HINT,
   LOOP_WALLET_PENDING_HINT,
   LOOP_WALLET_POPUP_HINT,
   swapWaitTerminalMessage
 } from "@/lib/swap-wait-copy";
+import {
+  isPopupBlocked,
+  openLoopWalletTab,
+  preflightLoopPopup
+} from "@/lib/loop-popup";
 import {
   timelocksFromExpiration,
   timelocksFromExpirationCanton,
@@ -734,6 +752,26 @@ export default function SwapPage() {
   const [sessionReady, setSessionReady] = useState<boolean | null>(null);
   const [signing, setSigning] = useState(false);
   const [signError, setSignError] = useState<string | null>(null);
+  const [loopPopupBlocked, setLoopPopupBlocked] = useState(false);
+
+  const openLoopWallet = useCallback(() => {
+    const tab = openLoopWalletTab();
+    if (isPopupBlocked(tab)) {
+      setLoopPopupBlocked(true);
+      return false;
+    }
+    setLoopPopupBlocked(false);
+    return true;
+  }, []);
+
+  const quoteNeedsLoopSign = useCallback(
+    (quote: QuoteResponse) =>
+      !isParticipantManaged &&
+      !!wallet.provider &&
+      (quote.direction === "canton-to-canton" ||
+        quote.direction === "canton-to-evm"),
+    [isParticipantManaged, wallet.provider]
+  );
 
   // --- ENABLE-AUTO-ACCEPT popup. Shown when Review finds preapproval OFF. The
   //     CTA first sends the user to Loop settings; on return it flips to a
@@ -788,26 +826,34 @@ export default function SwapPage() {
 
   // --- The explicit "Sign in your Loop wallet" action (driven by the prerequisite
   //     popup CTA). One signature → mints the JWT session → unblocks the form. ---
-  const handleSign = useCallback(async () => {
+  const handleSign = useCallback(() => {
     if (!wallet.provider) return;
     setSignError(null);
-    setSigning(true);
-    try {
-      const result = await mintSwapSessionDetailed(wallet.provider);
-      setSessionReady(result.ok);
-      if (!result.ok) {
-        setSignError(result.message);
-      }
-    } catch (e) {
-      setSessionReady(false);
-      setSignError(
-        e instanceof Error
-          ? e.message
-          : "Something went wrong while signing. Please try again."
-      );
-    } finally {
-      setSigning(false);
+    if (!preflightLoopPopup().ok) {
+      setLoopPopupBlocked(true);
+      setSignError(LOOP_POPUP_BLOCKED_HINT);
+      return;
     }
+    setLoopPopupBlocked(false);
+    setSigning(true);
+    void (async () => {
+      try {
+        const result = await mintSwapSessionDetailed(wallet.provider!);
+        setSessionReady(result.ok);
+        if (!result.ok) {
+          setSignError(result.message);
+        }
+      } catch (e) {
+        setSessionReady(false);
+        setSignError(
+          e instanceof Error
+            ? e.message
+            : "Something went wrong while signing. Please try again."
+        );
+      } finally {
+        setSigning(false);
+      }
+    })();
   }, [wallet.provider]);
 
   /** Loop forward path only — managed (email) swaps use on-ledger HtlcLock, not Loop preapproval. */
@@ -1235,16 +1281,6 @@ export default function SwapPage() {
           return;
         }
 
-        const { order } = await cantonSwapApi.createOrder({
-          fromAsset,
-          toAsset,
-          inAmount,
-          outAmount: quote.outAmount,
-          userParty: destinationParty,
-          walletMode
-        });
-        c2cDraftOrderIdRef.current = order.id;
-
         const provider = wallet.provider;
         if (!provider) {
           retry("Connect Loop wallet first.");
@@ -1256,7 +1292,7 @@ export default function SwapPage() {
           retry("Loop wallet party unavailable — reconnect and try again.");
           return;
         }
-        if (loopParty !== order.userParty) {
+        if (loopParty !== destinationParty) {
           retry(
             "Loop wallet party does not match swap account — reconnect Loop."
           );
@@ -1273,7 +1309,47 @@ export default function SwapPage() {
           retry(`No unlocked ${fromAsset} in Loop wallet.`);
           return;
         }
-        const prep = await cantonSwapApi.prepareUserLeg(order.id, holdingCids);
+        const c2cQuoteKey = {
+          fromAsset,
+          toAsset,
+          inAmount,
+          outAmount: quote.outAmount,
+          userParty: destinationParty
+        };
+        const pendingC2c = readPendingLoopCommit();
+        if (
+          pendingC2c?.flow === "c2c" &&
+          pendingC2cMatchesQuote(pendingC2c, c2cQuoteKey) &&
+          pendingC2c.submitUpdateId
+        ) {
+          await cantonSwapApi.commitUserLeg({
+            ...c2cQuoteKey,
+            orderId: pendingC2c.orderId,
+            createdAt: pendingC2c.createdAt,
+            submitUpdateId: pendingC2c.submitUpdateId,
+            offerCidHint: pendingC2c.offerCid
+          });
+          clearPendingLoopCommit();
+          startTracking(pendingC2c.orderId);
+          return;
+        }
+        const prep = await cantonSwapApi.prepareUserLegIntent({
+          ...c2cQuoteKey,
+          inputHoldingCids: holdingCids,
+          orderId:
+            pendingC2c?.flow === "c2c" &&
+            pendingC2cMatchesQuote(pendingC2c, c2cQuoteKey)
+              ? pendingC2c.orderId
+              : undefined
+        });
+        const orderId = prep.orderId;
+        const legCreatedAt = prep.createdAt;
+        writePendingLoopCommit({
+          flow: "c2c",
+          orderId,
+          createdAt: legCreatedAt,
+          ...c2cQuoteKey
+        });
         setStage({ kind: "submitting", quote, c2cPhase: "confirm" });
         const submitResult = await provider.submitAndWaitForTransaction({
           commands: [prep.command],
@@ -1283,50 +1359,41 @@ export default function SwapPage() {
           readAs: [loopParty],
           synchronizerId: prep.synchronizerId
         });
-        const asset = getSwapAsset(fromAsset);
         const submitUpdateId = extractSubmitUpdateId(submitResult);
+        if (!submitUpdateId) {
+          retry("Loop did not return a ledger update id — try again.");
+          return;
+        }
         let offerCid = extractLoopSubmitOfferCid(submitResult);
         if (!offerCid) {
+          const asset = getSwapAsset(fromAsset);
           offerCid =
             (await findLoopOutgoingTransferOffer(
               provider,
               {
                 senderParty: loopParty,
-                receiverParty: order.settlementParty ?? order.solverParty,
-                amount: order.inAmount,
+                receiverParty: SOLVER_CANTON ?? destinationParty,
+                amount: inAmount,
                 instrumentId: asset.instrumentId,
                 amountDecimals: asset.decimals
               },
               { maxAttempts: 6, pollMs: 1000 }
             )) ?? undefined;
         }
-        let confirmed = false;
-        for (let i = 0; i < 4; i++) {
-          try {
-            await cantonSwapApi.confirmUserLeg(order.id, {
-              offerContractId: offerCid,
-              submitUpdateId
-            });
-            confirmed = true;
-            break;
-          } catch {
-            if (i < 3) await sleep(1500);
-          }
-        }
-        if (!confirmed) {
-          const { order: afterSign } = await cantonSwapApi.get(order.id);
-          if (afterSign.status === "user_locked") {
-            confirmed = true;
-          }
-        }
-        if (!confirmed) {
-          retry(
-            "Signed in Loop but we couldn't verify the transfer yet — wait a few seconds and try again."
-          );
-          return;
-        }
-        c2cDraftOrderIdRef.current = null;
-        startTracking(order.id);
+        patchPendingLoopCommit({
+          flow: "c2c",
+          submitUpdateId,
+          offerCid
+        });
+        await cantonSwapApi.commitUserLeg({
+          ...c2cQuoteKey,
+          orderId,
+          createdAt: legCreatedAt,
+          submitUpdateId,
+          offerCidHint: offerCid
+        });
+        clearPendingLoopCommit();
+        startTracking(orderId);
       } catch (e) {
         retry(`Could not submit swap: ${getSwapErrorMessage(e)}`);
       }
@@ -1371,51 +1438,72 @@ export default function SwapPage() {
       const cbtcUnits = BigInt(quote.order.outputs[0].amount);
       const cbtcAmount = (Number(cbtcUnits) / 1e8).toFixed(8); // CBTC decimal string
 
-      // ===== HTLC FLOW (trustless EVM leg + Cancore-style reveal on CBTC) =====
-      // 1. generate the secret (stays in the browser until the reveal) + create order
-      const { secret, hashLock } = generateSecret();
-      const id = hashLock; // swapId = hashLock
       const now = Math.floor(Date.now() / 1000);
-      // Derive the staggered timelocks from the chosen order expiration (Cancore §8):
-      // userTimelock (EVM, = now + expiration) > solverTimelock (Canton, − gap).
       const { userTimelock, solverTimelock } = timelocksFromExpiration(
         now,
         expirationSeconds
       );
-      try {
-        setStage({ kind: "submitting", quote });
-        await htlcApi.createOrder({
-          id,
-          direction: "evm-to-canton",
+      const counterMode: "managed" | "loop" = isParticipantManaged
+        ? "managed"
+        : "loop";
+      const forwardQuoteKey = {
+        userCantonParty: quote.cantonParty,
+        userEvmAddress: evm.account,
+        wbtcAmount: wbtcUnits.toString(),
+        cbtcAmount,
+        userTimelock,
+        solverTimelock,
+        counterMode
+      };
+      const pendingForward = readPendingLoopCommit();
+      let secret: string;
+      let hashLock: string;
+      let id: string;
+      if (
+        pendingForward?.flow === "forward-htlc" &&
+        pendingForwardMatchesQuote(pendingForward, forwardQuoteKey)
+      ) {
+        secret = pendingForward.secret;
+        hashLock = pendingForward.hashLock;
+        id = hashLock;
+      } else {
+        ({ secret, hashLock } = generateSecret());
+        id = hashLock;
+        writePendingLoopCommit({
+          flow: "forward-htlc",
           hashLock,
-          userEvmAddress: evm.account,
-          solverEvmAddress: SOLVER_EVM,
-          wbtcAmount: wbtcUnits.toString(),
-          userTimelock,
-          userCantonParty: quote.cantonParty,
-          solverCantonParty: SOLVER_CANTON,
-          cbtcAmount,
-          solverTimelock,
-          // managed (email) → on-ledger HtlcLock; loop → standard transfer + accept.
-          counterMode: isParticipantManaged ? "managed" : "loop"
+          secret,
+          ...forwardQuoteKey
         });
-        await htlcApi.accept(id); // (the independent solver also accepts; idempotent)
-        await persistSwapSecret(id, secret, {
-          direction: "evm-to-canton",
-          counterMode: isParticipantManaged ? "managed" : "loop",
-          userCantonParty: quote.cantonParty,
-          userEvmAddress: evm.account,
-          userTimelock,
-          solverTimelock
-        });
-      } catch (e) {
-        retry(`Could not create the swap order: ${getSwapErrorMessage(e)}`);
-        return;
       }
+      const orderInput = {
+        id,
+        direction: "evm-to-canton" as const,
+        hashLock,
+        userEvmAddress: evm.account,
+        solverEvmAddress: SOLVER_EVM,
+        wbtcAmount: wbtcUnits.toString(),
+        userTimelock,
+        userCantonParty: quote.cantonParty,
+        solverCantonParty: SOLVER_CANTON,
+        cbtcAmount,
+        solverTimelock,
+        counterMode
+      };
 
-      // 2/3. approve WBTC to the HTLC escrow + lock it (MetaMask) — THE USER's action.
       let lockTx = "";
       try {
+        setStage({ kind: "submitting", quote });
+        if (
+          !(
+            pendingForward?.flow === "forward-htlc" &&
+            pendingForwardMatchesQuote(pendingForward, forwardQuoteKey) &&
+            pendingForward.prepared
+          )
+        ) {
+          await htlcApi.prepareForwardIntent(orderInput);
+          patchPendingLoopCommit({ flow: "forward-htlc", prepared: true });
+        }
         setStage({ kind: "approving", quote });
         const wbtcToken = SWAP_CHAIN.wbtc || quote.wbtc;
         lockTx = await evmApproveAndLock(
@@ -1445,11 +1533,25 @@ export default function SwapPage() {
           lockTx,
           userCantonParty: quote.cantonParty,
           userEvmAddress: evm.account,
-          expiresAt: userTimelock + 3600
+          expiresAt: userTimelock + 3600,
+          wbtcAmount: orderInput.wbtcAmount,
+          cbtcAmount: orderInput.cbtcAmount,
+          userTimelock: orderInput.userTimelock,
+          solverTimelock: orderInput.solverTimelock,
+          counterMode: orderInput.counterMode
         });
         try {
           await evm.waitForReceipt(lockTx);
-          await htlcApi.recordMainLock(id, lockTx);
+          await htlcApi.commitForward({ ...orderInput, mainLockTx: lockTx });
+          await persistSwapSecret(id, secret, {
+            direction: "evm-to-canton",
+            counterMode,
+            userCantonParty: quote.cantonParty,
+            userEvmAddress: evm.account,
+            userTimelock,
+            solverTimelock
+          });
+          clearPendingLoopCommit();
           forgetPendingMainLock(id);
         } finally {
           if (activeMainLockRecordingRef.current === id) {
@@ -1608,53 +1710,99 @@ export default function SwapPage() {
         return;
       }
       const cbtcAmount = (Number(cbtcUnits) / 1e8).toFixed(8);
-      const { secret, hashLock } = generateSecret();
-      const id = hashLock;
+      const wbtcAmount = wbtcUnits.toString();
       const now = Math.floor(Date.now() / 1000);
       const { userTimelock, solverTimelock } = timelocksFromExpiration(
         now,
         expirationSeconds
       );
-      let counterMode: "managed" | "loop" = isParticipantManaged
+      const counterMode: "managed" | "loop" = isParticipantManaged
         ? "managed"
         : "loop";
+      const reverseQuoteKey = {
+        cbtcAmount,
+        wbtcAmount,
+        userCantonParty: destinationParty,
+        userEvmAddress: evm.account,
+        userTimelock,
+        solverTimelock
+      };
+      const pendingReverse = readPendingLoopCommit();
+      let secret: string;
+      let hashLock: string;
+      let id: string;
+      if (
+        pendingReverse?.flow === "reverse-htlc" &&
+        pendingReverseMatchesQuote(pendingReverse, reverseQuoteKey, wbtcAmount)
+      ) {
+        secret = pendingReverse.secret;
+        hashLock = pendingReverse.hashLock;
+        id = hashLock;
+      } else {
+        ({ secret, hashLock } = generateSecret());
+        id = hashLock;
+        writePendingLoopCommit({
+          flow: "reverse-htlc",
+          hashLock,
+          secret,
+          ...reverseQuoteKey
+        });
+      }
+      const orderInput = {
+        id,
+        direction: "canton-to-evm" as const,
+        hashLock,
+        userEvmAddress: evm.account,
+        solverEvmAddress: SOLVER_EVM,
+        wbtcAmount,
+        userTimelock,
+        userCantonParty: destinationParty,
+        solverCantonParty: SOLVER_CANTON,
+        cbtcAmount,
+        solverTimelock,
+        counterMode
+      };
+
       try {
         setStage({ kind: "submitting", quote });
-        const { order: created } = (await htlcApi.createOrder({
-          id,
-          direction: "canton-to-evm",
-          hashLock,
-          userEvmAddress: evm.account,
-          solverEvmAddress: SOLVER_EVM,
-          wbtcAmount: wbtcUnits.toString(),
-          userTimelock,
-          userCantonParty: destinationParty,
-          solverCantonParty: SOLVER_CANTON,
-          cbtcAmount,
-          solverTimelock
-        })) as { order?: { counterMode?: "managed" | "loop" } };
-        counterMode =
-          created?.counterMode ?? (isParticipantManaged ? "managed" : "loop");
-        await htlcApi.accept(id);
-        await persistSwapSecret(id, secret, {
-          direction: "canton-to-evm",
-          counterMode,
-          userCantonParty: destinationParty,
-          userEvmAddress: evm.account,
-          userTimelock,
-          solverTimelock
-        });
-      } catch (e) {
-        retry(`Could not create the swap order: ${getSwapErrorMessage(e)}`);
-        return;
-      }
-
-      const managed = counterMode === "managed";
-      try {
-        if (managed) {
+        if (counterMode === "managed") {
           setStage({ kind: "redirecting", orderId: id });
           setAmount("");
-          await htlcApi.lockMain(id);
+          await htlcApi.commitReverseManaged(orderInput);
+          await persistSwapSecret(id, secret, {
+            direction: "canton-to-evm",
+            counterMode,
+            userCantonParty: destinationParty,
+            userEvmAddress: evm.account,
+            userTimelock,
+            solverTimelock
+          });
+          clearPendingLoopCommit();
+          startTracking(id);
+          return;
+        }
+
+        if (
+          pendingReverse?.flow === "reverse-htlc" &&
+          pendingReverseMatchesQuote(pendingReverse, reverseQuoteKey, wbtcAmount) &&
+          pendingReverse.submitUpdateId &&
+          pendingReverse.createdAt
+        ) {
+          await htlcApi.commitReverseLoop({
+            ...orderInput,
+            createdAt: pendingReverse.createdAt,
+            submitUpdateId: pendingReverse.submitUpdateId,
+            offerCidHint: pendingReverse.offerCidHint
+          });
+          await persistSwapSecret(id, secret, {
+            direction: "canton-to-evm",
+            counterMode,
+            userCantonParty: destinationParty,
+            userEvmAddress: evm.account,
+            userTimelock,
+            solverTimelock
+          });
+          clearPendingLoopCommit();
           startTracking(id);
           return;
         }
@@ -1673,14 +1821,19 @@ export default function SwapPage() {
           throw new Error(
             "No unlocked CBTC holdings found in your Loop wallet."
           );
-        const { order: lockOrder } = await htlcApi.getOrder(id);
-        void lockOrder;
-        const prep = await htlcApi.prepareLockLoop(id, holdingCids);
+        const prep = await htlcApi.prepareLockIntent({
+          ...orderInput,
+          holdingCids
+        });
+        patchPendingLoopCommit({
+          flow: "reverse-htlc",
+          createdAt: prep.createdAt
+        });
         const userParty =
           (provider as { party_id?: string }).party_id ??
           wallet.partyId ??
           "";
-        await provider.submitAndWaitForTransaction(
+        const submitResult = await provider.submitAndWaitForTransaction(
           {
             commands: [prep.command],
             disclosedContracts: prep.disclosedContracts,
@@ -1691,33 +1844,33 @@ export default function SwapPage() {
           },
           undefined
         );
-        let confirmed = false;
-        for (let i = 0; i < 3; i++) {
-          try {
-            await htlcApi.confirmLockLoop(id, {
-              maxAttempts: 1,
-              pollMs: 500
-            });
-            confirmed = true;
-            break;
-          } catch {
-            await sleep(2000);
-          }
+        const submitUpdateId = extractSubmitUpdateId(submitResult);
+        if (!submitUpdateId) {
+          throw new Error(
+            "Loop did not return a ledger update id — open Loop and try again."
+          );
         }
-        if (!confirmed) {
-          const { order: afterSign } = await htlcApi.getOrder(id);
-          if (
-            (afterSign as { status?: string } | undefined)?.status ===
-            "main_locked"
-          ) {
-            confirmed = true;
-          }
-        }
-        // Loop accepted the transfer submit, but the transfer/auto-accepted
-        // holding may lag before it is visible from the solver participant. Keep
-        // the order live and let the status page + daemon reconcile it instead
-        // of sending the user back to the quote form while their wallet shows a
-        // pending CBTC send.
+        const offerCidHint = extractLoopSubmitOfferCid(submitResult) ?? undefined;
+        patchPendingLoopCommit({
+          flow: "reverse-htlc",
+          submitUpdateId,
+          offerCidHint
+        });
+        await htlcApi.commitReverseLoop({
+          ...orderInput,
+          createdAt: prep.createdAt,
+          submitUpdateId,
+          offerCidHint
+        });
+        await persistSwapSecret(id, secret, {
+          direction: "canton-to-evm",
+          counterMode,
+          userCantonParty: destinationParty,
+          userEvmAddress: evm.account,
+          userTimelock,
+          solverTimelock
+        });
+        clearPendingLoopCommit();
         startTracking(id);
       } catch (e) {
         retry(getSwapErrorMessage(e));
@@ -1966,16 +2119,43 @@ export default function SwapPage() {
 
         // The configured-chain server check is authoritative. While the tx is
         // pending this fails closed; the interval retries until the lock is visible.
-        const recovered = (await htlcApi.recordMainLock(
-          pending.swapId,
-          pending.lockTx
-        )) as {
-          order?: {
-            status?: string;
-            wbtcAmount?: string;
-            cbtcAmount?: string;
-          };
-        };
+        const stored = pending as PendingMainLock;
+        const recovered =
+          stored.wbtcAmount &&
+          stored.cbtcAmount &&
+          stored.userTimelock &&
+          stored.solverTimelock
+            ? ((await htlcApi.commitForward({
+                id: stored.swapId,
+                direction: "evm-to-canton",
+                hashLock: stored.swapId,
+                userEvmAddress: stored.userEvmAddress,
+                solverEvmAddress: SOLVER_EVM,
+                wbtcAmount: stored.wbtcAmount,
+                userTimelock: stored.userTimelock,
+                userCantonParty: stored.userCantonParty,
+                solverCantonParty: SOLVER_CANTON,
+                cbtcAmount: stored.cbtcAmount,
+                solverTimelock: stored.solverTimelock,
+                counterMode: stored.counterMode ?? "loop",
+                mainLockTx: stored.lockTx
+              })) as {
+                order?: {
+                  status?: string;
+                  wbtcAmount?: string;
+                  cbtcAmount?: string;
+                };
+              })
+            : ((await htlcApi.recordMainLock(
+                pending.swapId,
+                pending.lockTx
+              )) as {
+                order?: {
+                  status?: string;
+                  wbtcAmount?: string;
+                  cbtcAmount?: string;
+                };
+              });
         forgetPendingMainLock(pending.swapId);
         if (!cancelled) {
           const recoveredStatus = recovered.order?.status;
@@ -3300,6 +3480,8 @@ export default function SwapPage() {
           isLoopWallet={!isParticipantManaged && !!wallet.provider}
           destinationParty={destinationParty}
           loopProvider={wallet.provider ?? undefined}
+          loopPopupBlocked={loopPopupBlocked}
+          onOpenLoopWallet={openLoopWallet}
           onRefreshQuote={handleQuote}
           onConfirm={() => {
             if (stage.kind !== "quoted") return;
@@ -3307,13 +3489,21 @@ export default function SwapPage() {
               void handleQuote();
               return;
             }
+            if (quoteNeedsLoopSign(stage.quote) && !preflightLoopPopup().ok) {
+              setLoopPopupBlocked(true);
+              return;
+            }
+            setLoopPopupBlocked(false);
             if (stage.quote.direction === "canton-to-evm") {
               void handleConfirmReverse(stage.quote);
             } else {
               void handleConfirm(stage.quote);
             }
           }}
-          onClose={reset}
+          onClose={() => {
+            setLoopPopupBlocked(false);
+            reset();
+          }}
         />
       )}
 
@@ -3323,6 +3513,8 @@ export default function SwapPage() {
         <SignGateModal
           signing={signing}
           error={signError}
+          loopPopupBlocked={loopPopupBlocked}
+          onOpenLoopWallet={openLoopWallet}
           onSign={handleSign}
         />
       )}
@@ -3665,6 +3857,8 @@ function ReviewModal({
   isLoopWallet,
   destinationParty,
   loopProvider,
+  loopPopupBlocked,
+  onOpenLoopWallet,
   onRefreshQuote,
   onConfirm,
   onClose
@@ -3698,6 +3892,8 @@ function ReviewModal({
   isLoopWallet?: boolean;
   destinationParty?: string | null;
   loopProvider?: unknown;
+  loopPopupBlocked?: boolean;
+  onOpenLoopWallet?: () => void;
   onRefreshQuote: () => void;
   onConfirm: () => void;
   onClose: () => void;
@@ -4030,6 +4226,15 @@ function ReviewModal({
     !isParticipantManaged &&
     (isC2c || quote.direction === "canton-to-evm");
   const loopBusy = !!busy && busy.toLowerCase().includes("loop");
+  const [loopStalled, setLoopStalled] = useState(false);
+  useEffect(() => {
+    if (!loopBusy) {
+      setLoopStalled(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setLoopStalled(true), 4000);
+    return () => window.clearTimeout(timer);
+  }, [loopBusy]);
 
   let actionLabel = "Confirm swap";
   let actionDisabled = !!busy;
@@ -4144,9 +4349,21 @@ function ReviewModal({
         )}
 
         {needsLoopSignOnConfirm && !busy && !blockingError && (
-          <p className="mt-4 text-sm leading-6 text-muted-foreground">
+          <LoopWalletHint className="mt-4" icon="open_in_new">
             {LOOP_WALLET_POPUP_HINT}
-          </p>
+          </LoopWalletHint>
+        )}
+
+        {loopPopupBlocked && !busy && (
+          <LoopWalletHint
+            className="mt-4"
+            variant="blocked"
+            icon="block"
+            actionLabel="Open Loop wallet"
+            onAction={onOpenLoopWallet}
+          >
+            {LOOP_POPUP_BLOCKED_HINT}
+          </LoopWalletHint>
         )}
 
         {/* Primary action — turns into an inline progress state while busy. */}
@@ -4166,9 +4383,22 @@ function ReviewModal({
         </button>
 
         {loopBusy && (
-          <p className="mt-3 text-sm leading-6 text-muted-foreground">
-            {LOOP_WALLET_PENDING_HINT}
-          </p>
+          <>
+            <LoopWalletHint className="mt-3" icon="account_balance_wallet">
+              {LOOP_WALLET_PENDING_HINT}
+            </LoopWalletHint>
+            {(loopStalled || loopPopupBlocked) && (
+              <LoopWalletHint
+                className="mt-3"
+                variant="blocked"
+                icon="block"
+                actionLabel="Open Loop wallet"
+                onAction={onOpenLoopWallet}
+              >
+                {LOOP_POPUP_STALLED_HINT}
+              </LoopWalletHint>
+            )}
+          </>
         )}
       </div>
     </div>
@@ -4178,12 +4408,26 @@ function ReviewModal({
 function SignGateModal({
   signing,
   error,
+  loopPopupBlocked,
+  onOpenLoopWallet,
   onSign
 }: {
   signing: boolean;
   error: string | null;
+  loopPopupBlocked?: boolean;
+  onOpenLoopWallet?: () => void;
   onSign: () => void;
 }) {
+  const [signStalled, setSignStalled] = useState(false);
+  useEffect(() => {
+    if (!signing) {
+      setSignStalled(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setSignStalled(true), 4000);
+    return () => window.clearTimeout(timer);
+  }, [signing]);
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
@@ -4205,11 +4449,23 @@ function SignGateModal({
           settings and track delivery. It&rsquo;s a one-time signature and{" "}
           <span className="font-medium text-foreground">moves no funds</span>.
         </p>
-        <p className="mt-2 text-sm text-on-surface-variant">
+        <LoopWalletHint className="mt-3" icon="open_in_new">
           {LOOP_WALLET_POPUP_HINT}
-        </p>
+        </LoopWalletHint>
 
-        {error && (
+        {(loopPopupBlocked || error === LOOP_POPUP_BLOCKED_HINT) && (
+          <LoopWalletHint
+            className="mt-3"
+            variant="blocked"
+            icon="block"
+            actionLabel="Open Loop wallet"
+            onAction={onOpenLoopWallet}
+          >
+            {LOOP_POPUP_BLOCKED_HINT}
+          </LoopWalletHint>
+        )}
+
+        {error && error !== LOOP_POPUP_BLOCKED_HINT && (
           <div className="mt-4 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
             {error}
           </div>
@@ -4223,9 +4479,22 @@ function SignGateModal({
           {signing ? "Check your Loop wallet…" : "Sign in Loop wallet"}
         </button>
         {signing && (
-          <p className="mt-3 text-sm leading-6 text-muted-foreground">
-            {LOOP_WALLET_PENDING_HINT}
-          </p>
+          <>
+            <LoopWalletHint className="mt-3" icon="account_balance_wallet">
+              {LOOP_WALLET_PENDING_HINT}
+            </LoopWalletHint>
+            {signStalled && (
+              <LoopWalletHint
+                className="mt-3"
+                variant="blocked"
+                icon="block"
+                actionLabel="Open Loop wallet"
+                onAction={onOpenLoopWallet}
+              >
+                {LOOP_POPUP_STALLED_HINT}
+              </LoopWalletHint>
+            )}
+          </>
         )}
       </div>
     </div>

@@ -818,22 +818,12 @@ export async function findOfferFromSender(
       throw new Error("ambiguous transfer recovery — multiple offers carry the expected order memo");
     }
     if (exact.length === 1) return exact[0]!.contractId;
-
-    const legacy = match.filter((o) => {
-      const memo = transferMemoFromMeta(o.meta);
-      if (isOrderBoundSwapMemo(memo)) return false;
-      return isLegacySwapMemo(memo);
-    });
-    if (legacy.length > 1) {
-      throw new Error(
-        "ambiguous legacy transfer recovery — multiple sender/receiver offers lack an order memo"
-      );
-    }
-    return legacy[0]?.contractId ?? null;
+    return null;
   }
 
-  // Newest first by requestedAt — legacy callers without an order-bound memo.
-  match.sort((a, b) => (a.requestedAt < b.requestedAt ? 1 : -1));
+  if (match.length > 1) {
+    throw new Error("ambiguous transfer recovery — multiple offers match without order memo");
+  }
   return match[0]?.contractId ?? null;
 }
 
