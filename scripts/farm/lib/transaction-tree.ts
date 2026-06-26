@@ -56,7 +56,7 @@ export async function fetchTransactionTreeByUpdateId(
               cumulative: [
                 {
                   identifierFilter: {
-                    WildcardFilter: { value: { includeCreatedEventBlob: false } }
+                    WildcardFilter: { value: { includeCreatedEventBlob: true } }
                   }
                 }
               ]

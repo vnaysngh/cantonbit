@@ -297,7 +297,9 @@ export async function buildTransferExercise(params: {
   } = params;
   const now = new Date().toISOString();
   const executeBefore = new Date(Date.now() + Math.max(60, expirationSeconds) * 1000).toISOString();
-  const normalized = inputHoldings.map((h) => ({
+  const normalized = inputHoldings
+    .filter((h) => h.createdEventBlob?.trim())
+    .map((h) => ({
     ...h,
     payload: {
       owner: h.payload?.owner ?? senderParty,
@@ -305,6 +307,11 @@ export async function buildTransferExercise(params: {
       instrumentId: h.payload?.instrumentId ?? instrumentId
     }
   }));
+  if (normalized.length === 0) {
+    throw new Error(
+      `sender has no disclosable ${assetSymbol} holdings (missing createdEventBlob)`
+    );
+  }
   const picked = useAllInputHoldings
     ? normalized
     : selectHoldingsForAmount(
@@ -638,6 +645,7 @@ export async function listCbtcHoldings(
       | undefined;
     if (isActivelyLocked(lock, nowIso)) continue;
     const amount = typeof arg?.amount === "string" ? arg.amount : "0";
+    if (!ev.createdEventBlob?.trim()) continue;
     out.push({
       contractId: ev.contractId,
       createdEventBlob: ev.createdEventBlob ?? "",
@@ -655,10 +663,11 @@ export async function listCbtcHoldings(
       syncVaultCbtcCacheFromAcs(out);
       return out;
     }
-    if (getVaultCbtcCachedHoldings().length === 0) {
+    let cached = getVaultCbtcCachedHoldings();
+    if (cached.length === 0) {
       await bootstrapVaultCbtcCache(jwt, party);
+      cached = getVaultCbtcCachedHoldings();
     }
-    const cached = getVaultCbtcCachedHoldings();
     if (cached.length > 0) return cached;
   }
 

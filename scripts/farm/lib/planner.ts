@@ -3,6 +3,10 @@ import { CBTC_ASSET, CC_ASSET } from "../../../lib/canton-assets";
 import { partyBalancesSummary } from "./float";
 import { isUtxoOverAcsCap } from "./utxo-guard";
 import { quoteFarmSwap } from "./quote";
+import {
+  getVaultCbtcCachedHoldings,
+  isVaultCbtcCacheParty
+} from "./vault-cbtc-holdings";
 import type { FarmAsset, FarmFleetConfig, OrganicPick, PacingConfig } from "./types";
 
 /** Ledger-measured average (2 txs/swap). Used when Lighthouse traffic is unavailable. */
@@ -269,6 +273,7 @@ function buildCandidates(params: {
   pacing: PacingConfig;
   quotes: DirectionQuotes;
   state: PlannerState;
+  vaultCbtcSpendable: boolean;
 }): Candidate[] {
   const out: Candidate[] = [];
   params.fleet.traders.forEach((trader, traderIndex) => {
@@ -293,6 +298,7 @@ function buildCandidates(params: {
     }
     if (
       traderCanSellCc(snap, params.pacing) &&
+      params.vaultCbtcSpendable &&
       vaultCanDeliver(params.float.vault, "CBTC", params.quotes) &&
       directionAllowed("CC→CBTC", params.state) &&
       traderDirectionAllowed(trader.party, "CC→CBTC", params.state)
@@ -337,12 +343,17 @@ export async function planNextSwap(params: {
     loadDirectionQuotes(params.pacing)
   ]);
 
+  const vaultCbtcSpendable =
+    !isVaultCbtcCacheParty(params.fleet.vault) ||
+    getVaultCbtcCachedHoldings().length > 0;
+
   let candidates = buildCandidates({
     float,
     fleet: params.fleet,
     pacing: params.pacing,
     quotes,
-    state: params.state
+    state: params.state,
+    vaultCbtcSpendable
   });
 
   if (candidates.length === 0) {
@@ -352,7 +363,8 @@ export async function planNextSwap(params: {
       fleet: params.fleet,
       pacing: params.pacing,
       quotes,
-      state: { ...params.state, lastDirection: undefined }
+      state: { ...params.state, lastDirection: undefined },
+      vaultCbtcSpendable
     });
   }
 
@@ -362,7 +374,8 @@ export async function planNextSwap(params: {
         float,
         pacing: params.pacing,
         quotes,
-        state: params.state
+        state: params.state,
+        vaultCbtcSpendable
       })
     );
   }
@@ -406,6 +419,7 @@ interface PlanBlockerReport {
   pacing: PacingConfig;
   quotes: DirectionQuotes;
   state: PlannerState;
+  vaultCbtcSpendable?: boolean;
 }
 
 function countDirectionBlockers(
@@ -419,7 +433,10 @@ function countDirectionBlockers(
 } {
   const toAsset: FarmAsset = direction === "CBTC→CC" ? "CC" : "CBTC";
   const directionOk = directionAllowed(direction, report.state);
-  const vaultOk = vaultCanDeliver(report.float.vault, toAsset, report.quotes);
+  let vaultOk = vaultCanDeliver(report.float.vault, toAsset, report.quotes);
+  if (direction === "CC→CBTC" && report.vaultCbtcSpendable === false) {
+    vaultOk = false;
+  }
   let tradersOk = 0;
   let sampleTraderIssue: string | undefined;
 
@@ -465,7 +482,7 @@ export function formatPlanBlockers(report: PlanBlockerReport): string {
     "no viable swap — float/UTXO/direction blockers:",
     `  vault CBTC=${report.float.vault.cbtc} (need ≥${vaultNeedCbtc} for CC→CBTC) CC=${report.float.vault.cc} (need ≥${vaultNeedCc} for CBTC→CC)`,
     `  CBTC→CC: traders=${cbtc.tradersOk}/${report.float.traders.length} vault=${cbtc.vaultOk ? "ok" : "low CC"} dir=${cbtc.directionOk ? "ok" : "blocked"}${cbtc.sampleTraderIssue ? ` e.g. ${cbtc.sampleTraderIssue}` : ""}`,
-    `  CC→CBTC: traders=${cc.tradersOk}/${report.float.traders.length} vault=${cc.vaultOk ? "ok" : "low CBTC"} dir=${cc.directionOk ? "ok" : "blocked"}${cc.sampleTraderIssue ? ` e.g. ${cc.sampleTraderIssue}` : ""}`,
+    `  CC→CBTC: traders=${cc.tradersOk}/${report.float.traders.length} vault=${cc.vaultOk ? "ok" : report.vaultCbtcSpendable === false ? "no spendable CBTC UTXO" : "low CBTC"} dir=${cc.directionOk ? "ok" : "blocked"}${cc.sampleTraderIssue ? ` e.g. ${cc.sampleTraderIssue}` : ""}`,
     "  fix: fund vault CBTC (fund-swap-vault:mainnet), traders CBTC (farm:fund-traders-cbtc:mainnet), and/or traders CC; tune --cbtc-in / --cc-in"
   ];
   return lines.join("\n");

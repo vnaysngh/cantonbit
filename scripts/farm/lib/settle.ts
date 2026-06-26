@@ -10,7 +10,7 @@ import {
   registrarForAsset,
   submitLedgerCommands
 } from "./ledger";
-import { applyTreeToVaultCbtcCache } from "./vault-cbtc-holdings";
+import { ingestVaultCbtcFromFill } from "./vault-cbtc-holdings";
 
 const USER_LEG_TTL_SECONDS = 600;
 const COUNTER_LEG_TTL_SECONDS = 24 * 60 * 60;
@@ -145,7 +145,13 @@ async function fillFromUserOffer(params: ManagedSettleParams & {
     synchronizerId: synchronizerId || undefined
   });
 
-  applyTreeToVaultCbtcCache(params.vaultParty, eventsById);
+  await ingestVaultCbtcFromFill({
+    jwt: params.jwt,
+    vaultParty: params.vaultParty,
+    traderParty: params.traderParty,
+    updateId,
+    submitEventsById: eventsById
+  });
 
   const counterLegOfferCid = extractCreatedOfferCid(eventsById) ?? undefined;
   const counterPendingAccept = Boolean(

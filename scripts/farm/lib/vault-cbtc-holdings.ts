@@ -1,25 +1,34 @@
 /**
  * Vault CBTC holdings cache — settlement vault ACS is polluted (>200 stakeholder
- * contracts) so limit=150 queries return zero *owned* UTXOs. Track holdings from
- * swap fill trees + a one-time updates bootstrap (Canton updates-over-ACS pattern).
+ * contracts) so limit=150 queries often miss owned UTXOs. Track spendable holdings
+ * (contractId + createdEventBlob) from swap fill trees only.
  */
+import { extractEventsByIdFromSubmitResult } from "../../../lib/mint-processor-logic";
 import { NETWORK } from "../../../lib/constants";
 import type { Holding } from "../../../lib/types";
-import { CBTC_HOLDING_TEMPLATE_FQN } from "./ledger-constants";
+import {
+  CBTC_HOLDING_TEMPLATE_BY_NAME,
+  CBTC_HOLDING_TEMPLATE_FQN
+} from "./ledger-constants";
+import { fetchTransactionTreeByUpdateId } from "./transaction-tree";
 
 let vaultPartyId: string | null = null;
-let bootstrapped = false;
+let hydratedFromUpdates = false;
 
 const byCid = new Map<string, Holding>();
 
 export function configureVaultCbtcCache(vaultParty: string): void {
   vaultPartyId = vaultParty;
   byCid.clear();
-  bootstrapped = false;
+  hydratedFromUpdates = false;
 }
 
 export function isVaultCbtcCacheParty(party: string): boolean {
   return vaultPartyId != null && party === vaultPartyId;
+}
+
+export function hasDisclosureBlob(h: Holding): boolean {
+  return Boolean(h.createdEventBlob?.trim());
 }
 
 function isActivelyLocked(
@@ -34,28 +43,41 @@ function isCbtcHoldingTemplate(templateId: string | undefined): boolean {
   return !!templateId?.includes("Utility.Registry.Holding");
 }
 
+function blobFromCreated(created: Record<string, unknown>): string | undefined {
+  const direct = created.createdEventBlob;
+  if (typeof direct === "string" && direct.trim()) return direct.trim();
+  return undefined;
+}
+
 function holdingFromCreated(
   vaultParty: string,
-  created: {
-    contractId?: string;
-    templateId?: string;
-    createArgument?: {
-      owner?: string;
-      amount?: string;
-      lock?: { expiresAt?: string | null; expiresAfter?: string | null } | null;
-    };
-    createdEventBlob?: string;
-  }
+  created: Record<string, unknown>
 ): Holding | null {
-  if (!created.contractId || !isCbtcHoldingTemplate(created.templateId)) return null;
-  const arg = created.createArgument;
+  const contractId = created.contractId;
+  if (typeof contractId !== "string" || !contractId) return null;
+  const templateId =
+    typeof created.templateId === "string" ? created.templateId : undefined;
+  if (!isCbtcHoldingTemplate(templateId)) return null;
+
+  const arg = created.createArgument as
+    | {
+        owner?: string;
+        amount?: string;
+        lock?: { expiresAt?: string | null; expiresAfter?: string | null } | null;
+      }
+    | undefined;
   if (arg?.owner !== vaultParty) return null;
+
+  const blob = blobFromCreated(created);
+  if (!blob) return null;
+
   const nowIso = new Date().toISOString();
   if (isActivelyLocked(arg.lock, nowIso)) return null;
+
   return {
-    contractId: created.contractId,
-    createdEventBlob: created.createdEventBlob ?? "",
-    templateId: created.templateId ?? CBTC_HOLDING_TEMPLATE_FQN,
+    contractId,
+    createdEventBlob: blob,
+    templateId: templateId ?? CBTC_HOLDING_TEMPLATE_FQN,
     payload: {
       owner: vaultParty,
       amount: typeof arg.amount === "string" ? arg.amount : "0",
@@ -64,32 +86,14 @@ function holdingFromCreated(
   };
 }
 
-function createdEventFromTreeNode(ev: unknown): {
-  contractId?: string;
-  templateId?: string;
-  createArgument?: {
-    owner?: string;
-    amount?: string;
-    lock?: { expiresAt?: string | null; expiresAfter?: string | null } | null;
-  };
-  createdEventBlob?: string;
-} | null {
+function createdEventFromTreeNode(ev: unknown): Record<string, unknown> | null {
   const e = ev as {
     CreatedTreeEvent?: { value?: unknown };
     CreatedEvent?: unknown;
   };
   const raw = e.CreatedTreeEvent?.value ?? e.CreatedEvent;
   if (!raw || typeof raw !== "object") return null;
-  return raw as {
-    contractId?: string;
-    templateId?: string;
-    createArgument?: {
-      owner?: string;
-      amount?: string;
-      lock?: { expiresAt?: string | null; expiresAfter?: string | null } | null;
-    };
-    createdEventBlob?: string;
-  };
+  return raw as Record<string, unknown>;
 }
 
 function archivedCidFromTreeNode(ev: unknown): string | null {
@@ -117,31 +121,72 @@ export function applyTreeToVaultCbtcCache(
   }
 }
 
-/** When ACS can see owned holdings, prefer that view and refresh cache. */
+/** When ACS can see owned holdings with blobs, refresh cache. */
 export function syncVaultCbtcCacheFromAcs(holdings: Holding[]): void {
-  if (holdings.length === 0) return;
-  for (const h of holdings) byCid.set(h.contractId, h);
+  for (const h of holdings) {
+    if (hasDisclosureBlob(h)) byCid.set(h.contractId, h);
+  }
 }
 
 export function getVaultCbtcCachedHoldings(): Holding[] {
-  return [...byCid.values()];
+  return [...byCid.values()].filter(hasDisclosureBlob);
 }
 
-/** Scan recent vault updates for owned CBTC Holding creates (once per run). */
+async function fetchUpdateEventsDirect(
+  jwt: string,
+  updateId: string
+): Promise<Record<string, unknown> | null> {
+  const res = await fetch(
+    `${NETWORK.ledgerHost}/v2/updates/update/${encodeURIComponent(updateId)}`,
+    {
+      headers: { Authorization: `Bearer ${jwt}` },
+      cache: "no-store"
+    }
+  );
+  if (!res.ok) return null;
+  const data = (await res.json()) as unknown;
+  return extractEventsByIdFromSubmitResult(data);
+}
+
+/** Ingest vault CBTC holdings from fill/submit update trees (with blob). */
+export async function ingestVaultCbtcFromFill(params: {
+  jwt: string;
+  vaultParty: string;
+  traderParty: string;
+  updateId: string;
+  submitEventsById: Record<string, unknown>;
+}): Promise<void> {
+  applyTreeToVaultCbtcCache(params.vaultParty, params.submitEventsById);
+
+  const direct = await fetchUpdateEventsDirect(params.jwt, params.updateId);
+  if (direct) applyTreeToVaultCbtcCache(params.vaultParty, direct);
+
+  const scanned = await fetchTransactionTreeByUpdateId(
+    params.jwt,
+    params.updateId,
+    [params.vaultParty, params.traderParty],
+    120_000
+  );
+  if (scanned?.eventsById) {
+    applyTreeToVaultCbtcCache(params.vaultParty, scanned.eventsById);
+  }
+}
+
+/** One-time scan of recent vault updates for owned CBTC holdings with blobs. */
 export async function bootstrapVaultCbtcCache(
   jwt: string,
   vaultParty: string
 ): Promise<number> {
-  if (!isVaultCbtcCacheParty(vaultParty) || bootstrapped) {
-    return byCid.size;
+  if (!isVaultCbtcCacheParty(vaultParty) || hydratedFromUpdates) {
+    return getVaultCbtcCachedHoldings().length;
   }
-  bootstrapped = true;
+  hydratedFromUpdates = true;
 
   const endRes = await fetch(`${NETWORK.ledgerHost}/v2/state/ledger-end`, {
     headers: { Authorization: `Bearer ${jwt}` },
     cache: "no-store"
   });
-  if (!endRes.ok) return byCid.size;
+  if (!endRes.ok) return getVaultCbtcCachedHoldings().length;
   const { offset } = (await endRes.json()) as { offset: number };
   const beginExclusive = Math.max(0, offset - 120_000);
 
@@ -162,7 +207,7 @@ export async function bootstrapVaultCbtcCache(
                 identifierFilter: {
                   TemplateFilter: {
                     value: {
-                      templateId: CBTC_HOLDING_TEMPLATE_FQN,
+                      templateId: CBTC_HOLDING_TEMPLATE_BY_NAME,
                       includeCreatedEventBlob: true
                     }
                   }
@@ -176,7 +221,7 @@ export async function bootstrapVaultCbtcCache(
     }),
     cache: "no-store"
   });
-  if (!res.ok) return byCid.size;
+  if (!res.ok) return getVaultCbtcCachedHoldings().length;
 
   const raw = (await res.json()) as unknown;
   const items = Array.isArray(raw)
@@ -195,5 +240,5 @@ export async function bootstrapVaultCbtcCache(
     if (events) applyTreeToVaultCbtcCache(vaultParty, events);
   }
 
-  return byCid.size;
+  return getVaultCbtcCachedHoldings().length;
 }
