@@ -27,14 +27,14 @@ export function WarpXWordmark({
         className
       )}
     >
-      <Image
+      {/*    <Image
         src="/logo.png"
         alt=""
         width={large ? 40 : 28}
         height={large ? 40 : 28}
         className={cn("shrink-0", large ? "size-10" : "size-7")}
         aria-hidden
-      />
+      /> */}
       <span>
         <span className="text-on-surface">Warp</span>
         <span className="text-primary">X</span>

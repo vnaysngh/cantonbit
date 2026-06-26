@@ -80,6 +80,34 @@ export function formatBtc(amount: string | bigint): string {
   return formatSatoshis(typeof amount === "bigint" ? amount : parseBtc(amount));
 }
 
+/**
+ * Format a decimal amount for UI display, rounding to at most `maxDecimals` places
+ * and trimming trailing zeros (e.g. "89.36", "1.5", "0").
+ */
+export function formatDisplayAmount(
+  amount: string | null | undefined,
+  maxDecimals: number
+): string {
+  if (amount == null || amount.trim() === "") return "0";
+  const n = Number.parseFloat(amount.trim());
+  if (!Number.isFinite(n)) return amount.trim();
+  if (maxDecimals <= 0) return String(Math.round(n));
+  const fixed = n.toFixed(maxDecimals);
+  if (!fixed.includes(".")) return fixed;
+  const trimmed = fixed.replace(/0+$/, "").replace(/\.$/, "");
+  return trimmed || "0";
+}
+
+/** CC (Amulet) balance — compact display (header, badges): at most 2 dp. */
+export function formatCc(amount: string | null | undefined): string {
+  return formatDisplayAmount(amount, 2);
+}
+
+/** BTC/CBTC balance display — at most 5 dp (trim trailing zeros). */
+export function formatBtcDisplay(amount: string | bigint): string {
+  return formatDisplayAmount(formatBtc(amount), 5);
+}
+
 /** Relative time string for activity rows. */
 export function timeAgo(iso: string): string {
   const then = new Date(iso).getTime();

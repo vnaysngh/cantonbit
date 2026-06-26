@@ -12,6 +12,7 @@ import { useWallet } from "@/hooks/useWallet";
 import { useEvmWallet } from "@/hooks/useEvmWallet";
 import { useBalance } from "@/hooks/useBalance";
 import { SWAP_CHAIN } from "@/lib/swap-evm";
+import { formatCc } from "@/lib/format";
 import { truncateEvmAddress, truncatePartyId } from "@/lib/party-display";
 import { cn } from "@/lib/utils";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
@@ -70,14 +71,16 @@ export function TopNav() {
   // Click the wrong-network warning to switch the connected EVM provider to the
   // swap chain (Arbitrum). Adds the chain if the wallet doesn't have it.
   const handleEvmSwitch = () => {
-    void evm.switchChain(SWAP_CHAIN.id, {
-      chainName: SWAP_CHAIN.name,
-      rpcUrls: SWAP_CHAIN.rpcUrls,
-      nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
-      blockExplorerUrls: SWAP_CHAIN.blockExplorerUrls,
-    }).catch(() => {
-      /* evm.error is set in switchChain */
-    });
+    void evm
+      .switchChain(SWAP_CHAIN.id, {
+        chainName: SWAP_CHAIN.name,
+        rpcUrls: SWAP_CHAIN.rpcUrls,
+        nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+        blockExplorerUrls: SWAP_CHAIN.blockExplorerUrls
+      })
+      .catch(() => {
+        /* evm.error is set in switchChain */
+      });
   };
 
   return (
@@ -122,7 +125,7 @@ function CcBalanceBadge() {
     >
       <span className="text-[11px] uppercase tracking-wide">CC</span>
       <span className="font-mono tabular-nums text-foreground">
-        {isLoading && ccTotal === null ? "…" : (ccTotal ?? "0")}
+        {isLoading && ccTotal === null ? "…" : formatCc(ccTotal)}
       </span>
     </div>
   );
@@ -146,8 +149,16 @@ function LogoutControl() {
   }
 
   const logout = async () => {
-    try { await createSupabaseBrowserClient().auth.signOut(); } catch { /* no session */ }
-    try { logoutLoop(); } catch { /* not connected */ }
+    try {
+      await createSupabaseBrowserClient().auth.signOut();
+    } catch {
+      /* no session */
+    }
+    try {
+      logoutLoop();
+    } catch {
+      /* not connected */
+    }
     router.push("/login");
     router.refresh();
   };
@@ -178,7 +189,12 @@ interface EvmLike {
  * Canton party (the identity), so it's visible at a glance.
  */
 function WalletsMenu({
-  evm, evmWrongChain, evmSwitching, evmError, onEvmSwitch, swapChainName,
+  evm,
+  evmWrongChain,
+  evmSwitching,
+  evmError,
+  onEvmSwitch,
+  swapChainName
 }: {
   evm: EvmLike;
   evmWrongChain: boolean;
@@ -194,11 +210,19 @@ function WalletsMenu({
 
   useEffect(() => {
     if (!open) return;
-    const onDown = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node))
+        setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
-    return () => { document.removeEventListener("mousedown", onDown); document.removeEventListener("keydown", onKey); };
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
   }, [open]);
 
   const copy = (text: string, which: "canton" | "evm") => {
@@ -223,15 +247,17 @@ function WalletsMenu({
       <button
         onClick={() => setOpen((v) => !v)}
         className={cn(
-          "inline-flex h-9 items-center gap-2 rounded-lg px-4 font-mono text-sm transition-all hover:opacity-90 active:scale-95",
+          "inline-flex h-9 items-center gap-2 rounded-lg px-4 font-mono text-xs transition-all hover:opacity-90 active:scale-95",
           evmWrongChain
             ? "bg-amber-500 font-sans text-white"
-            : "border border-outline-variant bg-surface-container text-on-surface",
+            : "border border-outline-variant bg-surface-container text-on-surface"
         )}
       >
         <span className="inline-block size-2 rounded-full bg-primary ring-1 ring-surface-container" />
         {triggerLabel}
-        <span className="material-symbols-outlined text-[18px]">{open ? "expand_less" : "expand_more"}</span>
+        <span className="material-symbols-outlined text-[18px]">
+          {open ? "expand_less" : "expand_more"}
+        </span>
       </button>
 
       {open && (
@@ -261,16 +287,24 @@ function WalletsMenu({
             warnAction={{
               label: evmSwitching ? "Switching…" : `Switch to ${swapChainName}`,
               onClick: onEvmSwitch,
-              disabled: evmSwitching,
+              disabled: evmSwitching
             }}
             onCopy={() => evm.account && copy(evm.account, "evm")}
             onConnect={evm.connect}
-            connectLabel={evm.connecting ? "Connecting…" : evm.available ? "Connect" : "No wallet"}
+            connectLabel={
+              evm.connecting
+                ? "Connecting…"
+                : evm.available
+                  ? "Connect"
+                  : "No wallet"
+            }
             connectDisabled={evm.connecting || !evm.available}
             onDisconnect={() => void evm.disconnect()}
           />
           {evmError && (
-            <p className="px-2 pb-1 text-[11px] leading-snug text-destructive">{evmError}</p>
+            <p className="px-2 pb-1 text-[11px] leading-snug text-destructive">
+              {evmError}
+            </p>
           )}
         </div>
       )}
@@ -280,8 +314,19 @@ function WalletsMenu({
 
 /** One wallet row inside the WalletsMenu dropdown. */
 function WalletRow({
-  label, network, connected, address, copied, warn, warnAction, readOnly,
-  onCopy, onConnect, connectLabel, connectDisabled, onDisconnect,
+  label,
+  network,
+  connected,
+  address,
+  copied,
+  warn,
+  warnAction,
+  readOnly,
+  onCopy,
+  onConnect,
+  connectLabel,
+  connectDisabled,
+  onDisconnect
 }: {
   label: string;
   network: string;
@@ -308,7 +353,9 @@ function WalletRow({
           className={cn("size-5", !connected && "opacity-40 grayscale")}
         />
         <div className="min-w-0">
-          <div className="text-[11px] leading-tight text-on-surface-variant">{label}</div>
+          <div className="text-[11px] leading-tight text-on-surface-variant">
+            {label}
+          </div>
           {connected ? (
             warn && warnAction ? (
               <button
@@ -323,7 +370,11 @@ function WalletRow({
                 {warnAction.label}
               </button>
             ) : (
-              <button onClick={onCopy} className="whitespace-nowrap font-mono text-xs text-on-surface hover:opacity-70" title="Copy address">
+              <button
+                onClick={onCopy}
+                className="whitespace-nowrap font-mono text-xs text-on-surface hover:opacity-70"
+                title="Copy address"
+              >
                 {copied ? "Copied!" : short}
               </button>
             )

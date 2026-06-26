@@ -1,6 +1,6 @@
 "use client";
 
-import { formatBtc } from "@/lib/format";
+import { formatBtcDisplay } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -31,7 +31,7 @@ export function BalanceBadge({
         className,
       )}
     >
-      <span>{formatBtc(amount)}</span>
+      <span>{formatBtcDisplay(amount)}</span>
       <span className="text-muted-foreground text-sm">{unit}</span>
     </span>
   );
