@@ -106,7 +106,13 @@ function cspConnectSrc(): string {
   const add = (url: string | undefined) => {
     if (!url) return;
     try {
-      origins.add(new URL(url).origin);
+      const parsed = new URL(url);
+      origins.add(parsed.origin);
+      if (parsed.protocol === "https:") {
+        origins.add(`wss://${parsed.host}`);
+      } else if (parsed.protocol === "http:") {
+        origins.add(`ws://${parsed.host}`);
+      }
     } catch {
       /* ignore malformed env URLs */
     }
