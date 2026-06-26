@@ -4,7 +4,7 @@ import {
   assertSameSynchronizer,
   buildAcceptExercise,
   buildTransferExercise,
-  holdingsForAssetOrBatch,
+  holdingsForAsset,
   isDirectTransferKind,
   mergeDisclosed,
   registrarForAsset,
@@ -38,7 +38,7 @@ async function submitUserLegOffer(params: ManagedSettleParams): Promise<{
   offerUpdateId: string;
 }> {
   const reg = await registrarForAsset(params.jwt, params.fromAsset);
-  const holdings = await holdingsForAssetOrBatch(
+  const holdings = await holdingsForAsset(
     params.jwt,
     params.traderParty,
     params.fromAsset
@@ -104,7 +104,7 @@ async function fillFromUserOffer(params: ManagedSettleParams & {
     registryKind: fromReg.kind
   });
 
-  const vaultHoldings = await holdingsForAssetOrBatch(
+  const vaultHoldings = await holdingsForAsset(
     params.jwt,
     params.vaultParty,
     params.toAsset

@@ -1,7 +1,7 @@
 import { toBaseUnitsFloor } from "../../../lib/amount-units";
 import { CBTC_ASSET, CC_ASSET } from "../../../lib/canton-assets";
 import type { FarmAsset, FarmFleetConfig } from "./types";
-import { cbtcBalance, ccBalance, countHoldings, holdingsForAssetOrBatch } from "./ledger";
+import { cbtcBalance, ccBalance, countHoldings, holdingsForAsset } from "./ledger";
 
 const UTXO_WARN = 8;
 const UTXO_MAX = 10;
@@ -18,7 +18,7 @@ export async function checkTraderFloat(params: {
   inAmount: string;
 }): Promise<FloatCheckResult> {
   const asset = params.fromAsset === "CBTC" ? CBTC_ASSET : CC_ASSET;
-  const holdings = await holdingsForAssetOrBatch(
+  const holdings = await holdingsForAsset(
     params.jwt,
     params.traderParty,
     params.fromAsset
@@ -53,7 +53,7 @@ export async function checkVaultFloat(params: {
   outAmount: string;
 }): Promise<FloatCheckResult> {
   const asset = params.toAsset === "CBTC" ? CBTC_ASSET : CC_ASSET;
-  const holdings = await holdingsForAssetOrBatch(
+  const holdings = await holdingsForAsset(
     params.jwt,
     params.vaultParty,
     params.toAsset

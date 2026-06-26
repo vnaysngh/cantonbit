@@ -5,7 +5,7 @@ import {
   ACS_QUERY_BATCH_LIMIT,
   buildTransferExercise,
   countHoldings,
-  holdingsForAssetOrBatch,
+  holdingsForAsset,
   isAcsLimitError,
   isDirectTransferKind,
   registrarForAsset,
@@ -19,7 +19,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function sumHoldings(
-  holdings: Awaited<ReturnType<typeof holdingsForAssetOrBatch>>,
+  holdings: Awaited<ReturnType<typeof holdingsForAsset>>,
   decimals: number
 ): string {
   let total = 0n;
@@ -45,9 +45,9 @@ export async function consolidatePartyAsset(params: {
   let merges = 0;
 
   for (let round = 0; round < maxRounds; round++) {
-    let holdings: Awaited<ReturnType<typeof holdingsForAssetOrBatch>>;
+    let holdings: Awaited<ReturnType<typeof holdingsForAsset>>;
     try {
-      holdings = await holdingsForAssetOrBatch(
+      holdings = await holdingsForAsset(
         params.jwt,
         params.party,
         params.asset,

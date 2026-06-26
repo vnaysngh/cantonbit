@@ -506,14 +506,12 @@ async function queryActiveContractsByTemplate(
   party: string,
   templateId: string,
   includeCreatedEventBlob: boolean,
-  limit?: number
+  limit: number = ACS_QUERY_BATCH_LIMIT
 ): Promise<AcsCreatedEvent[]> {
   const offset = await getLedgerOffset(jwt);
-  const qs =
-    limit != null && limit > 0
-      ? `?limit=${Math.min(limit, ACS_QUERY_BATCH_LIMIT)}`
-      : "";
-  const r = await fetch(`${NETWORK.ledgerHost}/v2/state/active-contracts${qs}`, {
+  const capped = Math.min(Math.max(1, limit), ACS_QUERY_BATCH_LIMIT);
+  const r = await fetch(
+    `${NETWORK.ledgerHost}/v2/state/active-contracts?limit=${capped}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -576,7 +574,7 @@ export async function listCcHoldings(
   jwt: string,
   party: string,
   dsoAdmin: string,
-  limit?: number
+  limit: number = ACS_QUERY_BATCH_LIMIT
 ): Promise<Holding[]> {
   const events = await queryActiveContractsByTemplate(
     jwt,
@@ -616,7 +614,7 @@ export async function listCcHoldings(
 export async function listCbtcHoldings(
   jwt: string,
   party: string,
-  limit?: number
+  limit: number = ACS_QUERY_BATCH_LIMIT
 ): Promise<Holding[]> {
   const events = await queryActiveContractsByTemplate(
     jwt,
@@ -655,26 +653,21 @@ export async function holdingsForAsset(
   jwt: string,
   party: string,
   asset: "CBTC" | "CC",
-  limit?: number
+  limit: number = ACS_QUERY_BATCH_LIMIT
 ): Promise<Holding[]> {
   if (asset === "CBTC") return listCbtcHoldings(jwt, party, limit);
   const dso = await getDsoPartyId(jwt);
   return listCcHoldings(jwt, party, dso, limit);
 }
 
-/** Fetch holdings for merge when ACS is at the 200-contract node cap. */
+/** @deprecated alias — all ACS reads use documented ?limit= param now. */
 export async function holdingsForAssetOrBatch(
   jwt: string,
   party: string,
   asset: "CBTC" | "CC",
   batchLimit = ACS_QUERY_BATCH_LIMIT
 ): Promise<Holding[]> {
-  try {
-    return await holdingsForAsset(jwt, party, asset);
-  } catch (e) {
-    if (!isAcsLimitError(e)) throw e;
-    return holdingsForAsset(jwt, party, asset, batchLimit);
-  }
+  return holdingsForAsset(jwt, party, asset, batchLimit);
 }
 
 export async function ccInstrumentId(jwt: string): Promise<InstrumentId> {
@@ -702,15 +695,19 @@ export async function countHoldings(
   party: string
 ): Promise<{ cbtc: number; cc: number }> {
   const countOne = async (asset: "CBTC" | "CC"): Promise<number> => {
-    try {
-      return (await holdingsForAsset(jwt, party, asset)).length;
-    } catch (e) {
-      if (isAcsLimitError(e)) return ACS_QUERY_BATCH_LIMIT + 51;
-      throw e;
-    }
+    const n = (await holdingsForAsset(jwt, party, asset)).length;
+    return n >= ACS_QUERY_BATCH_LIMIT ? ACS_QUERY_BATCH_LIMIT + 51 : n;
   };
   const [cbtc, cc] = await Promise.all([countOne("CBTC"), countOne("CC")]);
   return { cbtc, cc };
+}
+
+function sumHoldingUnits(holdings: Holding[], decimals: number): bigint {
+  let units = 0n;
+  for (const h of holdings) {
+    units += toBaseUnitsFloor(h.payload?.amount ?? "0", decimals);
+  }
+  return units;
 }
 
 export async function ccBalance(jwt: string, party: string): Promise<string> {
@@ -727,20 +724,12 @@ export async function ccBalance(jwt: string, party: string): Promise<string> {
   }
   const inst = await ccInstrumentId(jwt);
   const holdings = await listCcHoldings(jwt, party, inst.admin);
-  let units = 0n;
-  for (const h of holdings) {
-    units += toBaseUnitsFloor(h.payload?.amount ?? "0", 10);
-  }
   const { fromBaseUnits } = await import("../../../lib/amount-units");
-  return fromBaseUnits(units, 10);
+  return fromBaseUnits(sumHoldingUnits(holdings, 10), 10);
 }
 
 export async function cbtcBalance(jwt: string, party: string): Promise<string> {
   const holdings = await listCbtcHoldings(jwt, party);
-  let units = 0n;
-  for (const h of holdings) {
-    units += toBaseUnitsFloor(h.payload?.amount ?? "0", 8);
-  }
   const { fromBaseUnits } = await import("../../../lib/amount-units");
-  return fromBaseUnits(units, 8);
+  return fromBaseUnits(sumHoldingUnits(holdings, 8), 8);
 }
