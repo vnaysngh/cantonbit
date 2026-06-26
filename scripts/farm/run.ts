@@ -40,6 +40,10 @@ import {
 } from "./lib/parse-args";
 import { isTransientError, retry } from "./lib/retry";
 import { tryAutoRefillFromPlanError } from "./lib/auto-refill";
+import {
+  configureVaultCbtcCache,
+  bootstrapVaultCbtcCache
+} from "./lib/vault-cbtc-holdings";
 import { needsUtxoConsolidation } from "./lib/utxo-guard";
 
 function assertBitsafeGate(): void {
@@ -241,6 +245,7 @@ export async function runFarmBot(): Promise<void> {
   }
 
   const fleet = loadFleet();
+  configureVaultCbtcCache(fleet.vault);
   let pacing = pacingFromArgs();
   pacing = await balancePacingAmounts(pacing);
   const maxSwaps = parseNumberArg("max-swaps", 0);
@@ -280,16 +285,20 @@ export async function runFarmBot(): Promise<void> {
   console.log(`Planner: alternates direction, balance-aware trader pick`);
 
   if (!dryRun) {
-    await runWithLedgerReadSession(jwt, () =>
-      runConsolidateWithRetry("startup consolidate", () =>
+    await runWithLedgerReadSession(jwt, async () => {
+      const n = await bootstrapVaultCbtcCache(jwt, fleet.vault);
+      if (n > 0) {
+        console.log(`Vault CBTC cache: ${n} holding(s) from ledger updates`);
+      }
+      return runConsolidateWithRetry("startup consolidate", () =>
         consolidateFleetUtxos({
           jwt,
           fleet,
           minUtxo: PROACTIVE_CONSOLIDATE_MIN_UTXO,
           reason: "startup"
         })
-      )
-    ).catch((e) => {
+      );
+    }).catch((e) => {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`  startup consolidate failed after retries: ${msg.slice(0, 200)}`);
     });
@@ -297,6 +306,7 @@ export async function runFarmBot(): Promise<void> {
 
   while (maxSwaps === 0 || swapCount < maxSwaps) {
     let pick;
+    let plannedState: PlannerState | undefined;
     try {
       const planned = await retry(
         () =>
@@ -314,7 +324,7 @@ export async function runFarmBot(): Promise<void> {
         { label: "plan", onRetry: logRetry("plan"), retries: 6, maxMs: 20_000 }
       );
       pick = planned.pick;
-      plannerState = planned.state;
+      plannedState = planned.state;
     } catch (e) {
       const failure = await handlePlanFailure({
         err: e,
@@ -335,6 +345,7 @@ export async function runFarmBot(): Promise<void> {
         `tick ${swapCount + 1}: ${pick.traderParty.slice(0, 20)}… ${pick.fromAsset}→${pick.toAsset} in=${pick.inAmount} sleep=${Math.round(sleepSec)}s`
       );
       swapCount++;
+      if (plannedState) plannerState = plannedState;
       await sleepMs(sleepSec * 1000);
       continue;
     }
@@ -387,7 +398,7 @@ export async function runFarmBot(): Promise<void> {
         wallIntervalSec:
           wallIntervalSec != null ? Math.round(wallIntervalSec * 10) / 10 : null
       });
-      plannerState = {
+      plannerState = plannedState ?? {
         lastDirection:
           result.fromAsset === "CBTC" ? "CBTC→CC" : "CC→CBTC",
         lastTraderParty: pick.traderParty
