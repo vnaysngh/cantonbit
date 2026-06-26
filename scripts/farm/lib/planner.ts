@@ -60,9 +60,9 @@ function bumpBalance(
   decimals: number,
   sign: 1 | -1
 ): string {
-  const next =
-    toBaseUnitsFloor(current, decimals) +
-    sign * toBaseUnitsFloor(delta, decimals);
+  const deltaUnits = toBaseUnitsFloor(delta, decimals);
+  const signed = sign === 1 ? deltaUnits : -deltaUnits;
+  const next = toBaseUnitsFloor(current, decimals) + signed;
   return fromBaseUnits(next >= 0n ? next : 0n, decimals);
 }
 

@@ -40,6 +40,7 @@ import {
 } from "./lib/parse-args";
 import { isTransientError, retry } from "./lib/retry";
 import { tryAutoRefillFromPlanError } from "./lib/auto-refill";
+import { needsUtxoConsolidation } from "./lib/utxo-guard";
 
 function assertBitsafeGate(): void {
   if (
