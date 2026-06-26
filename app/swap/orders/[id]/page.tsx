@@ -37,7 +37,6 @@ import {
 } from "@/lib/secret-vault";
 import { resolveHtlcClaimSecret } from "@/lib/htlc-secret-resolver";
 import { hasPendingLoopIntent } from "@/lib/swap-pending-loop-commit";
-import { isReverseEvmCounterLockReady } from "@/lib/htlc-evm-counter-lock";
 import {
   forwardLoopHtlcSteps,
   loopC2cSteps,
@@ -400,14 +399,6 @@ export default function SwapOrderStatusPage() {
             ? "Could not unlock the saved secret. Connect the same wallet/account and try again."
             : "This swap's secret is not available on this device."
         );
-      }
-      if (order.direction === "canton-to-evm") {
-        const probe = await isReverseEvmCounterLockReady({
-          hashLock: order.hashLock ?? order.id,
-          wbtcAmount: order.wbtcAmount ?? "0",
-          userEvmAddress: order.userEvmAddress ?? evm.account ?? ""
-        });
-        if (!probe.ready) throw new Error(probe.reason);
       }
       await claimSwap({
         order: {

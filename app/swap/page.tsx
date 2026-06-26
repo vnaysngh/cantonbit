@@ -1926,14 +1926,6 @@ export default function SwapPage() {
           cbtcAmount = o?.cbtcAmount ?? cbtcAmount;
         }
 
-        const probe = await isReverseEvmCounterLockReady({
-          hashLock,
-          wbtcAmount: wbtcAmount ?? "0",
-          userEvmAddress
-        });
-        if (!probe.ready) {
-          throw new Error(probe.reason);
-        }
         const preimage = secretToPreimage(secret);
         const tx = await evmClaim(evm.sendTransaction, HTLC_ESCROW, preimage);
         // Wait for the claim to be MINED before recording — the API verifies the
@@ -2279,19 +2271,18 @@ export default function SwapPage() {
             order: null
           }));
           const meta = ord as {
+            status?: string;
             hashLock?: string;
             wbtcAmount?: string;
             userEvmAddress?: string;
+            counterLockTx?: string;
           } | null;
-          const probe =
-            meta?.wbtcAmount && meta?.userEvmAddress
-              ? await isReverseEvmCounterLockReady({
-                  hashLock: meta.hashLock ?? swapId,
-                  wbtcAmount: meta.wbtcAmount,
-                  userEvmAddress: meta.userEvmAddress
-                })
-              : { ready: false as const, reason: "Missing order fields." };
-          if (!probe.ready) {
+          const lockProvenByServer =
+            !!meta?.counterLockTx ||
+            meta?.status === "counter_locked" ||
+            meta?.status === "counter_claimed" ||
+            meta?.status === "main_claimed";
+          if (!lockProvenByServer) {
             startTracking(swapId);
             return;
           }
@@ -2529,27 +2520,6 @@ export default function SwapPage() {
             cbtcAmount?: string;
             counterLockTx?: string;
           };
-          if (meta.counterLockTx) {
-            setStage({
-              kind: "rev-claimable",
-              swapId: htlcSolverWait.swapId,
-              secret: htlcSolverWait.secret,
-              hashLock: meta.hashLock ?? htlcSolverWait.swapId,
-              wbtcAmount: meta.wbtcAmount,
-              userEvmAddress: meta.userEvmAddress,
-              cbtcAmount: meta.cbtcAmount
-            });
-            return;
-          }
-          const probe = await isReverseEvmCounterLockReady({
-            hashLock: meta.hashLock ?? htlcSolverWait.swapId,
-            wbtcAmount: meta.wbtcAmount ?? "0",
-            userEvmAddress: meta.userEvmAddress ?? evm.account ?? ""
-          });
-          if (!probe.ready) {
-            startTracking(htlcSolverWait.swapId);
-            return;
-          }
           setStage({
             kind: "rev-claimable",
             swapId: htlcSolverWait.swapId,
