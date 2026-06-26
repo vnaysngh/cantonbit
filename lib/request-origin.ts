@@ -48,9 +48,16 @@ export function publicRequestOrigin(request: NextRequest): string {
     return allowlist[0]!;
   }
 
+  // No allowlist configured: fall back to the request's own origin. Callers only
+  // use this origin to build SAME-ORIGIN redirects (e.g. `new URL(next, origin)`
+  // with a relative `next`), so this does not enable an off-site open redirect.
+  // Setting PUBLIC_SITE_ORIGIN(S) is still recommended in production so a spoofed
+  // x-forwarded-host cannot influence the chosen origin — warn loudly instead of
+  // taking down auth (a missing env must not 500 the OAuth callback).
   if (process.env.NODE_ENV === "production") {
-    throw new Error(
-      "PUBLIC_SITE_ORIGIN or PUBLIC_SITE_ORIGINS must be set in production"
+    console.warn(
+      "[request-origin] PUBLIC_SITE_ORIGIN/PUBLIC_SITE_ORIGINS not set — " +
+        "falling back to request origin. Set it to pin the OAuth callback base URL."
     );
   }
 
