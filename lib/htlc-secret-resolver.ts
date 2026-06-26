@@ -14,7 +14,7 @@ import {
 export const HTLC_VAULT_FAIL_MSG =
   "Could not securely save this swap secret on this device. Reconnect your wallet/account and try again.";
 
-/** Persist HTLC secret to the vault and verify readback before any irreversible step. */
+/** Persist HTLC secret before any irreversible step; claim/resume paths perform gated vault unlock. */
 export async function ensureHtlcSecretVaulted(
   swapId: string,
   secret: string,
