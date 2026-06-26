@@ -33,12 +33,6 @@ export async function ensureHtlcSecretVaulted(
   };
   const ok = await rememberSecret(swapId, secret, orderMeta, ctx);
   if (!ok) throw new Error(HTLC_VAULT_FAIL_MSG);
-  const recalled = await recallSecret(swapId, {
-    ...ctx,
-    orderMeta,
-    evmAddress: ctx.evmAddress ?? meta.userEvmAddress
-  });
-  if (recalled !== secret) throw new Error(HTLC_VAULT_FAIL_MSG);
   clearLegacyPendingLoopCommitIfMatched(swapId);
 }
 

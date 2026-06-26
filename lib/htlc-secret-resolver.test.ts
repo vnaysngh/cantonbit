@@ -9,6 +9,7 @@ import {
 import {
   __setVaultStorageForTests,
   forgetSecret,
+  hasStoredSecret,
   recallSecret
 } from "./secret-vault";
 
@@ -25,7 +26,7 @@ function mockStorage() {
   };
 }
 
-test("ensureHtlcSecretVaulted persists and verifies readback", async () => {
+test("ensureHtlcSecretVaulted persists without Loop sign on write (managed)", async () => {
   __setVaultStorageForTests(mockStorage());
   const fixed = new TextEncoder().encode("the-cross-chain-secret-32bytes!!");
   const { secret, hashLock } = generateSecret(() => fixed);
@@ -63,6 +64,41 @@ test("ensureHtlcSecretVaulted persists and verifies readback", async () => {
     }
   });
   assert.equal(recalled, secret);
+
+  forgetSecret(hashLock);
+  __setVaultStorageForTests(null);
+});
+
+test("ensureHtlcSecretVaulted does not call Loop signMessage on write", async () => {
+  __setVaultStorageForTests(mockStorage());
+  const fixed = new TextEncoder().encode("the-cross-chain-secret-32bytes!!");
+  const { secret, hashLock } = generateSecret(() => fixed);
+  let signCount = 0;
+  const provider = {
+    party_id: "party::loop",
+    public_key: "loop-pub-key",
+    signMessage: async () => {
+      signCount += 1;
+      return "0x" + "aa".repeat(65);
+    }
+  };
+  const userTimelock = Math.floor(Date.now() / 1000) + 7200;
+
+  await ensureHtlcSecretVaulted(
+    hashLock,
+    secret,
+    {
+      direction: "evm-to-canton",
+      counterMode: "loop",
+      userCantonParty: "party::loop",
+      userEvmAddress: "0xabc",
+      userTimelock
+    },
+    { loopProvider: provider, evmAddress: "0xabc" }
+  );
+
+  assert.equal(signCount, 0);
+  assert.equal(hasStoredSecret(hashLock), true);
 
   forgetSecret(hashLock);
   __setVaultStorageForTests(null);

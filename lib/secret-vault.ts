@@ -418,6 +418,9 @@ export async function rememberSecret(
   if (!key) return false;
 
   const { iv, ct } = await encryptWithKey(key, secret);
+  // Roundtrip with the key we just used — no Loop signMessage (that gate is claim-time only).
+  const roundtrip = await decryptWithKey(key, iv, ct);
+  if (roundtrip !== secret) return false;
   const store = readStore();
   store[swapId] = {
     v: 3,
