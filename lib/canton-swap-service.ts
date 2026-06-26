@@ -238,19 +238,33 @@ export class CantonSwapService {
     nextStatus: CantonSwapStatus,
     evidence?: { userLegOfferCid?: string; userLegSubmitUpdateId?: string }
   ): Promise<CantonSwapOrder> {
-    const floatUnits = await this.currentSwapFloatUnits(swapParty(o), o.toAsset);
-    await this.store.reserveFloat({
-      orderId: o.id,
-      expectedStatus,
-      nextStatus,
-      floatUnits,
-      ...evidence
-    });
-    const reserved = await this.must(o.id);
-    if (reserved.status !== nextStatus || !reserved.floatReserved) {
-      throw new Error("swap float reservation committed without expected order state");
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const floatUnits = await this.currentSwapFloatUnits(swapParty(o), o.toAsset);
+      try {
+        await this.store.reserveFloat({
+          orderId: o.id,
+          expectedStatus,
+          nextStatus,
+          floatUnits,
+          ...evidence
+        });
+        const reserved = await this.must(o.id);
+        if (reserved.status !== nextStatus || !reserved.floatReserved) {
+          throw new Error("swap float reservation committed without expected order state");
+        }
+        return reserved;
+      } catch (e) {
+        if (
+          attempt < 2 &&
+          e instanceof Error &&
+          e.message.includes("insufficient float")
+        ) {
+          continue;
+        }
+        throw e;
+      }
     }
-    return reserved;
+    throw new Error("swap float reservation failed after retries");
   }
 
   private async enforceSettlementQuote(o: CantonSwapOrder): Promise<void> {
@@ -1077,7 +1091,7 @@ export class CantonSwapService {
 
       const priorOfferCid = o.counterLegOfferCid;
       const priorAttempt = o.counterReissueAttempt ?? 0;
-      const fresh = await this.must(o.id);
+      let fresh = await this.must(o.id);
       if (
         fresh.counterLegOfferCid !== priorOfferCid ||
         (fresh.counterReissueAttempt ?? 0) !== priorAttempt
@@ -1128,6 +1142,21 @@ export class CantonSwapService {
       );
 
       try {
+        if (!fresh.floatReserved) {
+          fresh = await this.reserveSwapFloat(
+            fresh,
+            "user_locked",
+            "user_locked"
+          );
+          if (
+            fresh.counterLegOfferCid !== priorOfferCid ||
+            (fresh.counterReissueAttempt ?? 0) !== priorAttempt
+          ) {
+            continue;
+          }
+        }
+        await this.assertCurrentSwapFloat(fresh);
+
         const result = await reissueLoopCounterLeg(fresh);
         fresh.counterReissueAttempt = result.counterReissueAttempt;
         fresh.counterLegOfferCid = result.counterLegOfferCid ?? fresh.counterLegOfferCid;

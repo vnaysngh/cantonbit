@@ -15,6 +15,7 @@ import { getLedgerJwt, invalidateLedgerJwtCache } from "@/lib/auth";
 import { getAccountContractRules, getBitcoinAddress } from "@/lib/bitsafe";
 import { NETWORK } from "@/lib/constants";
 import { resolveSessionParty } from "@/lib/session-party";
+import { requireMintRedeemRateLimit } from "@/lib/mint-redeem-guard";
 import {
   createSupabaseServerClient,
   createSupabaseServiceClient
@@ -46,6 +47,8 @@ export async function POST(req: NextRequest) {
     // party id in their history.
     const sess = await resolveSessionParty(clientPartyId);
     if (sess.error) return sess.error;
+    const rate = await requireMintRedeemRateLimit(req, sess.partyId);
+    if (rate) return rate;
     const partyId = sess.partyId;
 
     // All signing uses the WarpX-hosted party — m2m JWT has authority over it

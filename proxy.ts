@@ -11,7 +11,13 @@
 import { createServerClient } from "@supabase/ssr";
 import { type NextRequest, NextResponse } from "next/server";
 
+import { loopWebBase, NETWORK } from "@/lib/constants";
+import { mainnetBlockedResponse } from "@/lib/mainnet-guard";
+
 export async function proxy(request: NextRequest) {
+  const blocked = mainnetGuardForRequest(request);
+  if (blocked) return blocked;
+
   const nonce = crypto.randomUUID().replaceAll("-", "");
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("x-nonce", nonce);
@@ -57,13 +63,14 @@ export async function proxy(request: NextRequest) {
 
 function buildContentSecurityPolicy(nonce: string): string {
   const production = process.env.NODE_ENV === "production";
+  const connectSrc = cspConnectSrc();
   const directives = [
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${production ? "" : " 'unsafe-eval'"}`,
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src 'self' data: https://fonts.gstatic.com",
     "img-src 'self' data: blob: https:",
-    "connect-src 'self' https: wss:",
+    connectSrc,
     "frame-src 'self' https:",
     "worker-src 'self' blob:",
     "object-src 'none'",
@@ -78,6 +85,48 @@ function buildContentSecurityPolicy(nonce: string): string {
     directives.push("trusted-types nextjs nextjs#bundler", "upgrade-insecure-requests");
   }
   return directives.join("; ");
+}
+
+function mainnetGuardForRequest(request: NextRequest): NextResponse | null {
+  const path = request.nextUrl.pathname;
+  if (!path.startsWith("/api/")) return null;
+  const guarded =
+    path.startsWith("/api/htlc") ||
+    path.startsWith("/api/canton/swap") ||
+    path.startsWith("/api/mint") ||
+    path.startsWith("/api/redeem") ||
+    path.startsWith("/api/transfers") ||
+    path.startsWith("/api/parties");
+  if (!guarded) return null;
+  return mainnetBlockedResponse();
+}
+
+function cspConnectSrc(): string {
+  const origins = new Set<string>(["'self'"]);
+  const add = (url: string | undefined) => {
+    if (!url) return;
+    try {
+      origins.add(new URL(url).origin);
+    } catch {
+      /* ignore malformed env URLs */
+    }
+  };
+  add(process.env.NEXT_PUBLIC_SUPABASE_URL);
+  add(NETWORK.ledgerHost);
+  add(NETWORK.validatorHost);
+  add(NETWORK.registryUrl);
+  add(NETWORK.ccRegistryUrl);
+  add(NETWORK.coordinatorUrl);
+  add(loopWebBase());
+  for (const extra of (process.env.CSP_CONNECT_SRC_EXTRA ?? "").split(",")) {
+    const trimmed = extra.trim();
+    if (trimmed) origins.add(trimmed);
+  }
+  const supabase = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  if (supabase?.startsWith("https://")) {
+    origins.add(`${supabase.replace("https://", "wss://")}/realtime/v1/websocket`);
+  }
+  return `connect-src ${[...origins].join(" ")}`;
 }
 
 function applySecurityHeaders(response: NextResponse, nonce: string): void {

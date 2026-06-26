@@ -6,18 +6,19 @@
  * the Permit2 typed data to sign), submit the signed order, and poll status.
  *
  * Base URL resolution:
- *   - NEXT_PUBLIC_SWAP_API_URL, if set, wins (e.g. a direct solver URL for local
- *     dev: http://localhost:8787).
- *   - Otherwise we hit the SAME-ORIGIN proxy at /api/solver (app/api/solver/[...path]),
- *     which forwards server-side to the PRIVATE solver. This keeps the solver off
- *     the public internet in split-service deploys (e.g. Railway).
+ *   - Production always hits the SAME-ORIGIN proxy at /api/solver
+ *     (app/api/solver/[...path]), which forwards server-side to the PRIVATE solver.
+ *   - NEXT_PUBLIC_SWAP_API_URL is allowed only outside production for local direct
+ *     solver development (e.g. http://localhost:8787).
  */
 
 import { isLoopPopupBlockedError } from "./loop-popup";
 import { LOOP_POPUP_BLOCKED_HINT } from "./swap-wait-copy";
 
 export const SWAP_API_URL =
-  process.env.NEXT_PUBLIC_SWAP_API_URL ?? "/api/solver";
+  process.env.NODE_ENV === "production"
+    ? "/api/solver"
+    : process.env.NEXT_PUBLIC_SWAP_API_URL ?? "/api/solver";
 
 /** Permit2 typed data the wallet signs (EIP-712). */
 export interface Permit2TypedData {
@@ -390,8 +391,12 @@ export function submitOrder(input: {
   });
 }
 
-export function getOrder(orderId: string): Promise<OrderView> {
-  return req<OrderView>(`/orders/${orderId}`);
+export function getOrder(
+  orderId: string,
+  cantonParty: string
+): Promise<OrderView> {
+  const q = new URLSearchParams({ cantonParty });
+  return req<OrderView>(`/orders/${orderId}?${q.toString()}`);
 }
 
 /**

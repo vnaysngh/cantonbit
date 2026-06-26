@@ -9,16 +9,20 @@
  *
  * Heartbeat model: the daemon calls heartbeat.pollOk() after each successful loop
  * and heartbeat.settleOk() after each successful settlement. /ready is unhealthy if
- * no successful poll happened within READY_STALE_MS.
+ * no successful poll happened within READY_STALE_MS, or if auto-refund recently failed.
  */
 import { createServer } from "node:http";
 
 export interface Heartbeat {
   pollOk(): void;
+  refundOk(): void;
+  refundFail(): void;
   settleOk(): void;
   snapshot(): {
     startedAt: number;
     lastPollOkAt: number | null;
+    lastRefundOkAt: number | null;
+    lastRefundFailAt: number | null;
     lastSettleOkAt: number | null;
   };
 }
@@ -32,16 +36,31 @@ export function startHealthServer(params: {
 }): Heartbeat {
   const startedAt = params.nowMs();
   let lastPollOkAt: number | null = null;
+  let lastRefundOkAt: number | null = null;
+  let lastRefundFailAt: number | null = null;
   let lastSettleOkAt: number | null = null;
 
   const heartbeat: Heartbeat = {
     pollOk: () => {
       lastPollOkAt = params.nowMs();
     },
+    refundOk: () => {
+      lastRefundOkAt = params.nowMs();
+      lastRefundFailAt = null;
+    },
+    refundFail: () => {
+      lastRefundFailAt = params.nowMs();
+    },
     settleOk: () => {
       lastSettleOkAt = params.nowMs();
     },
-    snapshot: () => ({ startedAt, lastPollOkAt, lastSettleOkAt })
+    snapshot: () => ({
+      startedAt,
+      lastPollOkAt,
+      lastRefundOkAt,
+      lastRefundFailAt,
+      lastSettleOkAt
+    })
   };
 
   const server = createServer((req, res) => {
@@ -51,26 +70,30 @@ export function startHealthServer(params: {
       startedAt,
       uptimeSec: Math.floor((now - startedAt) / 1000),
       lastPollOkAt,
+      lastRefundOkAt,
+      lastRefundFailAt,
       lastSettleOkAt,
       lastPollAgeSec:
         lastPollOkAt != null ? Math.floor((now - lastPollOkAt) / 1000) : null
     };
     const path = (req.url ?? "/").split("?")[0];
     if (path === "/ready") {
-      // Ready once at least one poll has succeeded and it was recent.
-      const ready =
+      const pollFresh =
         lastPollOkAt != null && now - lastPollOkAt <= params.readyStaleMs;
+      const refundFailedRecently =
+        lastRefundFailAt != null &&
+        (lastRefundOkAt == null || lastRefundFailAt > lastRefundOkAt) &&
+        now - lastRefundFailAt <= params.readyStaleMs;
+      const ready = pollFresh && !refundFailedRecently;
       res.writeHead(ready ? 200 : 503, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ready, ...body }));
       return;
     }
-    // /health (and anything else) — liveness only.
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, ...body }));
   });
 
   server.on("error", (e) => {
-    // A health server bind failure must never crash the daemon's core loop.
     console.error(`[${params.name}] health server error:`, e);
   });
   server.listen(params.port, () => {

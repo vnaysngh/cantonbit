@@ -6,6 +6,7 @@ import {
   createSupabaseServerClient,
   createSupabaseServiceClient,
 } from "@/lib/supabase/server";
+import { mainnetBlockedResponse } from "@/lib/mainnet-guard";
 
 /**
  * Resolve the Canton party that the *authenticated session* owns, and (if the
@@ -30,6 +31,15 @@ export async function resolveSessionParty(
   | { partyId: string; userId: string; error: null }
   | { partyId: null; userId: null; error: NextResponse }
 > {
+  const mainnetBlocked = mainnetBlockedResponse();
+  if (mainnetBlocked) {
+    return {
+      partyId: null,
+      userId: null,
+      error: mainnetBlocked
+    };
+  }
+
   const supabase = await createSupabaseServerClient();
   const {
     data: { user },

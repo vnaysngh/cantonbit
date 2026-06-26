@@ -12,12 +12,16 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { getBitcoinAddress } from "@/lib/bitsafe";
+import { requireMintRedeemRateLimit } from "@/lib/mint-redeem-guard";
 import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
 
 const TAG = "[mint/bitcoin-address]";
 
 export async function POST(req: NextRequest) {
   console.log(`${TAG} request received`);
+
+  const ipRate = await requireMintRedeemRateLimit(req);
+  if (ipRate) return ipRate;
 
   try {
     const { depositAccountContractId } = await req.json() as { depositAccountContractId?: string };

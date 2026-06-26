@@ -21,6 +21,7 @@ import { getLedgerJwt, invalidateLedgerJwtCache } from "@/lib/auth";
 import { NETWORK } from "@/lib/constants";
 import { parseBtc } from "@/lib/format";
 import { resolveSessionParty } from "@/lib/session-party";
+import { requireMintRedeemRateLimit } from "@/lib/mint-redeem-guard";
 
 const APPLICATION_ID = "cbtc-app";
 
@@ -55,6 +56,8 @@ export async function POST(req: NextRequest) {
     // the session party regardless.
     const sess = await resolveSessionParty(clientPartyId);
     if (sess.error) return sess.error;
+    const rate = await requireMintRedeemRateLimit(req, sess.partyId);
+    if (rate) return rate;
     const partyId = sess.partyId;
 
     if (!withdrawAccountContractId || !holdingCids?.length || !amount) {

@@ -71,14 +71,37 @@ test("assertEvmLockSafeForReveal rejects wrong receiver", () => {
   );
 });
 
+test("assertEvmLockSafeForReveal rejects unlockTime mismatch with order timelock", () => {
+  assert.throws(
+    () =>
+      assertEvmLockSafeForReveal(
+        safeLock({ unlockTime: NOW + EVM_CLAIM_MARGIN_SECONDS + 3600 }),
+        { ...req, expectedUserTimelock: NOW + 120 },
+        NOW
+      ),
+    /does not match order userTimelock/
+  );
+});
+
+test("assertEvmLockSafeForReveal accepts bound userTimelock within tolerance", () => {
+  const userTimelock = NOW + EVM_CLAIM_MARGIN_SECONDS + 300;
+  assert.doesNotThrow(() =>
+    assertEvmLockSafeForReveal(
+      safeLock({ unlockTime: userTimelock + 30 }),
+      { ...req, expectedUserTimelock: userTimelock },
+      NOW
+    )
+  );
+});
+
 test("assertEvmLockSafeForReveal rejects non-WBTC token", () => {
   assert.throws(
     () =>
       assertEvmLockSafeForReveal(
         safeLock({ tokenAddress: "0x0000000000000000000000000000000000000001" }),
         req,
-        NOW,
+        NOW
       ),
-    /not canonical WBTC/,
+    /not canonical WBTC/
   );
 });

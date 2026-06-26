@@ -13,6 +13,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getLedgerJwt, invalidateLedgerJwtCache } from "@/lib/auth";
 import { NETWORK } from "@/lib/constants";
 import { resolveSessionParty } from "@/lib/session-party";
+import { requireMintRedeemRateLimit } from "@/lib/mint-redeem-guard";
 import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
 
 // active-contracts TemplateFilter requires package NAME alias, not hash.
@@ -33,6 +34,8 @@ export async function POST(req: NextRequest) {
     // partyId would leak another user's accounts.
     const sess = await resolveSessionParty(clientPartyId);
     if (sess.error) return sess.error;
+    const rate = await requireMintRedeemRateLimit(req, sess.partyId);
+    if (rate) return rate;
     const partyId = sess.partyId;
 
     console.log(`${TAG} partyId=${partyId.slice(0, 30)}...`);

@@ -76,8 +76,13 @@ export async function POST(req: Request) {
       const userParty = String(body.userParty ?? "");
       const inAmount = String(body.inAmount ?? body.amount ?? "");
       const outAmount = String(body.outAmount ?? "");
-      const vaultParty =
-        String(body.vaultParty ?? "") || expectedCantonSwapParty() || "";
+      const vaultParty = expectedCantonSwapParty();
+      if (!vaultParty) {
+        return NextResponse.json(
+          { error: "settlement vault not configured" },
+          { status: 503 }
+        );
+      }
       if (!fromAsset || !toAsset || !userParty || !inAmount || !outAmount) {
         return NextResponse.json(
           { error: "missing fromAsset/toAsset/userParty/inAmount/outAmount" },
@@ -140,7 +145,7 @@ export async function POST(req: Request) {
       const estimate = await estimateHtlcManagedFee({
         action,
         userParty,
-        solverParty: String(body.solverParty ?? "") || expectedSettlementParty(),
+        solverParty: expectedSettlementParty(),
         cbtcAmount:
           body.cbtcAmount != null ? String(body.cbtcAmount) : undefined,
         htlcCid: body.htlcCid != null ? String(body.htlcCid) : undefined,

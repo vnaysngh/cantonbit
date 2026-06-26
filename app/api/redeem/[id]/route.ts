@@ -6,9 +6,10 @@
  * own party so one user can't read another party's redeem.
  */
 
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 import { getRedeemById } from "@/lib/redeem-history";
+import { requireMintRedeemRateLimit } from "@/lib/mint-redeem-guard";
 import {
   createSupabaseServerClient,
   createSupabaseServiceClient,
@@ -19,7 +20,7 @@ const TAG = "[redeem/[id]]";
 export const dynamic = "force-dynamic";
 
 export async function GET(
-  _req: Request,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
@@ -31,6 +32,9 @@ export async function GET(
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+
+  const rate = await requireMintRedeemRateLimit(req, user.id);
+  if (rate) return rate;
 
   const serviceClient = await createSupabaseServiceClient();
   const { data: partyRow } = await serviceClient

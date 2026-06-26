@@ -316,7 +316,11 @@ async function getBlockNumberHex(rpcUrl?: string): Promise<string> {
 }
 
 export function evmMinConfirmations(): number {
-  const value = Number(process.env.EVM_MIN_CONFIRMATIONS ?? "3");
+  const raw = process.env.EVM_MIN_CONFIRMATIONS?.trim();
+  if (process.env.NODE_ENV === "production" && !raw) {
+    return 12;
+  }
+  const value = Number(raw ?? "3");
   if (!Number.isInteger(value) || value < 1 || value > 100) {
     throw new Error("EVM_MIN_CONFIRMATIONS must be an integer from 1 to 100");
   }
@@ -420,6 +424,42 @@ export async function findEvmClaimTxForHashLock(
         {
           address: HTLC_ESCROW_ADDRESS,
           topics: [HTLC_CLAIMED_EVENT_TOPIC, topic1],
+          fromBlock: `0x${from.toString(16)}`,
+          toBlock: `0x${to.toString(16)}`
+        }
+      ],
+      rpc
+    );
+    if ((logs?.length ?? 0) > 0) {
+      lastTx = logs[logs.length - 1]?.transactionHash;
+    }
+    from = to + 1n;
+  }
+  return lastTx;
+}
+
+/** Latest Retaken tx hash for this hashLock, if any (newest log in scan range). */
+export async function findEvmRetakeTxForHashLock(
+  hashLock: string,
+  opts?: { fromBlockHex?: string; rpcUrl?: string }
+): Promise<string | undefined> {
+  const want = normalizeHashLock(hashLock);
+  const topic1 = `0x${want}`;
+  const rpc = opts?.rpcUrl;
+  const tip = await getBlockNumberHex(rpc);
+  const tipN = BigInt(tip);
+  let from = opts?.fromBlockHex ? BigInt(opts.fromBlockHex) : 0n;
+  if (from < 0n) from = 0n;
+  const chunk = 1990n;
+  let lastTx: string | undefined;
+  while (from <= tipN) {
+    const to = from + chunk - 1n > tipN ? tipN : from + chunk - 1n;
+    const logs = await rpcCall<{ transactionHash?: string }[]>(
+      "eth_getLogs",
+      [
+        {
+          address: HTLC_ESCROW_ADDRESS,
+          topics: [HTLC_RETAKEN_EVENT_TOPIC, topic1],
           fromBlock: `0x${from.toString(16)}`,
           toBlock: `0x${to.toString(16)}`
         }

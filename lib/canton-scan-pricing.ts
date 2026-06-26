@@ -60,12 +60,31 @@ export function parseAmuletPriceFromMiningRounds(body: unknown): number | null {
   const rounds = Array.isArray(rawRounds)
     ? rawRounds
     : Object.values(rawRounds as Record<string, unknown>);
+
+  let bestPrice: number | null = null;
+  let bestRound = -Infinity;
+  let fallbackPrice: number | null = null;
   for (const entry of rounds) {
-    const raw = (entry as { contract?: { payload?: { amuletPrice?: string } } })
-      ?.contract?.payload?.amuletPrice;
+    const payload = (entry as { contract?: { payload?: Record<string, unknown> } })
+      ?.contract?.payload;
+    const raw = payload?.amuletPrice;
     if (raw == null) continue;
-    const p = Number.parseFloat(String(raw));
-    if (Number.isFinite(p) && p > 0) return p;
+    const price = Number.parseFloat(String(raw));
+    if (!Number.isFinite(price) || price <= 0) continue;
+
+    const roundObj = payload?.round;
+    const roundNum =
+      roundObj && typeof roundObj === "object"
+        ? Number.parseInt(String((roundObj as { number?: unknown }).number ?? ""), 10)
+        : NaN;
+    if (Number.isFinite(roundNum)) {
+      if (roundNum >= bestRound) {
+        bestRound = roundNum;
+        bestPrice = price;
+      }
+      continue;
+    }
+    fallbackPrice = price;
   }
-  return null;
+  return bestPrice ?? fallbackPrice;
 }

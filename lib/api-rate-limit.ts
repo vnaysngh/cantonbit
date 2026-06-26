@@ -4,6 +4,13 @@ import { createSupabaseServiceClient } from "./supabase/server";
 
 const fallbackBuckets = new Map<string, number[]>();
 
+function allowInMemoryRateLimitFallback(): boolean {
+  return (
+    process.env.NODE_ENV === "test" ||
+    process.env.RATE_LIMIT_ALLOW_IN_MEMORY_FALLBACK === "true"
+  );
+}
+
 function fallbackRateLimit(
   key: string,
   limit: number,
@@ -42,7 +49,7 @@ export async function distributedRateLimitOk(params: {
     if (error) throw new Error(error.message);
     return data === true;
   } catch (e) {
-    if (process.env.NODE_ENV === "production") {
+    if (!allowInMemoryRateLimitFallback()) {
       throw new Error(
         `rate limiter unavailable: ${e instanceof Error ? e.message : e}`
       );

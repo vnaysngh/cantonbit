@@ -8,9 +8,13 @@ import { NextResponse } from "next/server";
 
 import { provisionParticipantManagedPartyForUser } from "@/lib/provision-participant-party";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { mainnetBlockedResponse } from "@/lib/mainnet-guard";
 
 export async function POST() {
   try {
+    const mainnetBlocked = mainnetBlockedResponse();
+    if (mainnetBlocked) return mainnetBlocked;
+
     const supabase = await createSupabaseServerClient();
     const result = await provisionParticipantManagedPartyForUser(supabase);
     if (!result) {

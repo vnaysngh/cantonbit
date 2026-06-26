@@ -16,13 +16,10 @@ export function cantonSwapQuoteRateLimitOk(clientKey: string): boolean {
 }
 
 /**
- * Client IP for rate limiting. Prefer the edge-set `x-real-ip`; otherwise take
- * the client address from `x-forwarded-for` using TRUSTED_PROXY_HOPS (default 1).
+ * Client IP for rate limiting. Uses the client address from `x-forwarded-for`
+ * with TRUSTED_PROXY_HOPS (default 1). Does not trust spoofable `x-real-ip`.
  */
 export function clientIpFromRequest(req: Request): string {
-  const realIp = req.headers.get("x-real-ip")?.trim();
-  if (realIp) return realIp;
-
   const forwarded = req.headers.get("x-forwarded-for");
   if (!forwarded) return "unknown";
 

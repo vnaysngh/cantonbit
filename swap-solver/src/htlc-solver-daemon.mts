@@ -473,6 +473,7 @@ async function main() {
         lastSweep = nowMs;
         void jpost("/api/htlc/auto-refund")
           .then((r) => {
+            heartbeat.refundOk();
             const body = r as { due?: number; refunded?: number };
             if (body.due && body.due > 0)
               console.log(
@@ -480,6 +481,7 @@ async function main() {
               );
           })
           .catch((e) => {
+            heartbeat.refundFail();
             console.error(
               "[solver] auto-refund error:",
               e instanceof Error ? e.message : e

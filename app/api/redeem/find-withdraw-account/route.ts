@@ -14,6 +14,7 @@ import { getLedgerJwt, invalidateLedgerJwtCache } from "@/lib/auth";
 import { getAccountContractRules } from "@/lib/bitsafe";
 import { NETWORK } from "@/lib/constants";
 import { resolveSessionParty } from "@/lib/session-party";
+import { requireMintRedeemRateLimit } from "@/lib/mint-redeem-guard";
 
 // active-contracts TemplateFilter requires package NAME alias, not hash.
 // "#cbtc" alias is confirmed working via live test against the mainnet ledger.
@@ -36,6 +37,8 @@ export async function POST(req: NextRequest) {
     // accounts as recon for a burn.
     const sess = await resolveSessionParty(clientPartyId);
     if (sess.error) return sess.error;
+    const rate = await requireMintRedeemRateLimit(req, sess.partyId);
+    if (rate) return rate;
     const partyId = sess.partyId;
 
     if (!destinationBtcAddress) {

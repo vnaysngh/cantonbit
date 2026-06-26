@@ -771,10 +771,21 @@ export function createApi(deps: ApiDeps) {
 
     const m = path.match(/^\/orders\/(0x[0-9a-fA-F]{64})$/);
     if (method === "GET" && m) {
-      // Reload so the UI sees status advanced by the loop (seen→…→finalised).
       await store.reload();
       const rec = await store.get(m[1] as Hex);
       if (!rec) return send(res, 404, { error: "order not found" });
+      const cantonParty = url.searchParams.get("cantonParty");
+      if (typeof cantonParty !== "string" || !cantonParty.includes("::")) {
+        return send(res, 400, { error: "cantonParty query param required" });
+      }
+      const recipient = rec.order.outputs[0]?.recipient;
+      if (
+        !rec.cantonParty ||
+        !recipient ||
+        !verifyCantonParty(cantonParty, recipient)
+      ) {
+        return send(res, 403, { error: "forbidden" });
+      }
       return send(res, 200, publicOrder(rec));
     }
 

@@ -1,6 +1,7 @@
 import "server-only";
 
 import { createSupabaseServiceClient } from "./supabase/server";
+import { assertUnifiedVaultReservationReady } from "./vault-reservation-readiness";
 import type {
   CantonSwapOrder,
   CantonSwapStatus,
@@ -261,6 +262,7 @@ export class SupabaseCantonSwapStore implements CantonSwapStore {
     userLegOfferCid?: string;
     userLegSubmitUpdateId?: string;
   }): Promise<{ reservedUnits: bigint; needUnits: bigint }> {
+    await assertUnifiedVaultReservationReady();
     const sb = await createSupabaseServiceClient();
     const { data, error } = await sb.rpc("reserve_canton_swap_float", {
       p_order_id: params.orderId,

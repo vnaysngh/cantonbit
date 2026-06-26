@@ -7,6 +7,9 @@
 /** Min seconds the solver needs left on the EVM lock to safely claim after a reveal. */
 export const EVM_CLAIM_MARGIN_SECONDS = 10 * 60;
 
+/** Allowed skew when binding on-chain unlockTime to the order userTimelock (M-7). */
+export const EVM_TIMELOCK_BIND_TOLERANCE_SECONDS = 120;
+
 export type EvmLockSnapshot = {
   unlockTime: number;
   amount: bigint;
@@ -18,6 +21,8 @@ export type EvmLockRevealRequirements = {
   wbtcAmount: string;
   solverEvmAddress: string;
   expectedWbtcAddress: string;
+  /** When set, lock.unlockTime must match the order timelock within tolerance. */
+  expectedUserTimelock?: number;
 };
 
 /**
@@ -45,6 +50,12 @@ export function assertEvmLockSafeForReveal(
   }
   if (lock.receiver !== req.solverEvmAddress.toLowerCase()) {
     throw new Error("EVM lock receiver is not the solver");
+  }
+  if (req.expectedUserTimelock != null) {
+    const skew = Math.abs(lock.unlockTime - req.expectedUserTimelock);
+    if (skew > EVM_TIMELOCK_BIND_TOLERANCE_SECONDS) {
+      throw new Error("EVM lock unlockTime does not match order userTimelock");
+    }
   }
   if (lock.unlockTime - nowSec < EVM_CLAIM_MARGIN_SECONDS) {
     throw new Error("EVM lock expires too soon for the solver to claim safely");

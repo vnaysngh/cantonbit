@@ -64,6 +64,7 @@ import {
   evmBlockAtOrBeforeUnixTime,
   hasEvmClaimedForHashLock,
   findEvmClaimTxForHashLock,
+  findEvmRetakeTxForHashLock,
   isReverseEvmCounterLockReady,
   readErc20Balance,
   readEvmLockMapping,
@@ -251,7 +252,8 @@ async function verifyEvmLock(o: SwapOrder): Promise<void> {
     {
       wbtcAmount: o.wbtcAmount,
       solverEvmAddress: o.solverEvmAddress,
-      expectedWbtcAddress: expectedWbtc
+      expectedWbtcAddress: expectedWbtc,
+      expectedUserTimelock: o.userTimelock
     }
   );
 }
@@ -942,7 +944,9 @@ class HtlcService {
     if (o.status === "counter_claimed") return o;
 
     if (o.status !== "counter_locked") return o;
-    if (!o.wbtcAmount || !o.userEvmAddress) return o;
+    if (!o.wbtcAmount || !o.userEvmAddress || o.solverTimelock == null) {
+      return o;
+    }
 
     // C-02: a zero lock amount means the user Claimed OR the solver Retook. We may
     // ONLY advance to counter_claimed on a confirmed Claim, and we must NEVER roll
@@ -982,8 +986,47 @@ class HtlcService {
           ? o
           : this.must(o.id);
       }
+
+      if (o.counterLockTx) {
+        try {
+          const expectedWbtc = SWAP_CHAIN.wbtc?.trim();
+          if (!expectedWbtc) {
+            throw new Error("WBTC address not configured");
+          }
+          await verifyReverseCounterLockTx(
+            o.counterLockTx,
+            {
+              hashLock: o.hashLock,
+              wbtcAmount: o.wbtcAmount,
+              userEvmAddress: o.userEvmAddress,
+              solverTimelock: o.solverTimelock,
+              expectedWbtcAddress: expectedWbtc
+            },
+            { requireFinality: false }
+          );
+          const fromBlockHex = await evmTxBlockHex(o.counterLockTx);
+          const retakeTx = await findEvmRetakeTxForHashLock(o.hashLock, {
+            fromBlockHex
+          });
+          if (retakeTx) {
+            o.mainClaimTx = retakeTx;
+          }
+          console.warn(
+            `[htlc] reverse counter lock ${o.id.slice(0, 12)} was cleared without Claim after a valid lock tx — keeping counter_locked for refund/recovery`
+          );
+          o.evmFloatReserved = false;
+          if (await this.store.putIfStatus(o, "counter_locked")) return o;
+          return this.must(o.id);
+        } catch {
+          // The recorded tx does not prove a valid lock. Treat this as never
+          // landed and allow the daemon to re-lock below.
+        }
+      }
+
       // Lock gone, conclusively NOT claimed → solver retook (or lock never landed).
-      // Safe to roll back to main_locked so the swap can re-lock or refund.
+      // Only no/invalid lock evidence is safe to roll back to main_locked so
+      // the swap can re-lock. A valid landed lock that later disappeared stays
+      // counter_locked above so refund/recovery cannot double-fund.
       console.warn(
         `[htlc] phantom counter_locked ${o.id.slice(0, 12)} — lock cleared, no Claim (tx ${o.counterLockTx?.slice(0, 12) ?? "none"})`
       );
@@ -1046,20 +1089,35 @@ class HtlcService {
     // Reverse (canton→evm): WBTC is reserved atomically before the user's Canton
     // lock/custody transfer begins, because EVM balance alone is not a reservation.
     if (o.direction === "evm-to-canton") {
-      const holdings = await getHoldings(o.solverCantonParty);
-      const floatSats = holdings.reduce(
-        (s, h) =>
-          s + toBaseUnitsFloor(h.payload.amount ?? "0", 8),
-        0n
-      );
-      // The database serializes this decision per solver party and atomically changes
-      // open -> accepted. Only committed in-flight orders reserve float; abandoned
-      // open drafts do not consume inventory.
-      const reservation = await this.store.acceptWithFloatReservation(
-        o.id,
-        o.solverCantonParty,
-        floatSats
-      );
+      // M-2: re-read spendable float immediately before each reservation attempt.
+      let reservation: Awaited<
+        ReturnType<typeof this.store.acceptWithFloatReservation>
+      > = {
+        accepted: false,
+        reservedSats: 0n,
+        needSats: 0n
+      };
+      let floatSats = 0n;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const holdings = await getHoldings(o.solverCantonParty);
+        floatSats = holdings.reduce(
+          (s, h) =>
+            s + toBaseUnitsFloor(h.payload.amount ?? "0", 8),
+          0n
+        );
+        reservation = await this.store.acceptWithFloatReservation(
+          o.id,
+          o.solverCantonParty,
+          floatSats
+        );
+        if (
+          reservation.accepted ||
+          reservation.reason !== "insufficient_float" ||
+          attempt === 2
+        ) {
+          break;
+        }
+      }
       if (!reservation.accepted) {
         if (reservation.status === "accepted") return this.must(id);
         const availableSats =
@@ -2335,6 +2393,25 @@ class HtlcService {
         ? preimage.slice(2)
         : preimage)) as `0x${string}`;
 
+    const fromBlockHex = o.counterLockTx
+      ? await evmTxBlockHex(o.counterLockTx)
+      : undefined;
+    const claimTx = await findEvmClaimTxForHashLock(o.hashLock, {
+      fromBlockHex
+    });
+    if (!claimTx) {
+      throw new Error(
+        "EVM WBTC claim proof missing — refusing to claim user CBTC"
+      );
+    }
+    if (
+      o.mainClaimTx &&
+      o.mainClaimTx.toLowerCase() !== claimTx.toLowerCase()
+    ) {
+      throw new Error("EVM claim proof mismatch");
+    }
+    o.mainClaimTx = claimTx;
+
     // The EVM claim has made the preimage public. Persist that fact BEFORE trying
     // the Canton claim so auto-refund can never race a revealed secret, and so a
     // failed Canton submit does not force the daemon to rediscover the event forever.
@@ -2644,14 +2721,24 @@ class HtlcService {
         // a retry after a committed-but-unrecorded transfer dedups at the ledger.
         if (!o.counterTransferUpdateId)
           throw new Error("no custody transfer recorded — nothing to refund");
-        const holdings = await getHoldings(o.solverCantonParty);
-        ({ updateId } = await createTransfer({
-          senderParty: o.solverCantonParty,
-          receiverParty: o.userCantonParty,
-          amountBtc: o.cbtcAmount!,
-          inputHoldings: holdings,
-          commandId: `htlc-refund-main-${id}`
-        }));
+        const commandId = `htlc-refund-main-${id}`;
+        const existingRefund = await fetchTransactionTreeByCommandId(
+          commandId,
+          o.solverCantonParty,
+          50_000
+        );
+        if (existingRefund) {
+          updateId = existingRefund.updateId;
+        } else {
+          const holdings = await getHoldings(o.solverCantonParty);
+          ({ updateId } = await createTransfer({
+            senderParty: o.solverCantonParty,
+            receiverParty: o.userCantonParty,
+            amountBtc: o.cbtcAmount!,
+            inputHoldings: holdings,
+            commandId
+          }));
+        }
       } else {
         if (!o.htlcCid || !o.allocationCid)
           throw new Error("on-ledger HtlcLock not present");
@@ -2919,12 +3006,21 @@ class HtlcService {
     const commandId = `htlc-refund-counter-${id}`;
     let updateId: string;
     try {
-      ({ updateId } = await refundHtlcLock({
-        solverParty: o.solverCantonParty,
-        htlcCid,
-        allocationCid,
-        commandId
-      }));
+      const existingRefund = await fetchTransactionTreeByCommandId(
+        commandId,
+        o.solverCantonParty,
+        50_000
+      );
+      if (existingRefund) {
+        updateId = existingRefund.updateId;
+      } else {
+        ({ updateId } = await refundHtlcLock({
+          solverParty: o.solverCantonParty,
+          htlcCid,
+          allocationCid,
+          commandId
+        }));
+      }
     } catch (e) {
       if (e instanceof Error && e.message.includes("duplicate command committed")) {
         const recovered = await fetchTransactionTreeByCommandId(
@@ -2990,6 +3086,29 @@ class HtlcService {
     return o;
   }
 
+  /** Mark a stale forward order refunded only after an on-chain Retaken proof. */
+  async reconcileForwardMainRetake(id: string): Promise<SwapOrder> {
+    const o = await this.must(id);
+    if (o.direction !== "evm-to-canton") {
+      throw new Error("forward retake reconcile is forward-only");
+    }
+    if (o.status !== "main_locked") {
+      throw new Error(`not stale forward main (${o.status})`);
+    }
+    const fromBlockHex = o.mainLockTx
+      ? await evmTxBlockHex(o.mainLockTx)
+      : undefined;
+    const retakeTx = await findEvmRetakeTxForHashLock(o.hashLock, {
+      fromBlockHex
+    });
+    if (!retakeTx) {
+      throw new Error(
+        "EVM retake proof missing — leaving order active/refundable"
+      );
+    }
+    return this.recordMainRetake(id, retakeTx);
+  }
+
   /** Swaps that are counter_locked AND past their Canton timelock — candidates for
    *  the auto-refund sweep (the daemon refunds these to free the solver's CBTC). */
   async refundableOrders(): Promise<SwapOrder[]> {
@@ -3005,8 +3124,8 @@ class HtlcService {
    *  - reverseMain: canton→evm orders whose on-ledger CBTC HtlcLock (USER's)
    *    expired → refundMainCanton (backend CanActAs — fully automated).
    *  - staleForwardMain: evm→canton orders stuck in main_locked past the EVM
-   *    timelock — nothing of OURS is locked (the user retakes their WBTC on EVM
-   *    with their own key); mark refunded so the active list drains. */
+   *    timelock — the sweep records refunded only after finding the user's
+   *    on-chain Retaken proof. */
   async expiredOrders(): Promise<{
     abandonedAccepted: SwapOrder[];
     forwardCounter: SwapOrder[];

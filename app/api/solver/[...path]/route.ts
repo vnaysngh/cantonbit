@@ -3,18 +3,27 @@
  */
 import { type NextRequest, NextResponse } from "next/server";
 
-import { requireDaemon } from "@/lib/htlc-auth";
+import { requireDaemon, requirePartyOwner } from "@/lib/htlc-auth";
 import { isSolverProxyPathAllowed } from "@/lib/solver-proxy-allowlist";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 function solverBase(): string {
-  return (
-    process.env.SOLVER_INTERNAL_URL ??
-    process.env.NEXT_PUBLIC_SWAP_API_URL ??
-    "http://localhost:8787"
-  ).replace(/\/$/, "");
+  const configured = process.env.SOLVER_INTERNAL_URL?.trim();
+  const raw =
+    configured ||
+    (process.env.NODE_ENV === "production" ? "" : "http://localhost:8787");
+  if (!raw) {
+    throw new Error(
+      "SOLVER_INTERNAL_URL must be set for the server-side solver proxy"
+    );
+  }
+  const url = new URL(raw);
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("SOLVER_INTERNAL_URL must be an http(s) URL");
+  }
+  return url.toString().replace(/\/$/, "");
 }
 
 function isSolverMutation(path: string[], method: string): boolean {
@@ -34,10 +43,34 @@ async function forward(req: NextRequest, path: string[]): Promise<NextResponse> 
     const auth = requireDaemon(req);
     if (auth.error) return auth.error;
   }
-  const base = solverBase();
-  const suffix = path.join("/");
-  const search = req.nextUrl.search;
-  const target = `${base}/${suffix}${search}`;
+  let search = req.nextUrl.search;
+  if (req.method === "GET" && path[0] === "orders") {
+    if (path.length === 1) {
+      const auth = requireDaemon(req);
+      if (auth.error) return auth.error;
+    } else if (path.length === 2) {
+      const cantonParty = req.nextUrl.searchParams.get("cantonParty") ?? "";
+      const auth = await requirePartyOwner(cantonParty);
+      if (auth.error) return auth.error;
+      if (!search.includes("cantonParty=")) {
+        const params = new URLSearchParams(search);
+        params.set("cantonParty", auth.partyId);
+        search = `?${params.toString()}`;
+      }
+    }
+  }
+  let target: string;
+  try {
+    const base = solverBase();
+    const suffix = path.join("/");
+    target = `${base}/${suffix}${search}`;
+  } catch (e) {
+    console.error("[solver-proxy] invalid solver base:", e);
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : "invalid solver base" },
+      { status: 500 }
+    );
+  }
 
   const init: RequestInit = {
     method: req.method,
@@ -46,7 +79,6 @@ async function forward(req: NextRequest, path: string[]): Promise<NextResponse> 
       req.method === "GET" || req.method === "HEAD"
         ? undefined
         : await req.text(),
-    // Bound the proxied call so a hung-but-connected solver can't pin the worker.
     signal: AbortSignal.timeout(20_000)
   };
 
@@ -60,8 +92,6 @@ async function forward(req: NextRequest, path: string[]): Promise<NextResponse> 
       }
     });
   } catch (e) {
-    // Do NOT leak the raw error (it contains SOLVER_INTERNAL_URL host:port). Log it
-    // server-side; return a generic message.
     console.error("[solver-proxy] forward failed:", e);
     const timedOut = e instanceof Error && e.name === "TimeoutError";
     return NextResponse.json(

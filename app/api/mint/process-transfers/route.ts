@@ -17,6 +17,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { processMintTransfers } from "@/lib/mint-processor";
+import { requireMintRedeemRateLimit } from "@/lib/mint-redeem-guard";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 const TAG = "[mint/process-transfers]";
@@ -62,6 +63,19 @@ export async function POST(request: NextRequest) {
     console.warn(`${TAG} unauthorized request rejected`);
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+
+  let partyKey: string | undefined;
+  try {
+    const supabase = await createSupabaseServerClient();
+    const {
+      data: { user }
+    } = await supabase.auth.getUser();
+    partyKey = user?.id;
+  } catch {
+    partyKey = undefined;
+  }
+  const rate = await requireMintRedeemRateLimit(request, partyKey);
+  if (rate) return rate;
 
   try {
     const result = await processMintTransfers();

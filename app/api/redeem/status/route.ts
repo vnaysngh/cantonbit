@@ -15,8 +15,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { findWithdrawRequest } from "@/lib/redeem-ledger";
-import { NETWORK } from "@/lib/constants";
 import { resolveSessionParty } from "@/lib/session-party";
+import { requireMintRedeemRateLimit } from "@/lib/mint-redeem-guard";
 
 const TAG = "[redeem/status]";
 
@@ -30,6 +30,8 @@ export async function POST(req: NextRequest) {
     // SECURITY: read only the session's own party's redeem status.
     const sess = await resolveSessionParty(clientPartyId);
     if (sess.error) return sess.error;
+    const rate = await requireMintRedeemRateLimit(req, sess.partyId);
+    if (rate) return rate;
     const partyId = sess.partyId;
 
     if (!destinationBtcAddress) {
@@ -54,43 +56,9 @@ export async function POST(req: NextRequest) {
     }
 
     // No active request — either not picked up yet, or already completed+archived.
-    // Check mempool for a confirmed incoming tx to the destination address.
-    const explorerBase =
-      NETWORK.name === "mainnet" ? "https://mempool.space/api"
-      : NETWORK.name === "testnet" ? "https://mempool.space/testnet/api"
-      : null;
-
-    if (explorerBase) {
-      try {
-        const mRes = await fetch(
-          `${explorerBase}/address/${encodeURIComponent(destinationBtcAddress)}/txs`,
-          { cache: "no-store" },
-        );
-        if (mRes.ok) {
-          const txs = (await mRes.json()) as Array<{
-            txid: string;
-            status?: { confirmed?: boolean };
-            vout?: Array<{ scriptpubkey_address?: string }>;
-          }>;
-          const confirmed = txs.find(
-            (tx) =>
-              tx.status?.confirmed &&
-              tx.vout?.some((v) => v.scriptpubkey_address === destinationBtcAddress),
-          );
-          if (confirmed) {
-            console.log(`${TAG} completed — confirmed btc tx ${confirmed.txid}`);
-            return NextResponse.json({
-              state: "completed",
-              btcTxId: confirmed.txid,
-              amount: null,
-              withdrawRequestCid: null,
-            });
-          }
-        }
-      } catch {
-        // mempool unreachable — fall through to pending
-      }
-    }
+    // Do not infer completion from arbitrary BTC transactions to the address:
+    // completion must come from the on-ledger withdraw lifecycle/history so a
+    // third-party payment cannot make this route report a redeem as complete.
 
     console.log(`${TAG} no active request for ${destinationBtcAddress}`);
     return NextResponse.json({

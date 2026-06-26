@@ -8,6 +8,7 @@ import { getJwtSession, loopApiBase } from "@/lib/swap-session";
 import { htlcService, type SwapOrder } from "@/lib/htlc-service-singleton";
 import { isBearerAuthorized } from "@/lib/htlc-auth-logic";
 import { distributedRateLimitOk } from "@/lib/api-rate-limit";
+import { mainnetBlockedResponse } from "@/lib/mainnet-guard";
 
 type GuardOk<T = unknown> = T & { error: null };
 type GuardErr = { error: NextResponse };
@@ -35,6 +36,8 @@ export function isDaemonAuthorized(req: Request): boolean {
 }
 
 export function requireDaemon(req: Request): GuardOk | GuardErr {
+  const mainnetBlocked = mainnetBlockedResponse();
+  if (mainnetBlocked) return { error: mainnetBlocked };
   if (isDaemonAuthorized(req)) return { error: null };
   return unauthorized("Daemon authorization required");
 }
@@ -84,6 +87,8 @@ async function resolveLoopSessionParty(): Promise<string | null> {
 }
 
 export async function requirePartyOwner(party: string): Promise<GuardOk<{ partyId: string }> | GuardErr> {
+  const mainnetBlocked = mainnetBlockedResponse();
+  if (mainnetBlocked) return { error: mainnetBlocked };
   if (!party || !party.includes("::")) return unauthorized("Invalid Canton party", 400);
 
   if (await isParticipantManagedParty(party)) {
@@ -153,14 +158,26 @@ export async function requireC2cLoopIntentRateLimit(
 export async function authorizeQuoteParty(
   party: string
 ): Promise<GuardOk<{ partyId: string }> | GuardErr> {
+  const mainnetBlocked = mainnetBlockedResponse();
+  if (mainnetBlocked) return { error: mainnetBlocked };
   if (!party || !party.includes("::")) return unauthorized("Invalid Canton party", 400);
   if (await isParticipantManagedParty(party)) {
     return requirePartyOwner(party);
   }
-  return { partyId: party, error: null };
+  const loopParty = await resolveLoopSessionParty();
+  if (!loopParty) return unauthorized("Loop wallet session required");
+  if (loopParty !== party) {
+    return unauthorized(
+      "Requested party does not match the connected Loop wallet.",
+      403
+    );
+  }
+  return { partyId: loopParty, error: null };
 }
 
 export async function requireOrderOwner(id: string): Promise<GuardOk<{ order: SwapOrder }> | GuardErr> {
+  const mainnetBlocked = mainnetBlockedResponse();
+  if (mainnetBlocked) return { error: mainnetBlocked };
   const order = await htlcService().peekOrder(id);
   if (!order) return unauthorized("not found", 404);
   const owner = await requirePartyOwner(order.userCantonParty);
@@ -178,6 +195,8 @@ export async function requireOrderOwner(id: string): Promise<GuardOk<{ order: Sw
 }
 
 export async function requireOrderOwnerOrDaemon(req: Request, id: string): Promise<GuardOk<{ order: SwapOrder; daemon: boolean }> | GuardErr> {
+  const mainnetBlocked = mainnetBlockedResponse();
+  if (mainnetBlocked) return { error: mainnetBlocked };
   const order = await htlcService().peekOrder(id);
   if (!order) return unauthorized("not found", 404);
   if (isDaemonAuthorized(req)) return { order, daemon: true, error: null };
@@ -197,16 +216,12 @@ export async function requireOrderOwnerOrDaemon(req: Request, id: string): Promi
 
 /** WarpX node party (legacy public label). Not used for swap vault float. */
 export function expectedSolverCanton(): string {
-  return process.env.SOLVER_CANTON_PARTY ?? process.env.NEXT_PUBLIC_SOLVER_CANTON ?? "";
+  return process.env.SOLVER_CANTON_PARTY?.trim() ?? "";
 }
 
 /** Settlement vault — receives user legs and pays counter legs (C2C + HTLC). */
 export function expectedSettlementParty(): string {
-  return (
-    process.env.CANTON_SWAP_SETTLEMENT_PARTY?.trim() ||
-    process.env.NEXT_PUBLIC_CANTON_SWAP_SETTLEMENT_PARTY?.trim() ||
-    ""
-  );
+  return process.env.CANTON_SWAP_SETTLEMENT_PARTY?.trim() ?? "";
 }
 
 /** HTLC CBTC float / allocate / deliver — same vault as C2C. */
@@ -220,5 +235,5 @@ export function expectedCantonSwapParty(): string {
 }
 
 export function expectedSolverEvm(): string {
-  return process.env.SOLVER_EVM ?? process.env.NEXT_PUBLIC_SOLVER_EVM ?? "";
+  return process.env.SOLVER_EVM?.trim() ?? "";
 }

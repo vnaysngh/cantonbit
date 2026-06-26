@@ -7,14 +7,18 @@
  * Response: { da_rules: CoordinatorContract, wa_rules: CoordinatorContract }
  */
 
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 import { getAccountContractRules } from "@/lib/bitsafe";
+import { requireMintRedeemRateLimit } from "@/lib/mint-redeem-guard";
 
 const TAG = "[mint/account-contract-rules]";
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   console.log(`${TAG} request received`);
+
+  const rate = await requireMintRedeemRateLimit(req);
+  if (rate) return rate;
 
   try {
     const rules = await getAccountContractRules();

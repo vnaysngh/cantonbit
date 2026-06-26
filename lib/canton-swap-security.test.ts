@@ -14,23 +14,37 @@ test("cantonSwapQuoteRateLimitOk enforces bucket", () => {
   assert.equal(cantonSwapQuoteRateLimitOk(key), false);
 });
 
-test("clientIpFromRequest prefers x-real-ip over x-forwarded-for", () => {
+test("clientIpFromRequest ignores spoofable x-real-ip", () => {
   const req = new Request("http://localhost/quote", {
     headers: {
       "x-real-ip": "203.0.113.9",
       "x-forwarded-for": "198.51.100.1, 10.0.0.1"
     }
   });
-  assert.equal(clientIpFromRequest(req), "203.0.113.9");
+  assert.equal(clientIpFromRequest(req), "198.51.100.1");
 });
 
-test("clientIpFromRequest takes client before trusted proxy hop", () => {
+test("clientIpFromRequest takes client before one trusted proxy hop", () => {
   const req = new Request("http://localhost/quote", {
-    headers: {
-      "x-forwarded-for": "203.0.113.1, 10.0.0.1"
-    }
+    headers: { "x-forwarded-for": "evil, 9.9.9.9" }
   });
-  assert.equal(clientIpFromRequest(req), "203.0.113.1");
+  assert.equal(clientIpFromRequest(req), "evil");
+});
+
+test("clientIpFromRequest takes client before two trusted proxy hops", () => {
+  const old = process.env.TRUSTED_PROXY_HOPS;
+  process.env.TRUSTED_PROXY_HOPS = "2";
+  try {
+    const req = new Request("http://localhost/quote", {
+      headers: {
+        "x-forwarded-for": "203.0.113.1, 10.0.0.1, 10.0.0.2"
+      }
+    });
+    assert.equal(clientIpFromRequest(req), "203.0.113.1");
+  } finally {
+    if (old === undefined) delete process.env.TRUSTED_PROXY_HOPS;
+    else process.env.TRUSTED_PROXY_HOPS = old;
+  }
 });
 
 test("buildLoopFillResultFromEvents: pending accept when counter offer created", () => {

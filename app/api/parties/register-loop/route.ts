@@ -28,6 +28,7 @@ import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/s
 import { partyMappingEmailPayload, syncPartyMappingEmail } from "@/lib/party-mapping-email";
 import { loopProfileParty } from "@/lib/htlc-auth";
 import { exchangeForJwt, loopApiBase, storeJwtCookie, type ExchangeSig } from "@/lib/swap-session";
+import { mainnetBlockedResponse } from "@/lib/mainnet-guard";
 
 const TAG = "[parties/register-loop]";
 
@@ -38,6 +39,9 @@ function isPlausibleParty(p: unknown): p is string {
 
 export async function POST(req: Request) {
   try {
+    const mainnetBlocked = mainnetBlockedResponse();
+    if (mainnetBlocked) return mainnetBlocked;
+
     const body = (await req.json().catch(() => ({}))) as { partyId?: unknown } & Partial<ExchangeSig>;
     const partyId = body.partyId;
     if (!isPlausibleParty(partyId)) {

@@ -6,11 +6,10 @@
  * 1. Read last_processed_offset from Supabase (mint_processor_state)
  * 2. Call /v2/updates from that offset to current ledger end
  * 3. For each transaction containing a Holding CreatedEvent + DepositAccount ArchivedEvent:
- *    a. Look up user via deposit_account_contract_id in Supabase
- *    b. Fallback: resolve bitcoin address from coordinator → look up user by bitcoin_address
- *    c. Insert mint_transfers row (status=pending) — skips if holding already processed (unique constraint)
- *    d. Transfer holding to user's canton_party_id
- *    e. Update mint_transfers row (status=transferred or failed)
+ *    a. Look up user via exact DepositAccount contract id or rolled-forward DA id
+ *    b. Insert/update mint_transfers metadata without resetting in-flight status
+ *    c. Atomically claim the row, transfer holding to user's canton_party_id
+ *    d. Update mint_transfers row (status=transferred or failed)
  * 4. Update last_processed_offset to current ledger end
  */
 
@@ -706,7 +705,8 @@ export async function processMintTransfers(): Promise<MintProcessorResult> {
  *   2. For each holding, classify it: is its creating transaction a MINT (it
  *      archived a DepositAccount)? Non-mints (transfer change, etc.) are left
  *      alone.
- *   3. Resolve the owning user, claim the row, and run the (hardened) two-phase
+ *   3. Resolve the owning user from the exact DepositAccount lineage, claim the row,
+ *      and run the (hardened) two-phase
  *      transfer with offer-persist + dedup guards.
  */
 async function runProcessorLocked(
@@ -779,8 +779,10 @@ async function runProcessorLocked(
     const depositAccountContractId = mint.archivedDepositAccountCid;
     console.log(`${TAG} MINT holding=${holdingContractId.slice(0, 20)}... da=${depositAccountContractId.slice(0, 20)}... amount=${amount}`);
 
-    // Step 4: resolve user. Match by archived DA cid OR the rolled-forward DA
-    // `id` (subsequent mints to the same address), with a coordinator fallback.
+    // Step 4: resolve user. Match only by archived DA cid OR the rolled-forward
+    // DA `id` (subsequent mints to the same address). Do NOT assign by BTC
+    // address alone: deposit addresses can be reused/rolled forward and an
+    // address-only fallback can deliver a mint to the wrong user.
     let userId: string | null = null;
     let cantonPartyId: string | null = null;
     let bitcoinAddress: string | null = null;
@@ -790,11 +792,25 @@ async function runProcessorLocked(
       candidateDaIds.push(mint.rolledForwardDaOriginalId);
     }
 
-    const { data: depositRow } = await supabase
+    const { data: depositRows, error: depositLookupError } = await supabase
       .from("deposit_accounts")
       .select("user_id, canton_party_id, bitcoin_address")
-      .in("deposit_account_contract_id", candidateDaIds)
-      .maybeSingle();
+      .in("deposit_account_contract_id", candidateDaIds);
+
+    if (depositLookupError) {
+      console.error(`${TAG} deposit account lookup failed:`, depositLookupError);
+    }
+
+    const uniqueRows = new Map<string, {
+      user_id: string | null;
+      canton_party_id: string | null;
+      bitcoin_address: string | null;
+    }>();
+    for (const row of depositRows ?? []) {
+      uniqueRows.set(`${row.user_id ?? ""}:${row.canton_party_id ?? ""}`, row);
+    }
+    const depositRow =
+      uniqueRows.size === 1 ? [...uniqueRows.values()][0] : null;
 
     if (depositRow) {
       userId = depositRow.user_id;
@@ -802,41 +818,55 @@ async function runProcessorLocked(
       bitcoinAddress = depositRow.bitcoin_address;
       console.log(`${TAG} resolved user=${userId} party=${cantonPartyId?.slice(0, 30)}...`);
     } else {
-      console.warn(`${TAG} deposit account not in Supabase, trying coordinator fallback...`);
+      if ((depositRows?.length ?? 0) > 1) {
+        console.error(
+          `${TAG} ambiguous deposit account lineage for ${depositAccountContractId.slice(0, 20)} — refusing address-only fallback`
+        );
+      } else {
+        console.warn(`${TAG} deposit account not in Supabase — refusing address-only fallback`);
+      }
       try {
         bitcoinAddress = await getBitcoinAddress(depositAccountContractId);
-        const { data: addrRow } = await supabase
-          .from("deposit_accounts")
-          .select("user_id, canton_party_id")
-          .eq("bitcoin_address", bitcoinAddress)
-          .single();
-        if (addrRow) {
-          userId = addrRow.user_id;
-          cantonPartyId = addrRow.canton_party_id;
-          console.log(`${TAG} resolved via bitcoin_address fallback user=${userId}`);
-        }
       } catch (fallbackErr) {
-        console.error(`${TAG} coordinator fallback failed:`, fallbackErr);
+        console.error(`${TAG} coordinator address lookup failed:`, fallbackErr);
       }
     }
 
-    // Step 5: upsert the row (preserving any recorded offer_contract_id).
-    await supabase.from("mint_transfers").upsert(
-      {
-        network: NETWORK.name,
-        ledger_offset: mint.createOffset,
-        holding_contract_id: holdingContractId,
-        deposit_account_contract_id: depositAccountContractId,
-        bitcoin_address: bitcoinAddress,
-        user_id: userId,
-        canton_party_id: cantonPartyId,
-        amount,
+    // Step 5: create/update metadata without resetting the state machine. The
+    // claim RPC owns status transitions; an upsert that writes status=pending
+    // would turn processing/offer_created rows back into retryable rows and can
+    // recreate duplicate transfer offers.
+    const mintRow = {
+      network: NETWORK.name,
+      ledger_offset: mint.createOffset,
+      holding_contract_id: holdingContractId,
+      deposit_account_contract_id: depositAccountContractId,
+      bitcoin_address: bitcoinAddress,
+      user_id: userId,
+      canton_party_id: cantonPartyId,
+      amount,
+      updated_at: new Date().toISOString(),
+    };
+    if (existing?.status === "processing") {
+      // Do not touch updated_at before claim_mint_transfer runs. That RPC uses
+      // updated_at to decide whether a processing row is stale/reclaimable.
+    } else if (existing) {
+      await supabase
+        .from("mint_transfers")
+        .update({
+          ...mintRow,
+          ...(existing.status === "pending" || existing.status === "failed"
+            ? { error: null }
+            : {})
+        })
+        .eq("holding_contract_id", holdingContractId);
+    } else {
+      await supabase.from("mint_transfers").insert({
+        ...mintRow,
         status: "pending",
-        error: null,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "holding_contract_id" },
-    );
+        error: null
+      });
+    }
 
     if (!cantonPartyId) {
       const errMsg = `Could not resolve user for depositAccountContractId=${depositAccountContractId}`;
@@ -868,6 +898,14 @@ async function runProcessorLocked(
       result.skipped++;
       continue;
     }
+
+    await supabase
+      .from("mint_transfers")
+      .update({
+        ...mintRow,
+        error: null
+      })
+      .eq("holding_contract_id", holdingContractId);
 
     // Step 7: transfer. Offer CID is persisted BEFORE accept; on retry an
     // already-recorded offer is accepted, never recreated.

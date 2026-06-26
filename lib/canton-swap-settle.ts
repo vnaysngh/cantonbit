@@ -880,7 +880,7 @@ export async function verifyCounterLegReceiptProof(
   const pollMs = opts?.pollMs ?? 1000;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const pending = await safeListPendingOffers(order.userParty);
+    const pending = await listPendingOffersStrict(order.userParty);
     if (pending.some((p) => p.contractId === order.counterLegOfferCid)) {
       return { status: "pending" };
     }

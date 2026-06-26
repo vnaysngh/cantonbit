@@ -7,6 +7,7 @@
 import "server-only";
 
 import { createSupabaseServiceClient } from "./supabase/server";
+import { assertUnifiedVaultReservationReady } from "./vault-reservation-readiness";
 import type { SwapOrder, SwapStatus } from "./htlc-types";
 
 const TABLE = "htlc_orders";
@@ -208,6 +209,7 @@ export class SupabaseSwapStore implements SwapStore {
     reservedSats: bigint;
     needSats: bigint;
   }> {
+    await assertUnifiedVaultReservationReady();
     const sb = await createSupabaseServiceClient();
     const { data, error } = await sb.rpc(
       "accept_htlc_order_with_float_reservation",

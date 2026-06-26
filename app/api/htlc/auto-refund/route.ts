@@ -5,14 +5,15 @@
  *   - a scheduled cron (GET — Vercel cron / external worker, Bearer daemonSecret).
  * Idempotent per order. Covers forward/reverse CBTC refunds + Loop custody returns.
  *
- * AUTH: production requires daemon/cron bearer authorization. Development allows
- * local sweeps without a secret so the worker remains easy to run locally.
+ * AUTH: POST requires daemon bearer; GET requires cron bearer (daemonSecret).
+ * Both fail closed when the secret is unset outside development.
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
 import { alert } from "@/lib/alert";
 import { daemonSecret, requireDaemon } from "@/lib/htlc-auth";
 import { isBearerAuthorized } from "@/lib/htlc-auth-logic";
+import { mainnetBlockedResponse } from "@/lib/mainnet-guard";
 
 function cronAuthorized(req: NextRequest): boolean {
   return isBearerAuthorized({
@@ -36,18 +37,25 @@ async function sweep() {
   } = await svc.expiredOrders();
   const results: { id: string; kind: string; ok: boolean; detail: string }[] =
     [];
-  const run = async (id: string, kind: string, fn: () => Promise<unknown>) => {
+  const run = async (
+    id: string,
+    kind: string,
+    fn: () => Promise<unknown>,
+    opts?: { alertOnFailure?: boolean }
+  ) => {
     try {
       const r = (await fn()) as { updateId?: string } | undefined;
       results.push({ id, kind, ok: true, detail: r?.updateId ?? "ok" });
     } catch (e) {
       const detail = e instanceof Error ? e.message.slice(0, 120) : String(e);
       results.push({ id, kind, ok: false, detail });
-      void alert("error", "Auto-refund FAILED for an expired swap", {
-        order: id.slice(0, 18),
-        kind,
-        detail
-      });
+      if (opts?.alertOnFailure !== false) {
+        void alert("error", "Auto-refund FAILED for an expired swap", {
+          order: id.slice(0, 18),
+          kind,
+          detail
+        });
+      }
     }
   };
   for (const o of abandonedAccepted)
@@ -57,7 +65,12 @@ async function sweep() {
   for (const o of reverseMain)
     await run(o.id, "refund-main", () => svc.refundMainCanton(o.id));
   for (const o of staleForwardMain)
-    await run(o.id, "mark-stale", () => svc.markRefunded(o.id));
+    await run(
+      o.id,
+      "record-forward-retake",
+      () => svc.reconcileForwardMainRetake(o.id),
+      { alertOnFailure: false }
+    );
   for (const o of staleLoopSeller)
     await run(o.id, "refund-loop-custody", () => svc.refundMainCanton(o.id));
   for (const o of loopCustodyStalled)
@@ -94,6 +107,8 @@ export async function POST(req: Request) {
 }
 
 export async function GET(req: NextRequest) {
+  const mainnetBlocked = mainnetBlockedResponse();
+  if (mainnetBlocked) return mainnetBlocked;
   if (!cronAuthorized(req))
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   try {
