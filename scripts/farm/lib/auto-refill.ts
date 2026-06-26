@@ -1,0 +1,109 @@
+import { spawnSync } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const REFILL_COOLDOWN_MS = 10 * 60 * 1000;
+
+const VAULT_CBTC_REFILL = "0.005";
+const TRADER_CBTC_EACH = "0.0002";
+
+let lastRefillAt = 0;
+
+export interface AutoRefillResult {
+  ran: boolean;
+  vaultCbtc?: string;
+  traderCbtcEach?: string;
+  output: string;
+}
+
+function runMainnetScript(
+  script: string,
+  args: string[]
+): { ok: boolean; output: string } {
+  const r = spawnSync(
+    "bash",
+    ["scripts/with-env.sh", "mainnet", "npx", "tsx", script, ...args],
+    {
+      cwd: REPO_ROOT,
+      env: process.env,
+      encoding: "utf8",
+      timeout: 600_000
+    }
+  );
+  const output = `${r.stdout ?? ""}${r.stderr ?? ""}`.trim();
+  return { ok: r.status === 0, output };
+}
+
+function needsVaultCbtc(msg: string): boolean {
+  return (
+    /vault=low CBTC/i.test(msg) ||
+    (/vault CBTC=0/i.test(msg) && /CC→CBTC:.*vault=low CBTC/i.test(msg))
+  );
+}
+
+function needsTraderCbtc(msg: string): boolean {
+  return (
+    /CBTC→CC: traders=0\//i.test(msg) ||
+    (/need 0\.00001\+0\.0000/i.test(msg) && /CBTC→CC/i.test(msg))
+  );
+}
+
+/**
+ * On float blockers, fund vault CBTC from treasury and/or traders from vault.
+ * Throttled so a stuck planner does not spam transfers.
+ */
+export function tryAutoRefillFromPlanError(msg: string): AutoRefillResult {
+  const empty: AutoRefillResult = { ran: false, output: "" };
+  if (!/no viable swap/i.test(msg)) return empty;
+  if (Date.now() - lastRefillAt < REFILL_COOLDOWN_MS) {
+    console.warn(
+      `  auto-refill skipped: cooldown (${Math.round((REFILL_COOLDOWN_MS - (Date.now() - lastRefillAt)) / 1000)}s left)`
+    );
+    return empty;
+  }
+
+  const chunks: string[] = [];
+  let ran = false;
+  let vaultCbtc: string | undefined;
+  let traderCbtcEach: string | undefined;
+
+  if (needsVaultCbtc(msg)) {
+    console.warn(`  auto-refill: vault CBTC low → treasury fund ${VAULT_CBTC_REFILL} CBTC`);
+    const r = runMainnetScript("scripts/fund-swap-vault.mts", [
+      "--i-understand-mainnet",
+      `--cbtc=${VAULT_CBTC_REFILL}`,
+      "--cc=0"
+    ]);
+    chunks.push(r.output);
+    if (r.ok) {
+      ran = true;
+      vaultCbtc = VAULT_CBTC_REFILL;
+      console.warn(`  auto-refill: vault CBTC fund ok`);
+    } else {
+      console.error(`  auto-refill: vault CBTC fund failed:\n${r.output.slice(0, 400)}`);
+    }
+  }
+
+  if (needsTraderCbtc(msg)) {
+    console.warn(
+      `  auto-refill: traders CBTC low → vault fund ${TRADER_CBTC_EACH} CBTC each`
+    );
+    const r = runMainnetScript("scripts/farm/cli.mts", [
+      "fund-traders-cbtc",
+      "--i-understand-mainnet",
+      `--cbtc=${TRADER_CBTC_EACH}`
+    ]);
+    chunks.push(r.output);
+    if (r.ok) {
+      ran = true;
+      traderCbtcEach = TRADER_CBTC_EACH;
+      console.warn(`  auto-refill: trader CBTC fund ok`);
+    } else {
+      console.error(`  auto-refill: trader CBTC fund failed:\n${r.output.slice(0, 400)}`);
+    }
+  }
+
+  if (ran) lastRefillAt = Date.now();
+  return { ran, vaultCbtc, traderCbtcEach, output: chunks.join("\n") };
+}

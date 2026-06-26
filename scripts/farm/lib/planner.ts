@@ -1,4 +1,4 @@
-import { toBaseUnitsFloor } from "../../../lib/amount-units";
+import { fromBaseUnits, toBaseUnitsFloor } from "../../../lib/amount-units";
 import { CBTC_ASSET, CC_ASSET } from "../../../lib/canton-assets";
 import { partyBalancesSummary } from "./float";
 import { isUtxoOverAcsCap } from "./utxo-guard";
@@ -9,7 +9,7 @@ import type { FarmAsset, FarmFleetConfig, OrganicPick, PacingConfig } from "./ty
 export const MEASURED_BYTES_PER_SWAP = 24_500;
 
 /** Keep this much above swap size so parties don't drain to zero. */
-const RESERVE_CBTC = "0.00005";
+const RESERVE_CBTC = "0.00002";
 const RESERVE_CC = "10";
 
 export interface PlannerState {
@@ -52,6 +52,98 @@ function hasReserve(
   const bal = toBaseUnitsFloor(balance, decimals);
   const req = toBaseUnitsFloor(need, decimals) + toBaseUnitsFloor(reserve, decimals);
   return bal >= req;
+}
+
+function bumpBalance(
+  current: string,
+  delta: string,
+  decimals: number,
+  sign: 1 | -1
+): string {
+  const next =
+    toBaseUnitsFloor(current, decimals) +
+    sign * toBaseUnitsFloor(delta, decimals);
+  return fromBaseUnits(next >= 0n ? next : 0n, decimals);
+}
+
+/** Update cached float from a settled swap (avoids re-reading vault CBTC via truncated ACS). */
+export function applySwapToFloat(
+  float: FleetFloatSnapshot,
+  swap: {
+    traderParty: string;
+    fromAsset: FarmAsset;
+    inAmount: string;
+    outAmount: string;
+  }
+): FleetFloatSnapshot {
+  const traders = float.traders.map((t) => ({ ...t }));
+  const vault = { ...float.vault };
+  const trader = traders.find((t) => t.party === swap.traderParty);
+  if (!trader) return float;
+
+  if (swap.fromAsset === "CBTC") {
+    trader.cbtc = bumpBalance(
+      trader.cbtc,
+      swap.inAmount,
+      CBTC_ASSET.decimals,
+      -1
+    );
+    trader.cc = bumpBalance(trader.cc, swap.outAmount, CC_ASSET.decimals, 1);
+    vault.cbtc = bumpBalance(vault.cbtc, swap.inAmount, CBTC_ASSET.decimals, 1);
+    vault.cc = bumpBalance(vault.cc, swap.outAmount, CC_ASSET.decimals, -1);
+  } else {
+    trader.cc = bumpBalance(trader.cc, swap.inAmount, CC_ASSET.decimals, -1);
+    trader.cbtc = bumpBalance(
+      trader.cbtc,
+      swap.outAmount,
+      CBTC_ASSET.decimals,
+      1
+    );
+    vault.cc = bumpBalance(vault.cc, swap.inAmount, CC_ASSET.decimals, 1);
+    vault.cbtc = bumpBalance(
+      vault.cbtc,
+      swap.outAmount,
+      CBTC_ASSET.decimals,
+      -1
+    );
+  }
+
+  return { vault, traders };
+}
+
+export function applyVaultFundToFloat(
+  float: FleetFloatSnapshot,
+  fund: { cbtc?: string; cc?: string }
+): FleetFloatSnapshot {
+  const vault = { ...float.vault };
+  if (fund.cbtc && parseFloat(fund.cbtc) > 0) {
+    vault.cbtc = bumpBalance(vault.cbtc, fund.cbtc, CBTC_ASSET.decimals, 1);
+  }
+  if (fund.cc && parseFloat(fund.cc) > 0) {
+    vault.cc = bumpBalance(vault.cc, fund.cc, CC_ASSET.decimals, 1);
+  }
+  return { ...float, vault };
+}
+
+export function applyTraderCbtcFundToFloat(
+  float: FleetFloatSnapshot,
+  amountPerTrader: string
+): FleetFloatSnapshot {
+  const per = toBaseUnitsFloor(amountPerTrader, CBTC_ASSET.decimals);
+  const totalDebit = fromBaseUnits(
+    per * BigInt(float.traders.length),
+    CBTC_ASSET.decimals
+  );
+  return {
+    vault: {
+      ...float.vault,
+      cbtc: bumpBalance(float.vault.cbtc, totalDebit, CBTC_ASSET.decimals, -1)
+    },
+    traders: float.traders.map((t) => ({
+      ...t,
+      cbtc: bumpBalance(t.cbtc, amountPerTrader, CBTC_ASSET.decimals, 1)
+    }))
+  };
 }
 
 export async function loadFleetFloat(
@@ -374,7 +466,7 @@ export function formatPlanBlockers(report: PlanBlockerReport): string {
     `  vault CBTC=${report.float.vault.cbtc} (need ≥${vaultNeedCbtc} for CC→CBTC) CC=${report.float.vault.cc} (need ≥${vaultNeedCc} for CBTC→CC)`,
     `  CBTC→CC: traders=${cbtc.tradersOk}/${report.float.traders.length} vault=${cbtc.vaultOk ? "ok" : "low CC"} dir=${cbtc.directionOk ? "ok" : "blocked"}${cbtc.sampleTraderIssue ? ` e.g. ${cbtc.sampleTraderIssue}` : ""}`,
     `  CC→CBTC: traders=${cc.tradersOk}/${report.float.traders.length} vault=${cc.vaultOk ? "ok" : "low CBTC"} dir=${cc.directionOk ? "ok" : "blocked"}${cc.sampleTraderIssue ? ` e.g. ${cc.sampleTraderIssue}` : ""}`,
-    "  fix: fund vault CBTC (fund-swap-vault:mainnet) and/or traders CC from treasury; tune --cbtc-in / --cc-in"
+    "  fix: fund vault CBTC (fund-swap-vault:mainnet), traders CBTC (farm:fund-traders-cbtc:mainnet), and/or traders CC; tune --cbtc-in / --cc-in"
   ];
   return lines.join("\n");
 }

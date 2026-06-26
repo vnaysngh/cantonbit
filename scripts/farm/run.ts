@@ -22,14 +22,24 @@ import {
   sleepSecondsAfterSwap,
   sleepMs
 } from "./lib/organic";
-import { MEASURED_BYTES_PER_SWAP, balancePacingAmounts, planNextSwap, type FleetFloatSnapshot, type PlannerState } from "./lib/planner";
+import {
+  MEASURED_BYTES_PER_SWAP,
+  applySwapToFloat,
+  applyTraderCbtcFundToFloat,
+  applyVaultFundToFloat,
+  balancePacingAmounts,
+  loadFleetFloat,
+  planNextSwap,
+  type FleetFloatSnapshot,
+  type PlannerState
+} from "./lib/planner";
 import {
   parseFlag,
   parseNumberArg,
   requireMainnetGuard
 } from "./lib/parse-args";
 import { isTransientError, retry } from "./lib/retry";
-import { needsUtxoConsolidation } from "./lib/utxo-guard";
+import { tryAutoRefillFromPlanError } from "./lib/auto-refill";
 
 function assertBitsafeGate(): void {
   if (
@@ -159,7 +169,8 @@ async function handlePlanFailure(params: {
   err: unknown;
   jwt: string;
   fleet: ReturnType<typeof loadFleet>;
-}): Promise<string> {
+  cachedFloat: FleetFloatSnapshot | null;
+}): Promise<{ jwt: string; float?: FleetFloatSnapshot | null }> {
   const msg = params.err instanceof Error ? params.err.message : String(params.err);
   console.error(`✗ plan failed:\n${msg.split("\n").map((l) => `  ${l}`).join("\n")}`);
 
@@ -175,7 +186,33 @@ async function handlePlanFailure(params: {
       console.error(`  consolidate failed: ${cm.slice(0, 200)}`);
     }
     await sleepMs(5000);
-    return params.jwt;
+    return { jwt: params.jwt, float: null };
+  }
+
+  if (/no viable swap/i.test(msg)) {
+    const refill = tryAutoRefillFromPlanError(msg);
+    if (refill.ran) {
+      let float = params.cachedFloat;
+      if (!float) {
+        try {
+          float = await runWithLedgerReadSession(params.jwt, () =>
+            loadFleetFloat(params.jwt, params.fleet)
+          );
+        } catch {
+          float = null;
+        }
+      }
+      if (float) {
+        if (refill.vaultCbtc) {
+          float = applyVaultFundToFloat(float, { cbtc: refill.vaultCbtc });
+        }
+        if (refill.traderCbtcEach) {
+          float = applyTraderCbtcFundToFloat(float, refill.traderCbtcEach);
+        }
+      }
+      await sleepMs(15_000);
+      return { jwt: params.jwt, float: float ?? null };
+    }
   }
 
   let jwt = await refreshJwtIfAuthError(msg, params.jwt);
@@ -183,12 +220,12 @@ async function handlePlanFailure(params: {
     clearLedgerOffsetCache();
     jwt = await refreshJwtIfAuthError(msg, jwt);
     await sleepMs(20_000);
-    return jwt;
+    return { jwt };
   }
 
   jwt = await refreshJwtIfAuthError(msg, jwt);
   await sleepMs(isTransientError(params.err) ? 30_000 : 60_000);
-  return jwt;
+  return { jwt };
 }
 
 export async function runFarmBot(): Promise<void> {
@@ -278,8 +315,16 @@ export async function runFarmBot(): Promise<void> {
       pick = planned.pick;
       plannerState = planned.state;
     } catch (e) {
-      cachedFloat = null;
-      jwt = await handlePlanFailure({ err: e, jwt, fleet });
+      const failure = await handlePlanFailure({
+        err: e,
+        jwt,
+        fleet,
+        cachedFloat
+      });
+      jwt = failure.jwt;
+      if (failure.float !== undefined) {
+        cachedFloat = failure.float;
+      }
       continue;
     }
 
@@ -346,7 +391,26 @@ export async function runFarmBot(): Promise<void> {
           result.fromAsset === "CBTC" ? "CBTC→CC" : "CC→CBTC",
         lastTraderParty: pick.traderParty
       };
-      cachedFloat = null;
+      if (cachedFloat) {
+        cachedFloat = applySwapToFloat(cachedFloat, {
+          traderParty: pick.traderParty,
+          fromAsset: result.fromAsset,
+          inAmount: result.inAmount,
+          outAmount: result.outAmount
+        });
+      } else {
+        cachedFloat = applySwapToFloat(
+          await runWithLedgerReadSession(jwt, () =>
+            loadFleetFloat(jwt, fleet)
+          ),
+          {
+            traderParty: pick.traderParty,
+            fromAsset: result.fromAsset,
+            inAmount: result.inAmount,
+            outAmount: result.outAmount
+          }
+        );
+      }
       lastSwapLogAt = loggedAt;
 
       await runWithLedgerReadSession(jwt, () =>
@@ -373,7 +437,6 @@ export async function runFarmBot(): Promise<void> {
           const msg = e instanceof Error ? e.message : String(e);
           console.warn(`  periodic consolidate skipped: ${msg.slice(0, 120)}`);
         });
-        cachedFloat = null;
       }
 
       if (calibrateSwaps >= pacing.calibrateEvery) {
