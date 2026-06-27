@@ -15,13 +15,14 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { randomUUID } from "node:crypto";
 
 import { getLedgerJwt, invalidateLedgerJwtCache } from "@/lib/auth";
+import { fetchTransactionTreeByCommandId } from "@/lib/canton-command-recovery";
 import { NETWORK } from "@/lib/constants";
 import { parseBtc } from "@/lib/format";
 import { resolveSessionParty } from "@/lib/session-party";
 import { requireMintRedeemRateLimit } from "@/lib/mint-redeem-guard";
+import { burnWithdrawCommandId } from "@/lib/redeem-burn-command-id";
 
 const APPLICATION_ID = "cbtc-app";
 
@@ -167,7 +168,25 @@ export async function POST(req: NextRequest) {
     };
 
     const url = `${NETWORK.ledgerHost}/v2/commands/submit-and-wait-for-transaction-tree`;
-    let commandId = randomUUID();
+    const commandId = burnWithdrawCommandId({
+      partyId,
+      withdrawAccountContractId,
+      holdingCids,
+      amount
+    });
+
+    async function recoverBurnFromLedger(): Promise<{
+      ok: true;
+      burnUpdateId: string | null;
+    } | null> {
+      const recovered = await fetchTransactionTreeByCommandId(
+        commandId,
+        partyId,
+        50_000
+      );
+      if (!recovered) return null;
+      return { ok: true, burnUpdateId: recovered.updateId ?? null };
+    }
 
     // ── BURN DIFF LOG ──────────────────────────────────────────────────────
     // Exact bytes the UI is about to submit, for byte-level comparison against
@@ -220,7 +239,6 @@ export async function POST(req: NextRequest) {
       );
       invalidateLedgerJwtCache();
       jwt = await getLedgerJwt();
-      commandId = randomUUID();
       console.log(`${TAG} retrying with fresh JWT, commandId=${commandId}`);
       res = await fetch(url, {
         method: "POST",
@@ -235,18 +253,27 @@ export async function POST(req: NextRequest) {
     }
 
     if (res.status === 409) {
-      console.warn(`${TAG} 409 conflict — retrying with new commandId...`);
-      commandId = randomUUID();
-      res = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${jwt}`
+      console.warn(
+        `${TAG} 409 conflict — burn likely in-flight/committed; recovering by commandId`
+      );
+      const recovered = await recoverBurnFromLedger();
+      if (recovered) {
+        console.log(
+          `${TAG} recovered burn updateId=${recovered.burnUpdateId ?? "(unknown)"}`
+        );
+        return NextResponse.json({
+          ok: true,
+          burnUpdateId: recovered.burnUpdateId,
+          recovered: true
+        });
+      }
+      return NextResponse.json(
+        {
+          error:
+            "Burn already in progress on the ledger — wait a moment and check activity before retrying."
         },
-        body: JSON.stringify(buildBody(commandId)),
-        cache: "no-store"
-      });
-      console.log(`${TAG} conflict retry response status=${res.status}`);
+        { status: 409 }
+      );
     }
 
     if (!res.ok) {

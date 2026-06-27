@@ -175,7 +175,7 @@ export async function POST(req: NextRequest) {
       const lpb = (ev?.createArgument?.lastProcessedBitcoinBlock as number | undefined) ?? 0;
       console.log(`${TAG} deposit account contractId=${contractId} owner=${String(owner).slice(0, 30)}... id=${id ?? "NULL"} lpb=${lpb}`);
       return { contractId, owner, id, lpb };
-    }).filter((a) => a.contractId && (!a.owner || a.owner === partyId));
+    }).filter((a) => a.contractId && a.owner === partyId);
 
     console.log(`${TAG} returning ${accounts.length} deposit accounts after owner filter`);
 

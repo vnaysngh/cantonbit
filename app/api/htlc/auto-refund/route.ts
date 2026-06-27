@@ -33,7 +33,8 @@ async function sweep() {
     reverseMain,
     staleForwardMain,
     staleLoopSeller,
-    loopCustodyStalled
+    loopCustodyStalled,
+    bareReverseAllocation
   } = await svc.expiredOrders();
   const results: { id: string; kind: string; ok: boolean; detail: string }[] =
     [];
@@ -77,13 +78,16 @@ async function sweep() {
     await run(o.id, "early-refund-loop", () =>
       svc.earlyRefundLoopCustody(o.id)
     );
+  for (const o of bareReverseAllocation)
+    await run(o.id, "recover-bare-allocation", () => svc.lockMainCanton(o.id));
   const due =
     abandonedAccepted.length +
     forwardCounter.length +
     reverseMain.length +
     staleForwardMain.length +
     staleLoopSeller.length +
-    loopCustodyStalled.length;
+    loopCustodyStalled.length +
+    bareReverseAllocation.length;
   return {
     due,
     refunded: results.filter((r) => r.ok).length,

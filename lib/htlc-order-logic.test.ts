@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
-import { isSwapClaimable, filterHistoryOrders, isAbandonedSwapDraft, resolveCreateOrder, shouldPollOrderOnOrdersPage, htlcUserWbtcClaimTx, reverseZeroLockReconcileOutcome } from "./htlc-order-logic";
+import { isSwapClaimable, filterHistoryOrders, isAbandonedSwapDraft, resolveCreateOrder, shouldPollOrderOnOrdersPage, htlcUserWbtcClaimTx, htlcReverseSolverRetakeTx, reverseZeroLockReconcileOutcome, isRefundMainCantonStatusEligible, isReverseMainExpiredSweepCandidate } from "./htlc-order-logic";
 import type { SwapOrder } from "./htlc-types";
 
 const base = {
@@ -139,11 +139,14 @@ test("filterHistoryOrders: hides other EVM wallets when filter is set", () => {
 
 test("htlcUserWbtcClaimTx: reverse prefers mainClaimTx", () => {
   const tx = "0x" + "ab".repeat(32);
+  const preimage = ("0x" + "cc".repeat(32)) as `0x${string}`;
   assert.equal(
     htlcUserWbtcClaimTx({
       direction: "canton-to-evm",
       mainClaimTx: tx,
-      counterClaimUpdateId: "0x" + "cd".repeat(32)
+      counterClaimUpdateId: "0x" + "cd".repeat(32),
+      status: "main_claimed",
+      revealedPreimage: preimage
     }),
     tx
   );
@@ -155,9 +158,46 @@ test("htlcUserWbtcClaimTx: reverse legacy counterClaimUpdateId", () => {
     htlcUserWbtcClaimTx({
       direction: "canton-to-evm",
       mainClaimTx: undefined,
-      counterClaimUpdateId: tx
+      counterClaimUpdateId: tx,
+      status: "main_claimed"
     }),
     tx
+  );
+});
+
+test("htlcUserWbtcClaimTx: reverse solver retake is not a user WBTC claim", () => {
+  const retake = "0x" + "ef".repeat(32);
+  assert.equal(
+    htlcUserWbtcClaimTx({
+      direction: "canton-to-evm",
+      mainClaimTx: retake,
+      status: "failed",
+      revealedPreimage: undefined
+    }),
+    undefined
+  );
+  assert.equal(
+    htlcReverseSolverRetakeTx({
+      direction: "canton-to-evm",
+      mainClaimTx: retake,
+      status: "failed",
+      revealedPreimage: undefined
+    }),
+    retake
+  );
+});
+
+test("htlcUserWbtcClaimTx: reverse user claim path requires reveal or terminal claim status", () => {
+  const claim = "0x" + "11".repeat(32);
+  const preimage = ("0x" + "22".repeat(32)) as `0x${string}`;
+  assert.equal(
+    htlcUserWbtcClaimTx({
+      direction: "canton-to-evm",
+      mainClaimTx: claim,
+      status: "main_claimed",
+      revealedPreimage: preimage
+    }),
+    claim
   );
 });
 
@@ -181,4 +221,55 @@ test("resolveCreateOrder rejects id owned by another party", () => {
     () => resolveCreateOrder(existing, incoming, 200),
     /another party/
   );
+});
+
+test("isRefundMainCantonStatusEligible accepts active reverse statuses", () => {
+  for (const status of [
+    "main_locked",
+    "counter_locking",
+    "counter_locked",
+    "counter_claimed",
+    "refunding"
+  ] as const) {
+    assert.equal(isRefundMainCantonStatusEligible({ status }), true);
+  }
+});
+
+test("isRefundMainCantonStatusEligible accepts failed after solver retake", () => {
+  const tx = "0x" + "ab".repeat(32);
+  assert.equal(
+    isRefundMainCantonStatusEligible({
+      status: "failed",
+      mainClaimTx: tx,
+      revealedPreimage: undefined
+    }),
+    true
+  );
+});
+
+test("isRefundMainCantonStatusEligible rejects bare failed rows", () => {
+  assert.equal(isRefundMainCantonStatusEligible({ status: "failed" }), false);
+  assert.equal(
+    isRefundMainCantonStatusEligible({
+      status: "failed",
+      mainClaimTx: "0x" + "ab".repeat(32),
+      revealedPreimage: ("0x" + "cd".repeat(32)) as `0x${string}`
+    }),
+    false
+  );
+});
+
+test("isReverseMainExpiredSweepCandidate includes retake-recorded failed rows", () => {
+  const tx = "0x" + "ab".repeat(32);
+  const order = {
+    direction: "canton-to-evm" as const,
+    counterMode: "managed" as const,
+    htlcCid: "htlc-cid",
+    revealedPreimage: undefined,
+    status: "failed" as const,
+    mainClaimTx: tx,
+    userTimelock: 1000
+  };
+  assert.equal(isReverseMainExpiredSweepCandidate(order, 1000), true);
+  assert.equal(isReverseMainExpiredSweepCandidate(order, 999), false);
 });

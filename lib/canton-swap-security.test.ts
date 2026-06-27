@@ -31,6 +31,11 @@ test("clientIpFromRequest takes client before one trusted proxy hop", () => {
   assert.equal(clientIpFromRequest(req), "evil");
 });
 
+test("clientIpFromRequest returns null when x-forwarded-for is missing", () => {
+  const req = new Request("http://localhost/quote");
+  assert.equal(clientIpFromRequest(req), null);
+});
+
 test("clientIpFromRequest takes client before two trusted proxy hops", () => {
   const old = process.env.TRUSTED_PROXY_HOPS;
   process.env.TRUSTED_PROXY_HOPS = "2";

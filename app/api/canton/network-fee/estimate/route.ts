@@ -39,10 +39,17 @@ function parseAsset(raw: unknown): CantonSwapMvpAssetId | null {
 
 export async function POST(req: Request) {
   try {
+    const clientIp = clientIpFromRequest(req);
+    if (!clientIp) {
+      return NextResponse.json(
+        { error: "client IP unavailable — configure trusted proxy headers" },
+        { status: 400 }
+      );
+    }
     if (
       !(await distributedRateLimitOk({
         scope: "network-fee-estimate",
-        key: clientIpFromRequest(req),
+        key: clientIp,
         limit: 30
       }))
     ) {

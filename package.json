@@ -32,8 +32,6 @@
     "fund-swap-vault:mainnet": "bash scripts/with-env.sh mainnet npx tsx scripts/fund-swap-vault.mts",
     "dev:all": "bash scripts/dev-all.sh",
     "stop": "bash scripts/stop-all.sh",
-    "solver:api": "npm --prefix swap-solver run api",
-    "solver:watch": "npm --prefix swap-solver run watch",
     "solver:htlc": "npm --prefix swap-solver run htlc-daemon",
     "solver:htlc:mainnet": "npm --prefix swap-solver run htlc-daemon:mainnet",
     "solver:htlc:prod": "npm --prefix swap-solver run htlc-daemon:prod",

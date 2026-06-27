@@ -18,7 +18,7 @@ class HtlcPollError extends Error {
 
 /**
  * Tracks in-flight HTLC swap orders (CoW-style list). Polls GET /api/htlc/{id}
- * on the Next.js app — NOT the legacy :8787 solver API.
+ * on the Next.js app.
  */
 const STORAGE_KEY = "oranj.swap.orders";
 const TERMINAL_LINGER_MS = 60_000;

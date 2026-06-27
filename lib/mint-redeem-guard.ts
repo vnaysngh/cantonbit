@@ -14,10 +14,18 @@ export async function requireMintRedeemRateLimit(
   const mainnetBlocked = mainnetBlockedResponse();
   if (mainnetBlocked) return mainnetBlocked;
 
+  const clientIp = clientIpFromRequest(req);
+  if (!clientIp) {
+    return NextResponse.json(
+      { error: "client IP unavailable — configure trusted proxy headers" },
+      { status: 400 }
+    );
+  }
+
   if (
     !(await distributedRateLimitOk({
       scope: "mint-redeem-ip",
-      key: clientIpFromRequest(req),
+      key: clientIp,
       limit: 20
     }))
   ) {

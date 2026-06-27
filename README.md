@@ -14,14 +14,28 @@ parties**, but those two wallet modes have different authority and custody
 properties. The app routes all new swap inventory through a funded **settlement
 vault party** configured by `CANTON_SWAP_SETTLEMENT_PARTY`.
 
-Post-audit status: the release-blocking findings from the June 2026 swap audit
-have been remediated in code, but production rollout still requires the database
-migrations, exact deployment env, funded smoke swaps, and recovery drills to match
-the target network. See:
+### Mint and burn (not supported in this release)
 
+**CBTC mint (BTC → CBTC) and burn/redeem (CBTC → BTC) are not supported in the
+current product.** The codebase still contains mint/redeem routes, BitSafe
+coordinator hooks, and a mint processor for future use, but they are **out of
+scope** for OranjSwap deployments right now: do not expose them in navigation, do
+not run mint cron against production, and do not treat mint/burn audit findings as
+release blockers for swap rollout.
+
+Supported user flows today: **cross-chain HTLC swaps** and **same-Canton C2C
+swaps** only.
+
+**June 2026 audit remediation (swap path):** release-blocking swap findings are fixed
+in code. Legacy OIF InputSettler intake was removed (2026-06-24). Production stack
+is web + HTLC daemon + C2C daemon only — same env as before this pass.
+
+Audit references:
+
+- [`docs/AUDIT-MASTER-FINDINGS.md`](./docs/AUDIT-MASTER-FINDINGS.md) — finding list and remediation status
+- [`docs/WHOLE-APP-ATOMICITY-WIRING-AUDIT-2026-06-24.md`](./docs/WHOLE-APP-ATOMICITY-WIRING-AUDIT-2026-06-24.md) — proof-gating and status projector
 - [`docs/SWAP-SECURITY-AUDIT-README-2026-06-21.md`](./docs/SWAP-SECURITY-AUDIT-README-2026-06-21.md)
 - [`docs/SWAP-QUOTE-DESIGN.md`](./docs/SWAP-QUOTE-DESIGN.md)
-- [`docs/SECURITY-AUDIT-2026-06-21.md`](./docs/SECURITY-AUDIT-2026-06-21.md)
 
 ---
 
@@ -457,8 +471,8 @@ npm run solver:canton-swap
 npm run solver:canton-swap:mainnet
 ```
 
-Do **not** use `npm run solver:watch` for HTLC or C2C. That is the legacy OIF
-solver watcher.
+Legacy OIF InputSettler intake (`solver:api`, `solver:watch`, port 8787) was
+removed from this repo. Swaps use HTLC escrow + the two daemons above only.
 
 The HTLC daemon:
 
@@ -571,7 +585,7 @@ PR1 and PR2 are shipped. Remaining optional work:
 
 | Item | Why deferred | Target |
 | --- | --- | --- |
-| `WalletActionState` UI taxonomy | Full state machine across swap/orders; reconnect handlers cover the main cases | `lib/swap-api.ts`, swap UI |
+| `WalletActionState` UI taxonomy | Full state machine across swap/orders; reconnect handlers cover the main cases | `lib/swap-api.ts` (HTLC quote/errors), swap UI |
 | API `ledger_proof_pending` errors | Client retries idempotent routes without new error codes | HTLC API routes |
 | Manual “Save recovery secret” export | Optional advanced UI for browser-data-loss edge case | Swap review modal (**PR3**) |
 | Full multi-flow devnet smoke matrix | Manual ops checklist, not a code gate | `docs/SWAP-CRASH-RECOVERY-DRILLS.md` (**PR3**) |
@@ -583,9 +597,9 @@ production evidence from funded smoke tests.
 
 ## 8. Database migrations and deployment invariants
 
-Apply all Supabase migrations in order before running the post-audit code on a
-network. The audit-critical range is **029–039**. There is no `033` migration file
-in this branch; apply every migration file that exists.
+Fresh networks: apply Supabase migrations **029–041** in order (schema version **≥ 3**).
+Already-migrated environments only need the current app + daemon deploy. There is no
+`033` migration file in this branch — apply every file that exists.
 
 | Migration | Purpose |
 | --- | --- |
@@ -599,6 +613,8 @@ in this branch; apply every migration file that exists.
 | `037_htlc_forward_reservation_states.sql` | Keep forward CBTC reserved through locking states |
 | `038_reverse_htlc_prelock_reservation.sql` | Reserve WBTC before user Canton leg is locked |
 | `039_htlc_custody_evidence_uniqueness.sql` | One custody evidence CID can prove only one HTLC order |
+| `040_unified_vault_cbtc_float_reservation.sql` | Unified HTLC + C2C CBTC float reservation under one advisory lock |
+| `041_reverse_custody_float_main_locking.sql` | Count reverse-Loop custody in `main_locking` (schema version **3**) |
 
 Release blockers if missing:
 
@@ -610,6 +626,8 @@ Release blockers if missing:
 - `consume_api_rate_limit(...)` and `api_rate_limits` must exist.
 - `network_fee_ledger` must have the settlement-update uniqueness protection.
 - `htlc_orders.counter_transfer_offer_cid` uniqueness must be present.
+- `sum_vault_cbtc_reserved_sats(...)` and `vault_cbtc_reservation_schema_version()`
+  must return **≥ 3** (migrations 040 + 041).
 
 Other deployment invariants:
 
@@ -756,6 +774,7 @@ Detailed rollout checklist: [`docs/MAINNET-DEPLOY.md`](./docs/MAINNET-DEPLOY.md)
 | `lib/canton-swap-service.ts` | C2C lifecycle and recovery |
 | `lib/canton-swap-settle.ts` | C2C settlement proofs and reissue logic |
 | `lib/htlc-quote.ts` | Cross-chain WBTC/BTC quote engine |
+| `lib/swap-api.ts` | HTLC quote client + shared swap error helpers (OIF intake removed) |
 | `lib/canton-quote.ts` | C2C Tradecraft + reference sanity quote engine |
 | `lib/canton-network-fee.ts` | CC network-fee estimate/collection/accounting |
 | `supabase/migrations/` | Required database schema/RPC security controls |
@@ -764,6 +783,7 @@ Detailed rollout checklist: [`docs/MAINNET-DEPLOY.md`](./docs/MAINNET-DEPLOY.md)
 
 | Doc | Topic |
 | --- | --- |
+| [`docs/AUDIT-MASTER-FINDINGS.md`](./docs/AUDIT-MASTER-FINDINGS.md) | Audit finding inventory (swap remediation complete; OIF removed) |
 | [`docs/ENV.md`](./docs/ENV.md) | Env-file layout and local run commands |
 | [`docs/SWAP-RUNBOOK.md`](./docs/SWAP-RUNBOOK.md) | Operational swap runbook |
 | [`docs/SWAP-SECURITY-AUDIT-README-2026-06-21.md`](./docs/SWAP-SECURITY-AUDIT-README-2026-06-21.md) | Full post-audit security report |

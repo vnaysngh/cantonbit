@@ -2,11 +2,11 @@ import "server-only";
 
 import { createSupabaseServiceClient } from "./supabase/server";
 
-const REQUIRED_VERSION = 2;
+const REQUIRED_VERSION = 3;
 
 let readinessCheck: Promise<void> | undefined;
 
-/** Fail closed if migration 040's unified CBTC reservation math is absent. */
+/** Fail closed if unified CBTC reservation math (040 + 041) is absent. */
 export async function assertUnifiedVaultReservationReady(): Promise<void> {
   readinessCheck ??= (async () => {
     const sb = await createSupabaseServiceClient();
@@ -15,7 +15,7 @@ export async function assertUnifiedVaultReservationReady(): Promise<void> {
     );
     if (error) {
       throw new Error(
-        "database schema out of date — apply migration 040_unified_vault_cbtc_float_reservation before accepting swaps. " +
+        "database schema out of date — apply migrations 040 and 041 before accepting swaps. " +
           `Original: ${error.message}`
       );
     }

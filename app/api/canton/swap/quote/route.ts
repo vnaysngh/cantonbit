@@ -59,6 +59,12 @@ export async function POST(req: Request) {
       );
     }
     const clientIp = clientIpFromRequest(req);
+    if (!clientIp) {
+      return NextResponse.json(
+        { error: "client IP unavailable — configure trusted proxy headers" },
+        { status: 400 }
+      );
+    }
     if (
       !(await distributedRateLimitOk({
         scope: "c2c-quote-ip",

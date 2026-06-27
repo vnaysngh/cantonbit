@@ -32,6 +32,11 @@ test("isCustodyEvidenceConflictError detects unique index failures", () => {
   assert.ok(!isCustodyEvidenceConflictError(new Error("order not accepted")));
 });
 
+test("isSafeReversePrelockReleaseCause rejects broad infrastructure errors", () => {
+  assert.ok(!isSafeReversePrelockReleaseCause(new Error("resource missing")));
+  assert.ok(!isSafeReversePrelockReleaseCause(new Error("not found")));
+});
+
 test("isSafeReversePrelockReleaseCause covers ambiguous custody and duplicate evidence", () => {
   assert.ok(
     isSafeReversePrelockReleaseCause(

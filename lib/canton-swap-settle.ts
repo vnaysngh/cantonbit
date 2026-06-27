@@ -519,10 +519,7 @@ export async function proveCounterDeliveredOnSettlement(
   }
   const asset = getSwapAsset(order.toAsset);
   const expectedInstrument = await resolveSwapInstrumentId(order.toAsset);
-  const expectedMemo = cantonSwapCounterLegMemo(
-    order,
-    order.counterReissueAttempt ?? 0
-  );
+  const expectedMemo = cantonSwapCounterLegMemo(order, 0);
   if (
     counterLegDeliveredToUserInEvents(eventsById, {
       senderParty: swapParty(order),

@@ -18,10 +18,11 @@ export function cantonSwapQuoteRateLimitOk(clientKey: string): boolean {
 /**
  * Client IP for rate limiting. Uses the client address from `x-forwarded-for`
  * with TRUSTED_PROXY_HOPS (default 1). Does not trust spoofable `x-real-ip`.
+ * Returns null when the header is absent — callers on IP-only routes must fail closed.
  */
-export function clientIpFromRequest(req: Request): string {
+export function clientIpFromRequest(req: Request): string | null {
   const forwarded = req.headers.get("x-forwarded-for");
-  if (!forwarded) return "unknown";
+  if (!forwarded) return null;
 
   const hops = Math.max(
     1,
@@ -31,7 +32,7 @@ export function clientIpFromRequest(req: Request): string {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-  if (!parts.length) return "unknown";
+  if (!parts.length) return null;
   const idx = Math.max(0, parts.length - hops - 1);
-  return parts[idx] ?? "unknown";
+  return parts[idx] ?? null;
 }

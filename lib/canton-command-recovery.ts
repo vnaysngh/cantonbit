@@ -73,63 +73,83 @@ async function scanPartyUpdateTrees(
     console.warn(message);
     return null;
   }
-  const { offset } = (await endRes.json()) as { offset: number };
+  const { offset: endInclusive } = (await endRes.json()) as { offset: number };
   const beginExclusive =
-    range.beginExclusive ?? Math.max(0, offset - (range.lookback ?? DEFAULT_LOOKBACK));
+    range.beginExclusive ?? Math.max(0, endInclusive - (range.lookback ?? DEFAULT_LOOKBACK));
 
-  const res = await fetch(`${NETWORK.ledgerHost}/v2/updates/trees`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${jwt}`
-    },
-    body: JSON.stringify({
-      beginExclusive,
-      endInclusive: offset,
-      filter: {
-        filtersByParty: {
-          [partyId]: {
-            cumulative: [
-              {
-                identifierFilter: {
-                  WildcardFilter: { value: { includeCreatedEventBlob: true } }
-                }
-              }
-            ]
-          }
-        }
+  const requireCompleteScan = range.beginExclusive !== undefined;
+  let cursor = beginExclusive;
+  let lastSeenOffset = beginExclusive;
+
+  while (cursor < endInclusive) {
+    const res = await fetch(`${NETWORK.ledgerHost}/v2/updates/trees`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${jwt}`
       },
-      verbose: false
-    }),
-    cache: "no-store"
-  });
+      body: JSON.stringify({
+        beginExclusive: cursor,
+        endInclusive,
+        filter: {
+          filtersByParty: {
+            [partyId]: {
+              cumulative: [
+                {
+                  identifierFilter: {
+                    WildcardFilter: { value: { includeCreatedEventBlob: true } }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        verbose: false
+      }),
+      cache: "no-store"
+    });
 
-  if (!res.ok) {
-    const message =
-      `${TAG} updates/trees failed (${res.status}) ` +
-      `party=${partyId.slice(0, 20)}…`;
-    if (range.beginExclusive !== undefined) throw new Error(message);
-    console.warn(message);
-    return null;
+    if (!res.ok) {
+      const message =
+        `${TAG} updates/trees failed (${res.status}) ` +
+        `party=${partyId.slice(0, 20)}…`;
+      if (requireCompleteScan) throw new Error(message);
+      console.warn(message);
+      return null;
+    }
+
+    const raw = (await res.json()) as unknown;
+    const items = Array.isArray(raw)
+      ? raw
+      : ((raw as { updates?: unknown[] }).updates ?? []);
+
+    if (items.length === 0) {
+      // Party has no further updates in [cursor, endInclusive] — range exhausted.
+      break;
+    }
+
+    for (let i = items.length - 1; i >= 0; i--) {
+      const tree = unwrapTransactionTree(items[i]);
+      if (!tree || !tree.updateId) continue;
+      const treeOffset = scanOffsetFromRecovery(tree.offset);
+      if (treeOffset !== undefined) {
+        lastSeenOffset = Math.max(lastSeenOffset, treeOffset);
+      }
+      if (!match(tree)) continue;
+      return {
+        updateId: tree.updateId,
+        ...(treeOffset !== undefined ? { offset: treeOffset } : {}),
+        eventsById: eventsFromTree(tree)
+      };
+    }
+
+    if (lastSeenOffset <= cursor) break;
+    cursor = lastSeenOffset;
   }
 
-  const raw = (await res.json()) as unknown;
-  const items = Array.isArray(raw)
-    ? raw
-    : ((raw as { updates?: unknown[] }).updates ?? []);
-
-  for (let i = items.length - 1; i >= 0; i--) {
-    const tree = unwrapTransactionTree(items[i]);
-    if (!tree || !tree.updateId || !match(tree)) continue;
-    const treeOffset = scanOffsetFromRecovery(tree.offset);
-    return {
-      updateId: tree.updateId,
-      // Never substitute ledger end — missing offset must stay unknown so accept
-      // scans are not anchored after the offer was already accepted.
-      ...(treeOffset !== undefined ? { offset: treeOffset } : {}),
-      eventsById: eventsFromTree(tree)
-    };
-  }
+  // Strict mode throws only on HTTP failures above. Do NOT compare lastSeenOffset
+  // to global ledger-end — on a shared participant node the party is virtually
+  // always behind ledger-end even after a complete scan (empty page = exhausted).
 
   return null;
 }

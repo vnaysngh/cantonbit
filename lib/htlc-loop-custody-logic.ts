@@ -24,7 +24,15 @@ export function isCustodyEvidenceConflictError(cause: unknown): boolean {
 
 export function isSafeReversePrelockReleaseCause(cause: unknown): boolean {
   const msg = cause instanceof Error ? cause.message : String(cause);
-  return /transfer offer not visible|not visible on-ledger yet|no input holdings|insufficient|not found|not visible|missing|expired|ambiguous|duplicate key|unique constraint|custody evidence/i.test(
-    msg
+  return (
+    /transfer offer not visible on-ledger yet/i.test(msg) ||
+    /loop custody transfer is not visible on-ledger yet/i.test(msg) ||
+    /no input holdings available/i.test(msg) ||
+    /insufficient cbtc/i.test(msg) ||
+    /insufficient holdings/i.test(msg) ||
+    /ambiguous loop custody/i.test(msg) ||
+    /duplicate key|unique constraint|htlc_orders_counter_transfer_evidence_uidx/i.test(
+      msg
+    )
   );
 }

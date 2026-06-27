@@ -46,7 +46,6 @@ import { FeeBreakdown } from "@/components/FeeBreakdown";
 import { cn } from "@/lib/utils";
 import {
   getQuote,
-  submitOrder,
   getSwapErrorMessage,
   needsHtlcLoopLockConfirm,
   isUserRejection,
@@ -189,8 +188,8 @@ function formatQuoteCountdown(secondsRemaining: number): string {
   return seconds > 0 ? `in ${minutes}m ${seconds}s` : `in ${minutes}m`;
 }
 
-// HTLC EVM leg config (Base Sepolia). The new trustless escrow (replaces the old
-// oracle InputSettlerEscrow for swaps). Shared resolver fails closed in production.
+// HTLC EVM leg config (Base Sepolia). Trustless HTLCEscrow — shared resolver
+// fails closed in production.
 const HTLC_ESCROW = HTLC_ESCROW_ADDRESS;
 const SOLVER_EVM =
   process.env.NEXT_PUBLIC_SOLVER_EVM ??

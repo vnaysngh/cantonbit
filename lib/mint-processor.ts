@@ -18,6 +18,7 @@ import "server-only";
 import { getLedgerJwt } from "./auth";
 import { getBitcoinAddress } from "./bitsafe";
 import { NETWORK } from "./constants";
+import { alert } from "./alert";
 import { extractCreatedOfferCid } from "./mint-processor-logic";
 import { createSupabaseServiceClient } from "./supabase/server";
 
@@ -746,7 +747,7 @@ async function runProcessorLocked(
     // suspenders against ACS lag right after a transfer.)
     const { data: existing } = await supabase
       .from("mint_transfers")
-      .select("id, status, offer_contract_id")
+      .select("id, status, offer_contract_id, amount")
       .eq("holding_contract_id", holdingContractId)
       .maybeSingle();
 
@@ -876,8 +877,63 @@ async function runProcessorLocked(
         .eq("holding_contract_id", holdingContractId);
       result.failed++;
       result.errors.push(errMsg);
-      // No cursor to worry about — the holding stays on warpx and is re-seen
-      // next run automatically once the deposit_account row exists.
+      continue;
+    }
+
+    const { data: priorTransferred } = await supabase
+      .from("mint_transfers")
+      .select("amount")
+      .eq("deposit_account_contract_id", depositAccountContractId)
+      .eq("status", "transferred");
+    const priorAmounts = new Set(
+      (priorTransferred ?? []).map((row) => row.amount).filter(Boolean)
+    );
+    if (priorAmounts.size > 1 || (priorAmounts.size === 1 && !priorAmounts.has(amount))) {
+      const errMsg =
+        `Mint amount ${amount} does not match prior transferred amount(s) for deposit ${depositAccountContractId.slice(0, 20)}`;
+      console.error(`${TAG} ${errMsg}`);
+      void alert("error", "Mint processor refused mismatched holding amount", {
+        holding: holdingContractId.slice(0, 18),
+        deposit: depositAccountContractId.slice(0, 18),
+        amount
+      });
+      await supabase
+        .from("mint_transfers")
+        .update({
+          status: "failed",
+          error: errMsg,
+          updated_at: new Date().toISOString()
+        })
+        .eq("holding_contract_id", holdingContractId);
+      result.failed++;
+      result.errors.push(errMsg);
+      continue;
+    }
+    if (priorAmounts.size === 0) {
+      void alert("warn", "Mint transfer without expected-deposit cross-check", {
+        holding: holdingContractId.slice(0, 18),
+        deposit: depositAccountContractId.slice(0, 18),
+        amount
+      });
+    }
+    if (
+      existing?.amount &&
+      existing.amount !== amount &&
+      existing.status !== "pending" &&
+      existing.status !== "failed"
+    ) {
+      const errMsg = `Mint amount ${amount} conflicts with recorded intent ${existing.amount}`;
+      console.error(`${TAG} ${errMsg}`);
+      await supabase
+        .from("mint_transfers")
+        .update({
+          status: "failed",
+          error: errMsg,
+          updated_at: new Date().toISOString()
+        })
+        .eq("holding_contract_id", holdingContractId);
+      result.failed++;
+      result.errors.push(errMsg);
       continue;
     }
 

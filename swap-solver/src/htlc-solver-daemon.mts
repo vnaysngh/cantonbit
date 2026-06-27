@@ -35,6 +35,7 @@ import {
   verifyRpcChainId,
 } from "./htlc-evm-chain.js";
 import { startHealthServer } from "./health-server.mjs";
+import { shouldDeferEvmClaimForPreRevealMargin } from "./htlc-daemon-claim-logic.js";
 
 const API_BASE = process.env.API_BASE ?? "http://localhost:3000";
 const ESCROW = (process.env.HTLC_ESCROW_ADDRESS ??
@@ -613,7 +614,13 @@ async function main() {
                 }
                 Object.assign(o, begun.order);
               }
-              if (unlock <= BigInt(Math.floor(Date.now() / 1000) + 300)) {
+              const nowSec = Math.floor(Date.now() / 1000);
+              if (
+                shouldDeferEvmClaimForPreRevealMargin({
+                  unlockTimeSec: Number(unlock),
+                  nowSec
+                })
+              ) {
                 console.log(
                   `[solver] ${o.id.slice(0, 12)} rev: timelock too close — skip`
                 );
@@ -768,6 +775,9 @@ async function main() {
                     chain: null
                   });
                   await pub.waitForTransactionReceipt({ hash: tx });
+                  await jpost(`/api/htlc/${o.id}/record-counter-retake`, {
+                    retakeTx: tx
+                  });
                   claimedMain.add(o.id);
                 }
                 continue;
@@ -895,8 +905,12 @@ async function main() {
           // can claim it. (Mirrors verifyEvmLock's EVM_CLAIM_MARGIN.) settleBefore
           // ladder is also enforced server-side at createOrder, but verify on-chain.
           const nowSec = Math.floor(Date.now() / 1000);
-          const CLAIM_MARGIN = 10 * 60;
-          if (Number(lock[0]) - nowSec < CLAIM_MARGIN) {
+          if (
+            shouldDeferEvmClaimForPreRevealMargin({
+              unlockTimeSec: Number(lock[0]),
+              nowSec
+            })
+          ) {
             console.log(
               `[solver] ${o.id.slice(0, 12)} WBTC lock expires too soon (${Number(lock[0]) - nowSec}s) — REFUSING to lock CBTC`
             );
@@ -979,6 +993,8 @@ async function main() {
           console.log(
             `[solver] ${o.id.slice(0, 12)} preimage revealed → claiming WBTC on EVM…`
           );
+          // Post-reveal: preimage is public — always race to claim. Pre-reveal margin
+          // guards live before counter-lock (~616) and lock-counter (~900).
           try {
             const tx = await escrow.write.claim([preimage], {
               account,

@@ -163,15 +163,50 @@ export function isEvmTxHash(s: string | undefined): s is string {
 /**
  * Direction-aware claim evidence on SwapOrder (see htlc-types field comments).
  * Legacy reverse orders may have the user's WBTC claim tx in counterClaimUpdateId.
+ *
+ * On reverse orders, mainClaimTx doubles as solver-retake proof when the user
+ * never revealed the preimage — do not treat that as a user WBTC claim.
  */
 export function htlcUserWbtcClaimTx(
-  o: Pick<SwapOrder, "mainClaimTx" | "counterClaimUpdateId"> & {
+  o: {
     direction: SwapOrder["direction"] | "canton-swap";
+    mainClaimTx?: string;
+    counterClaimUpdateId?: string;
+    revealedPreimage?: string;
+    status?: SwapOrder["status"] | string;
   }
 ): string | undefined {
   if (o.direction !== "canton-to-evm") return undefined;
+  const status = o.status;
+  if (
+    isEvmTxHash(o.mainClaimTx) &&
+    !o.revealedPreimage &&
+    status !== undefined &&
+    status !== "main_claimed" &&
+    status !== "counter_claimed"
+  ) {
+    return undefined;
+  }
   if (isEvmTxHash(o.mainClaimTx)) return o.mainClaimTx;
   if (isEvmTxHash(o.counterClaimUpdateId)) return o.counterClaimUpdateId;
+  return undefined;
+}
+
+/** Solver retook WBTC on a reverse order after the user never claimed. */
+export function htlcReverseSolverRetakeTx(
+  o: Pick<SwapOrder, "direction" | "mainClaimTx" | "revealedPreimage" | "status">
+): string | undefined {
+  if (o.direction !== "canton-to-evm") return undefined;
+  if (o.revealedPreimage) return undefined;
+  if (!isEvmTxHash(o.mainClaimTx)) return undefined;
+  if (
+    o.status === "failed" ||
+    o.status === "refunded" ||
+    o.status === "refunding" ||
+    o.status === "counter_locked"
+  ) {
+    return o.mainClaimTx;
+  }
   return undefined;
 }
 
@@ -191,4 +226,48 @@ export function htlcCantonClaimUpdateId(
   if (!c) return undefined;
   if (o.direction === "canton-to-evm" && isEvmTxHash(c)) return undefined;
   return c;
+}
+
+const REFUND_MAIN_ACTIVE_STATUSES = new Set([
+  "main_locked",
+  "counter_locking",
+  "counter_locked",
+  "counter_claimed",
+  "refunding"
+]);
+
+/** Status gate for reverse refundMainCanton (managed reverse + retake-recorded failed). */
+export function isRefundMainCantonStatusEligible(
+  o: Pick<SwapOrder, "status" | "mainClaimTx" | "revealedPreimage">
+): boolean {
+  if (REFUND_MAIN_ACTIVE_STATUSES.has(o.status)) return true;
+  return (
+    o.status === "failed" &&
+    !!o.mainClaimTx &&
+    !o.revealedPreimage
+  );
+}
+
+/** reverseMain bucket in expiredOrders — solver retake before userTimelock. */
+export function isReverseMainExpiredSweepCandidate(
+  o: Pick<
+    SwapOrder,
+    | "direction"
+    | "counterMode"
+    | "htlcCid"
+    | "revealedPreimage"
+    | "status"
+    | "mainClaimTx"
+    | "userTimelock"
+  >,
+  nowSeconds: number
+): boolean {
+  return (
+    o.direction === "canton-to-evm" &&
+    o.counterMode !== "loop" &&
+    !!o.htlcCid &&
+    !o.revealedPreimage &&
+    nowSeconds >= o.userTimelock &&
+    (o.status !== "failed" || !!o.mainClaimTx)
+  );
 }

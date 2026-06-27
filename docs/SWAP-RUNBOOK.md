@@ -302,7 +302,8 @@ curl -sS "$APP/api/canton/swap/pending?status=user_locked" \
 
 ## 11. Legacy note: `npm run dev:all`
 
-`scripts/dev-all.sh` starts the **old OIF solver** (`swap-solver` API on :8787 + watch loop) plus the web app. That is **not** the HTLC daemon and **not** the C2C fill daemon. For current OranjSwap flows, use §6 instead.
+`scripts/dev-all.sh` starts the HTLC daemon, C2C fill daemon, and web app together.
+For manual startup, use §6 instead.
 
 ---
 

@@ -838,7 +838,7 @@ export class CantonSwapService {
       : undefined;
     o.counterReceiptUpdateId = undefined;
     o.counterPendingClearedAt = undefined;
-    o.floatReserved = false;
+    o.floatReserved = result.counterLegPendingAccept;
     o.status = result.counterLegPendingAccept ? "user_locked" : "filled";
     if (result.counterLegPendingAccept) {
       o.failureReason =
@@ -1030,6 +1030,7 @@ export class CantonSwapService {
       if (o.walletMode !== "loop") continue;
       if (!o.settlementUpdateId || !o.counterLegOfferCid) continue;
 
+      try {
       const pending = await listPendingOffersStrict(o.userParty);
       if (pending.some((p) => p.contractId === o.counterLegOfferCid)) {
         if (o.counterPendingClearedAt !== undefined) {
@@ -1186,6 +1187,12 @@ export class CantonSwapService {
       } catch (e) {
         console.warn(
           `[canton-swap] counter reissue failed ${fresh.id.slice(0, 12)}:`,
+          e instanceof Error ? e.message : e
+        );
+      }
+      } catch (e) {
+        console.warn(
+          `[canton-swap] reconcileLoopCounters failed ${o.id.slice(0, 12)}:`,
           e instanceof Error ? e.message : e
         );
       }

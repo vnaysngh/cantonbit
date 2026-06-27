@@ -1,6 +1,5 @@
 /**
  * Client-side helpers for polling HTLC orders on /api/htlc/{id}.
- * (Legacy Permit2 orders on :8787 use lib/swap-api.ts instead.)
  */
 import type { SwapOrder, SwapStatus } from "./htlc-types";
 import {

@@ -139,7 +139,10 @@ export async function assertCantonQuoteSanity(
     (toAsset !== "CBTC" && toAsset !== "CC") ||
     fromAsset === toAsset
   ) {
-    return;
+    throw new CantonQuoteSanityError(
+      `reference sanity not configured for ${fromAsset}→${toAsset}`,
+      cantonQuoteSanityUserMessage(fromAsset, toAsset)
+    );
   }
 
   const from = getSwapAsset(fromAsset);

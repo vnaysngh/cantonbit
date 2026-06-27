@@ -1,16 +1,22 @@
 /**
- * POST /api/htlc/{id}/claim-as-receiver — TEST ONLY.
- * Submits HtlcLock.Claim AS the receiver via the m2m JWT (works when the receiver
- * party is hosted on this validator). Proves the on-ledger keccak check + Execute
- * Transfer fire. In production the user's Loop wallet does this; this endpoint is
- * a server-side proof for a validator-local receiver.
+ * POST /api/htlc/{id}/claim-as-receiver — TEST ONLY (disabled unless HTLC_ENABLE_TEST_ROUTES=true).
  */
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
 import { claimAsReceiver } from "@/lib/htlc-onledger";
 import { requireDaemon } from "@/lib/htlc-auth";
 
+function testRouteEnabled(): boolean {
+  return (
+    process.env.NODE_ENV !== "production" &&
+    process.env.HTLC_ENABLE_TEST_ROUTES === "true"
+  );
+}
+
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  if (!testRouteEnabled()) {
+    return NextResponse.json({ error: "not found" }, { status: 404 });
+  }
   const { id } = await params;
   try {
     const auth = requireDaemon(req);
@@ -21,6 +27,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     if (!order.htlcCid || !order.allocationCid) {
       return NextResponse.json({ error: "counter not locked" }, { status: 400 });
     }
+    const commandId = `htlc-test-claim-receiver-${id}`;
     const { updateId } = await claimAsReceiver({
       receiverParty: order.userCantonParty,
       solverParty: order.solverCantonParty,
@@ -28,6 +35,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       htlcBlob: order.htlcBlob,
       allocationCid: order.allocationCid,
       preimageHex: preimage,
+      commandId
     });
     await htlcService().recordCounterClaimed(id, preimage, updateId);
     return NextResponse.json({ ok: true, updateId });
