@@ -5,6 +5,7 @@ import { auditSwapUpdatesForCcBurn } from "./burn-audit";
 import { checkSwapFloat } from "./float";
 import { quoteFarmSwap } from "./quote";
 import { settleManagedSwap } from "./settle";
+import { configureVaultCbtcCache } from "./vault-cbtc-holdings";
 import type { FarmAsset, FarmFleetConfig, FarmSwapResult } from "./types";
 
 export async function executeSwap(params: {
@@ -19,6 +20,7 @@ export async function executeSwap(params: {
 }): Promise<FarmSwapResult> {
   assertMainnetNetwork();
   assertTraderAllowlisted(params.fleet, params.traderParty);
+  configureVaultCbtcCache(params.fleet.vault);
 
   if (params.fromAsset === params.toAsset) {
     throw new Error("fromAsset and toAsset must differ");

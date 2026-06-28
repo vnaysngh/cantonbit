@@ -18,6 +18,10 @@ import { toBaseUnitsFloor } from "../lib/amount-units";
 import { extractCreatedOfferCid } from "../lib/mint-processor-logic";
 import { selectHoldingsForAmount } from "../lib/transfer-holdings";
 import { CantonClient } from "../swap-solver/src/canton.js";
+import {
+  configureVaultCbtcCache,
+  ingestVaultCbtcFromSubmit
+} from "./farm/lib/vault-cbtc-holdings";
 
 const DEFAULT_CC = "100000";
 const DEFAULT_CBTC = "0.5";
@@ -358,7 +362,7 @@ async function acceptOffer(params: {
   registrarAdmin: string;
   registryKind: "cbtc" | "cc";
   commandId: string;
-}): Promise<void> {
+}): Promise<{ updateId: string; eventsById: Record<string, unknown> }> {
   const ctxUrl =
     params.registryKind === "cc"
       ? validatorUrl(
@@ -386,7 +390,7 @@ async function acceptOffer(params: {
       synchronizerId: string;
     }>;
   };
-  await submitLedger(
+  return submitLedger(
     params.jwt,
     [params.receiverParty],
     [
@@ -406,6 +410,23 @@ async function acceptOffer(params: {
   );
 }
 
+async function ingestVaultCbtcFromFund(
+  jwt: string,
+  updateId: string,
+  eventsById: Record<string, unknown>
+): Promise<void> {
+  configureVaultCbtcCache(destParty);
+  const n = await ingestVaultCbtcFromSubmit({
+    jwt,
+    vaultParty: destParty,
+    updateId,
+    submitEventsById: eventsById
+  });
+  if (n > 0) {
+    console.log(`Vault CBTC cache: ingested ${n} spendable holding(s) from fund`);
+  }
+}
+
 async function fundCbtc(jwt: string, client: CantonClient): Promise<void> {
   if (parseFloat(cbtcAmount) <= 0) {
     console.log("\nSkipping CBTC (amount <= 0)");
@@ -423,7 +444,7 @@ async function fundCbtc(jwt: string, client: CantonClient): Promise<void> {
     console.log(
       `Found pending CBTC offer ${existingCbtc.slice(0, 16)}… — accepting on vault`
     );
-    await acceptOffer({
+    const accepted = await acceptOffer({
       jwt,
       receiverParty: destParty,
       offerContractId: existingCbtc,
@@ -432,6 +453,7 @@ async function fundCbtc(jwt: string, client: CantonClient): Promise<void> {
       commandId: `fund-vault-cbtc-accept-${Date.now()}`
     });
     console.log(`CBTC accepted on vault (offer ${existingCbtc.slice(0, 16)}…)`);
+    await ingestVaultCbtcFromFund(jwt, accepted.updateId, accepted.eventsById);
     return;
   }
 
@@ -538,6 +560,7 @@ async function fundCbtc(jwt: string, client: CantonClient): Promise<void> {
     console.log(
       `CBTC delivered (direct/auto-accept) update=${updateId.slice(0, 16)}…`
     );
+    await ingestVaultCbtcFromFund(jwt, updateId, eventsById);
     return;
   }
 
@@ -547,7 +570,7 @@ async function fundCbtc(jwt: string, client: CantonClient): Promise<void> {
       "CBTC offer CID missing from submit tree — vault has no preapproval so offer+accept is required"
     );
   }
-  await acceptOffer({
+  const accepted = await acceptOffer({
     jwt,
     receiverParty: destParty,
     offerContractId: offerCid,
@@ -556,6 +579,7 @@ async function fundCbtc(jwt: string, client: CantonClient): Promise<void> {
     commandId: `fund-vault-cbtc-accept-${Date.now()}`
   });
   console.log(`CBTC accepted on vault (offer ${offerCid.slice(0, 16)}…)`);
+  await ingestVaultCbtcFromFund(jwt, accepted.updateId, accepted.eventsById);
 }
 
 async function fundCc(jwt: string): Promise<void> {

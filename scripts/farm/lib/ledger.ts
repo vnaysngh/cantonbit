@@ -14,9 +14,9 @@ import {
   CBTC_HOLDING_TEMPLATE_FQN
 } from "./ledger-constants";
 import {
-  bootstrapVaultCbtcCache,
   getVaultCbtcCachedHoldings,
   isVaultCbtcCacheParty,
+  refreshVaultCbtcCacheIfEmpty,
   syncVaultCbtcCacheFromAcs
 } from "./vault-cbtc-holdings";
 
@@ -659,15 +659,13 @@ export async function listCbtcHoldings(
   }
 
   if (isVaultCbtcCacheParty(party)) {
-    if (out.length > 0) {
-      syncVaultCbtcCacheFromAcs(out);
-      return out;
-    }
+    if (out.length > 0) syncVaultCbtcCacheFromAcs(out);
     let cached = getVaultCbtcCachedHoldings();
     if (cached.length === 0) {
-      await bootstrapVaultCbtcCache(jwt, party);
+      await refreshVaultCbtcCacheIfEmpty(jwt, party);
       cached = getVaultCbtcCachedHoldings();
     }
+    // Prefer update-tree cache: polluted vault ACS often returns a stale subset.
     if (cached.length > 0) return cached;
   }
 

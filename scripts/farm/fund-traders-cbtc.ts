@@ -8,6 +8,8 @@
  *   npm run farm:fund-traders-cbtc:mainnet -- --i-understand-mainnet --dry-run
  */
 import { extractCreatedOfferCid } from "../../lib/mint-processor-logic";
+import { toBaseUnitsFloor } from "../../lib/amount-units";
+import type { Holding } from "../../lib/types";
 import { assertMainnetNetwork, loadFleet, traderParty, vaultParty } from "./lib/config";
 import { getLedgerJwt } from "./lib/jwt";
 import {
@@ -20,11 +22,45 @@ import {
   submitLedgerCommands
 } from "./lib/ledger";
 import { parseArg, parseFlag, requireMainnetGuard } from "./lib/parse-args";
+import {
+  applyTreeToVaultCbtcCache,
+  bootstrapVaultCbtcCacheRecent,
+  getVaultCbtcCachedHoldings,
+  isVaultCbtcCacheParty,
+  removeVaultCbtcFromCache
+} from "./lib/vault-cbtc-holdings";
 
 const DEFAULT_CBTC = "0.0002";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Vault cache has many dust UTXOs; pick largest-first so we spend the fresh fund chunk. */
+function pickVaultCbtcInputs(holdings: Holding[], amount: string): Holding[] {
+  const sorted = [...holdings].sort(
+    (a, b) => parseFloat(b.payload?.amount ?? "0") - parseFloat(a.payload?.amount ?? "0")
+  );
+  const target = toBaseUnitsFloor(amount, 8);
+  const picked: Holding[] = [];
+  let acc = 0n;
+  for (const h of sorted) {
+    if (acc >= target) break;
+    picked.push(h);
+    acc += toBaseUnitsFloor(h.payload?.amount ?? "0", 8);
+  }
+  if (acc < target) {
+    throw new Error(`vault cache short: need ${amount} CBTC`);
+  }
+  return picked;
+}
+
+function vaultHoldingsInvalid(msg: string): boolean {
+  return (
+    msg.includes("Given holdings are invalid") ||
+    msg.includes("LOCAL_VERDICT_INACTIVE_CONTRACTS") ||
+    msg.includes("inactive contracts")
+  );
 }
 
 async function transferCbtcFromVault(params: {
@@ -35,27 +71,66 @@ async function transferCbtcFromVault(params: {
   label: string;
 }): Promise<void> {
   const reg = await registrarForAsset(params.jwt, "CBTC");
-  const holdings = await holdingsForAsset(params.jwt, params.senderParty, "CBTC");
-  if (holdings.length === 0) {
-    throw new Error(`sender has no CBTC holdings (${params.senderParty.slice(0, 28)}…)`);
+  const fromVault = isVaultCbtcCacheParty(params.senderParty);
+  const maxAttempts = fromVault ? 8 : 1;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let holdings = await holdingsForAsset(params.jwt, params.senderParty, "CBTC");
+    if (fromVault) {
+      const cached = getVaultCbtcCachedHoldings();
+      if (cached.length > 0) holdings = cached;
+    }
+    if (holdings.length === 0) {
+      throw new Error(`sender has no CBTC holdings (${params.senderParty.slice(0, 28)}…)`);
+    }
+
+    const inputs = fromVault ? pickVaultCbtcInputs(holdings, params.amount) : holdings;
+    let leg;
+    try {
+      leg = await buildTransferExercise({
+        jwt: params.jwt,
+        senderParty: params.senderParty,
+        receiverParty: params.receiverParty,
+        amount: params.amount,
+        inputHoldings: inputs,
+        useAllInputHoldings: fromVault,
+        instrumentId: reg.instrumentId,
+        registrarAdmin: reg.admin,
+        registryKind: reg.kind,
+        assetSymbol: "CBTC",
+        memo: "farm-trader-cbtc-fund"
+      });
+      await submitTransferLeg(params, reg, leg, inputs);
+      return;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (fromVault && vaultHoldingsInvalid(msg) && attempt < maxAttempts) {
+        removeVaultCbtcFromCache(inputs.map((h) => h.contractId));
+        console.warn(`  retry ${attempt}: dropped stale vault UTXO(s), picking next`);
+        continue;
+      }
+      throw e;
+    }
   }
 
-  const leg = await buildTransferExercise({
-    jwt: params.jwt,
-    senderParty: params.senderParty,
-    receiverParty: params.receiverParty,
-    amount: params.amount,
-    inputHoldings: holdings,
-    instrumentId: reg.instrumentId,
-    registrarAdmin: reg.admin,
-    registryKind: reg.kind,
-    assetSymbol: "CBTC",
-    memo: "farm-trader-cbtc-fund"
-  });
+  throw new Error(`${params.label}: exhausted vault UTXO retries`);
+}
 
+async function submitTransferLeg(
+  params: {
+    jwt: string;
+    senderParty: string;
+    receiverParty: string;
+    amount: string;
+    label: string;
+  },
+  reg: Awaited<ReturnType<typeof registrarForAsset>>,
+  leg: Awaited<ReturnType<typeof buildTransferExercise>>,
+  _inputs: Holding[]
+): Promise<void> {
   const tag = params.receiverParty.slice(0, 16);
   const offerCmdId = `farm-fund-cbtc-offer-${tag}-${Date.now()}`;
-  const { eventsById } = await submitLedgerCommands({
+  const { updateId, eventsById } = await submitLedgerCommands({
     jwt: params.jwt,
     actAs: [params.senderParty],
     commands: [leg.command],
@@ -64,6 +139,9 @@ async function transferCbtcFromVault(params: {
     synchronizerId: leg.synchronizerId,
     workflowId: offerCmdId
   });
+  if (isVaultCbtcCacheParty(params.senderParty)) {
+    applyTreeToVaultCbtcCache(params.senderParty, eventsById);
+  }
 
   if (isDirectTransferKind(leg.transferKind)) {
     console.log(`  ✓ ${params.label}: ${params.amount} CBTC delivered (direct)`);
@@ -80,7 +158,7 @@ async function transferCbtcFromVault(params: {
     registryKind: "cbtc"
   });
   const acceptCmdId = `farm-fund-cbtc-accept-${tag}-${Date.now()}`;
-  await submitLedgerCommands({
+  const acceptResult = await submitLedgerCommands({
     jwt: params.jwt,
     actAs: [params.receiverParty],
     commands: [accept.command],
@@ -89,7 +167,22 @@ async function transferCbtcFromVault(params: {
     synchronizerId: accept.synchronizerId || leg.synchronizerId,
     workflowId: acceptCmdId
   });
+  if (isVaultCbtcCacheParty(params.senderParty)) {
+    applyTreeToVaultCbtcCache(params.senderParty, acceptResult.eventsById);
+  }
   console.log(`  ✓ ${params.label}: ${params.amount} CBTC (offer ${offerCid.slice(0, 16)}…)`);
+  void updateId;
+}
+
+function tradersFromFilter(
+  fleet: ReturnType<typeof loadFleet>,
+  traderFilter: string | undefined
+): Array<{ hint: string; party: string }> {
+  if (!traderFilter) return fleet.traders;
+  return traderFilter.split(",").map((raw) => {
+    const index = raw.trim();
+    return { hint: `trader-${index}`, party: traderParty(fleet, index) };
+  });
 }
 
 export async function runFundTradersCbtc(): Promise<void> {
@@ -108,9 +201,16 @@ export async function runFundTradersCbtc(): Promise<void> {
   const fleet = loadFleet();
   const jwt = await getLedgerJwt();
 
-  const traders = traderFilter
-    ? [{ hint: `trader-${traderFilter}`, party: traderParty(fleet, traderFilter) }]
-    : fleet.traders;
+  if (sourceParty === fleet.vault) {
+    const n = await bootstrapVaultCbtcCacheRecent(jwt, fleet.vault);
+    if (n > 0) {
+      console.log(`Vault CBTC cache: ${n} spendable holding(s) from recent ledger updates`);
+    } else {
+      console.warn("⚠ Vault CBTC cache empty after bootstrap — transfers may fail");
+    }
+  }
+
+  const traders = tradersFromFilter(fleet, traderFilter);
 
   const sourceCbtcBefore = await cbtcBalance(jwt, sourceParty);
   console.log(`Network:  ${process.env.NEXT_PUBLIC_NETWORK ?? "mainnet"}`);

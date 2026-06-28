@@ -2,6 +2,11 @@ import { toBaseUnitsFloor } from "../../../lib/amount-units";
 import { CBTC_ASSET, CC_ASSET } from "../../../lib/canton-assets";
 import type { FarmAsset, FarmFleetConfig } from "./types";
 import { cbtcBalance, ccBalance, countHoldings, holdingsForAsset } from "./ledger";
+import {
+  isVaultCbtcCacheParty,
+  vaultCbtcCacheSpendable,
+  vaultCbtcCachedBalance
+} from "./vault-cbtc-holdings";
 
 const UTXO_WARN = 8;
 const UTXO_MAX = 10;
@@ -53,14 +58,22 @@ export async function checkVaultFloat(params: {
   outAmount: string;
 }): Promise<FloatCheckResult> {
   const asset = params.toAsset === "CBTC" ? CBTC_ASSET : CC_ASSET;
-  const holdings = await holdingsForAsset(
-    params.jwt,
-    params.vaultParty,
-    params.toAsset
-  );
   let total = 0n;
-  for (const h of holdings) {
-    total += toBaseUnitsFloor(h.payload?.amount ?? "0", asset.decimals);
+  if (
+    params.toAsset === "CBTC" &&
+    isVaultCbtcCacheParty(params.vaultParty) &&
+    vaultCbtcCacheSpendable()
+  ) {
+    total = toBaseUnitsFloor(vaultCbtcCachedBalance(), asset.decimals);
+  } else {
+    const holdings = await holdingsForAsset(
+      params.jwt,
+      params.vaultParty,
+      params.toAsset
+    );
+    for (const h of holdings) {
+      total += toBaseUnitsFloor(h.payload?.amount ?? "0", asset.decimals);
+    }
   }
   const need = toBaseUnitsFloor(params.outAmount, asset.decimals);
   if (total < need) {

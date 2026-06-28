@@ -11,6 +11,10 @@ import {
   registrarForAsset,
   submitLedgerCommands
 } from "./ledger";
+import {
+  ingestVaultCbtcFromSubmit,
+  isVaultCbtcCacheParty
+} from "./vault-cbtc-holdings";
 
 export type FarmAsset = "CBTC" | "CC";
 
@@ -99,7 +103,7 @@ export async function consolidatePartyAsset(params: {
     });
 
     const cmdId = `farm-consolidate-${params.asset}-${params.party.slice(0, 12)}-${Date.now()}`;
-    await submitLedgerCommands({
+    const { updateId, eventsById } = await submitLedgerCommands({
       jwt: params.jwt,
       actAs: [params.party],
       commands: [leg.command],
@@ -108,6 +112,19 @@ export async function consolidatePartyAsset(params: {
       synchronizerId: leg.synchronizerId,
       workflowId: cmdId
     });
+
+    if (
+      params.asset === "CBTC" &&
+      isVaultCbtcCacheParty(params.party) &&
+      updateId
+    ) {
+      await ingestVaultCbtcFromSubmit({
+        jwt: params.jwt,
+        vaultParty: params.party,
+        updateId,
+        submitEventsById: eventsById
+      });
+    }
 
     try {
       const after = await countHoldings(params.jwt, params.party);

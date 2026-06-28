@@ -4,8 +4,10 @@ import { partyBalancesSummary } from "./float";
 import { isUtxoOverAcsCap } from "./utxo-guard";
 import { quoteFarmSwap } from "./quote";
 import {
-  getVaultCbtcCachedHoldings,
-  isVaultCbtcCacheParty
+  isVaultCbtcCacheParty,
+  refreshVaultCbtcCacheIfEmpty,
+  vaultCbtcCachedBalance,
+  vaultCbtcCacheSpendable
 } from "./vault-cbtc-holdings";
 import type { FarmAsset, FarmFleetConfig, OrganicPick, PacingConfig } from "./types";
 
@@ -13,7 +15,7 @@ import type { FarmAsset, FarmFleetConfig, OrganicPick, PacingConfig } from "./ty
 export const MEASURED_BYTES_PER_SWAP = 24_500;
 
 /** Keep this much above swap size so parties don't drain to zero. */
-const RESERVE_CBTC = "0.00002";
+const RESERVE_CBTC = "0.000005";
 const RESERVE_CC = "10";
 
 export interface PlannerState {
@@ -93,7 +95,6 @@ export function applySwapToFloat(
       -1
     );
     trader.cc = bumpBalance(trader.cc, swap.outAmount, CC_ASSET.decimals, 1);
-    vault.cbtc = bumpBalance(vault.cbtc, swap.inAmount, CBTC_ASSET.decimals, 1);
     vault.cc = bumpBalance(vault.cc, swap.outAmount, CC_ASSET.decimals, -1);
   } else {
     trader.cc = bumpBalance(trader.cc, swap.inAmount, CC_ASSET.decimals, -1);
@@ -104,15 +105,10 @@ export function applySwapToFloat(
       1
     );
     vault.cc = bumpBalance(vault.cc, swap.inAmount, CC_ASSET.decimals, 1);
-    vault.cbtc = bumpBalance(
-      vault.cbtc,
-      swap.outAmount,
-      CBTC_ASSET.decimals,
-      -1
-    );
   }
 
-  return { vault, traders };
+  const next: FleetFloatSnapshot = { vault, traders };
+  return reconcileVaultCbtcInFloat(next);
 }
 
 export function applyVaultFundToFloat(
@@ -126,7 +122,7 @@ export function applyVaultFundToFloat(
   if (fund.cc && parseFloat(fund.cc) > 0) {
     vault.cc = bumpBalance(vault.cc, fund.cc, CC_ASSET.decimals, 1);
   }
-  return { ...float, vault };
+  return reconcileVaultCbtcInFloat({ ...float, vault });
 }
 
 export function applyTraderCbtcFundToFloat(
@@ -138,7 +134,7 @@ export function applyTraderCbtcFundToFloat(
     per * BigInt(float.traders.length),
     CBTC_ASSET.decimals
   );
-  return {
+  return reconcileVaultCbtcInFloat({
     vault: {
       ...float.vault,
       cbtc: bumpBalance(float.vault.cbtc, totalDebit, CBTC_ASSET.decimals, -1)
@@ -147,7 +143,7 @@ export function applyTraderCbtcFundToFloat(
       ...t,
       cbtc: bumpBalance(t.cbtc, amountPerTrader, CBTC_ASSET.decimals, 1)
     }))
-  };
+  });
 }
 
 export async function loadFleetFloat(
@@ -168,10 +164,14 @@ export async function loadFleetFloat(
       };
     })
   );
-  return {
+  const float: FleetFloatSnapshot = {
     vault: { cbtc: vaultBal.cbtc, cc: vaultBal.cc },
     traders
   };
+  if (isVaultCbtcCacheParty(fleet.vault) && vaultCbtcCacheSpendable()) {
+    return reconcileVaultCbtcInFloat(float);
+  }
+  return float;
 }
 
 export async function loadDirectionQuotes(
@@ -223,15 +223,30 @@ function traderCanSellCc(
   return hasReserve(t.cc, pacing.ccInAmount, RESERVE_CC, CC_ASSET.decimals);
 }
 
-function vaultCanDeliver(
+function vaultCanDeliverCc(
   vault: FleetFloatSnapshot["vault"],
-  toAsset: FarmAsset,
   quotes: DirectionQuotes
 ): boolean {
-  if (toAsset === "CC") {
-    return parseAmt(vault.cc) >= parseAmt(quotes.cbtcToCcOut);
-  }
-  return parseAmt(vault.cbtc) >= parseAmt(quotes.ccToCbtcOut);
+  return parseAmt(vault.cc) >= parseAmt(quotes.cbtcToCcOut);
+}
+
+function vaultCanDeliverCachedCbtc(quotes: DirectionQuotes): boolean {
+  if (!vaultCbtcCacheSpendable()) return false;
+  return parseAmt(vaultCbtcCachedBalance()) >= parseAmt(quotes.ccToCbtcOut);
+}
+
+/** Traders are CBTC-starved but CC-rich — CC→CBTC closes the cycle without treasury. */
+function shouldPrioritizeCcToCbtc(
+  float: FleetFloatSnapshot,
+  pacing: PacingConfig
+): boolean {
+  const n = float.traders.length;
+  if (n === 0) return false;
+  const cbtcStarved = float.traders.filter(
+    (t) => !traderCanSellCbtc(t, pacing)
+  ).length;
+  const ccReady = float.traders.filter((t) => traderCanSellCc(t, pacing)).length;
+  return cbtcStarved >= Math.ceil(n / 2) && ccReady > 0;
 }
 
 /** Score how much this swap rebalances a trader toward starting float (~120 CC, ~0.0003 CBTC). */
@@ -274,13 +289,18 @@ function buildCandidates(params: {
   quotes: DirectionQuotes;
   state: PlannerState;
   vaultCbtcSpendable: boolean;
+  prioritizeCcToCbtc: boolean;
 }): Candidate[] {
   const out: Candidate[] = [];
+  const ccBoost = params.prioritizeCcToCbtc ? 1_000_000 : 0;
+
   params.fleet.traders.forEach((trader, traderIndex) => {
     const snap = params.float.traders[traderIndex]!;
+
     if (
+      !params.prioritizeCcToCbtc &&
       traderCanSellCbtc(snap, params.pacing) &&
-      vaultCanDeliver(params.float.vault, "CC", params.quotes) &&
+      vaultCanDeliverCc(params.float.vault, params.quotes) &&
       directionAllowed("CBTC→CC", params.state) &&
       traderDirectionAllowed(trader.party, "CBTC→CC", params.state)
     ) {
@@ -296,10 +316,11 @@ function buildCandidates(params: {
           (params.state.lastTraderParty === trader.party ? 50 : 0)
       });
     }
+
     if (
       traderCanSellCc(snap, params.pacing) &&
       params.vaultCbtcSpendable &&
-      vaultCanDeliver(params.float.vault, "CBTC", params.quotes) &&
+      vaultCanDeliverCachedCbtc(params.quotes) &&
       directionAllowed("CC→CBTC", params.state) &&
       traderDirectionAllowed(trader.party, "CC→CBTC", params.state)
     ) {
@@ -311,7 +332,8 @@ function buildCandidates(params: {
         inAmount: params.pacing.ccInAmount,
         direction: "CC→CBTC",
         score:
-          rebalanceScore(snap, "CC→CBTC") -
+          rebalanceScore(snap, "CC→CBTC") +
+          ccBoost -
           (params.state.lastTraderParty === trader.party ? 50 : 0)
       });
     }
@@ -336,35 +358,50 @@ export async function planNextSwap(params: {
   /** Reuse between swaps — avoid re-querying ACS every plan (Canton State Service pattern). */
   float?: FleetFloatSnapshot;
 }): Promise<{ pick: OrganicPick; state: PlannerState; float: FleetFloatSnapshot }> {
-  const [float, quotes] = await Promise.all([
+  const [rawFloat, quotes] = await Promise.all([
     params.float
       ? Promise.resolve(params.float)
       : loadFleetFloat(params.jwt, params.fleet),
     loadDirectionQuotes(params.pacing)
   ]);
 
+  if (isVaultCbtcCacheParty(params.fleet.vault)) {
+    await refreshVaultCbtcCacheIfEmpty(params.jwt, params.fleet.vault);
+  }
+
+  let float = isVaultCbtcCacheParty(params.fleet.vault)
+    ? reconcileVaultCbtcInFloat(rawFloat)
+    : rawFloat;
+
   const vaultCbtcSpendable =
-    !isVaultCbtcCacheParty(params.fleet.vault) ||
-    getVaultCbtcCachedHoldings().length > 0;
+    !isVaultCbtcCacheParty(params.fleet.vault) || vaultCbtcCacheSpendable();
+
+  const prioritizeCcToCbtc = shouldPrioritizeCcToCbtc(float, params.pacing);
+
+  // When CBTC-starved, pretend last leg was CBTC→CC so CC→CBTC is direction-allowed.
+  const effectiveState: PlannerState = prioritizeCcToCbtc
+    ? { ...params.state, lastDirection: "CBTC→CC" as const }
+    : params.state;
 
   let candidates = buildCandidates({
     float,
     fleet: params.fleet,
     pacing: params.pacing,
     quotes,
-    state: params.state,
-    vaultCbtcSpendable
+    state: effectiveState,
+    vaultCbtcSpendable,
+    prioritizeCcToCbtc
   });
 
   if (candidates.length === 0) {
-    // Relax global direction alternation but keep per-trader same-dir guard.
     candidates = buildCandidates({
       float,
       fleet: params.fleet,
       pacing: params.pacing,
       quotes,
-      state: { ...params.state, lastDirection: undefined },
-      vaultCbtcSpendable
+      state: { ...effectiveState, lastDirection: undefined },
+      vaultCbtcSpendable,
+      prioritizeCcToCbtc
     });
   }
 
@@ -431,9 +468,11 @@ function countDirectionBlockers(
   directionOk: boolean;
   sampleTraderIssue?: string;
 } {
-  const toAsset: FarmAsset = direction === "CBTC→CC" ? "CC" : "CBTC";
   const directionOk = directionAllowed(direction, report.state);
-  let vaultOk = vaultCanDeliver(report.float.vault, toAsset, report.quotes);
+  let vaultOk =
+    direction === "CBTC→CC"
+      ? vaultCanDeliverCc(report.float.vault, report.quotes)
+      : vaultCanDeliverCachedCbtc(report.quotes);
   if (direction === "CC→CBTC" && report.vaultCbtcSpendable === false) {
     vaultOk = false;
   }
@@ -477,13 +516,17 @@ export function formatPlanBlockers(report: PlanBlockerReport): string {
   const cc = countDirectionBlockers(report, "CC→CBTC");
   const vaultNeedCbtc = report.quotes.ccToCbtcOut;
   const vaultNeedCc = report.quotes.cbtcToCcOut;
+  const cachedCbtc =
+    report.vaultCbtcSpendable === false
+      ? `${report.float.vault.cbtc} (cached spendable: 0)`
+      : report.float.vault.cbtc;
 
   const lines = [
     "no viable swap — float/UTXO/direction blockers:",
-    `  vault CBTC=${report.float.vault.cbtc} (need ≥${vaultNeedCbtc} for CC→CBTC) CC=${report.float.vault.cc} (need ≥${vaultNeedCc} for CBTC→CC)`,
+    `  vault CBTC=${cachedCbtc} (need ≥${vaultNeedCbtc} spendable for CC→CBTC) CC=${report.float.vault.cc} (need ≥${vaultNeedCc} for CBTC→CC)`,
     `  CBTC→CC: traders=${cbtc.tradersOk}/${report.float.traders.length} vault=${cbtc.vaultOk ? "ok" : "low CC"} dir=${cbtc.directionOk ? "ok" : "blocked"}${cbtc.sampleTraderIssue ? ` e.g. ${cbtc.sampleTraderIssue}` : ""}`,
     `  CC→CBTC: traders=${cc.tradersOk}/${report.float.traders.length} vault=${cc.vaultOk ? "ok" : report.vaultCbtcSpendable === false ? "no spendable CBTC UTXO" : "low CBTC"} dir=${cc.directionOk ? "ok" : "blocked"}${cc.sampleTraderIssue ? ` e.g. ${cc.sampleTraderIssue}` : ""}`,
-    "  fix: fund vault CBTC (fund-swap-vault:mainnet), traders CBTC (farm:fund-traders-cbtc:mainnet), and/or traders CC; tune --cbtc-in / --cc-in"
+    "  fix: CC→CBTC returns CBTC to traders using vault CC; fund vault CBTC once (fund-swap-vault:mainnet) if cache empty; tune --cbtc-in / --cc-in"
   ];
   return lines.join("\n");
 }

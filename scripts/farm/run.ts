@@ -42,7 +42,9 @@ import { isTransientError, retry } from "./lib/retry";
 import { tryAutoRefillFromPlanError } from "./lib/auto-refill";
 import {
   configureVaultCbtcCache,
-  bootstrapVaultCbtcCache
+  bootstrapVaultCbtcCache,
+  refreshVaultCbtcCacheIfEmpty,
+  reconcileVaultCbtcInFloat
 } from "./lib/vault-cbtc-holdings";
 import { needsUtxoConsolidation } from "./lib/utxo-guard";
 
@@ -213,6 +215,17 @@ async function handlePlanFailure(params: {
         }
         if (refill.traderCbtcEach) {
           float = applyTraderCbtcFundToFloat(float, refill.traderCbtcEach);
+        }
+        if (refill.cacheRefreshNeeded) {
+          try {
+            await runWithLedgerReadSession(params.jwt, () =>
+              refreshVaultCbtcCacheIfEmpty(params.jwt, params.fleet.vault)
+            );
+            float = reconcileVaultCbtcInFloat(float);
+          } catch (ce) {
+            const cm = ce instanceof Error ? ce.message : String(ce);
+            console.warn(`  cache refresh after refill failed: ${cm.slice(0, 120)}`);
+          }
         }
       }
       await sleepMs(15_000);
@@ -411,16 +424,16 @@ export async function runFarmBot(): Promise<void> {
           outAmount: result.outAmount
         });
       } else {
-        cachedFloat = applySwapToFloat(
-          await runWithLedgerReadSession(jwt, () =>
-            loadFleetFloat(jwt, fleet)
-          ),
-          {
-            traderParty: pick.traderParty,
-            fromAsset: result.fromAsset,
-            inAmount: result.inAmount,
-            outAmount: result.outAmount
-          }
+        cachedFloat = reconcileVaultCbtcInFloat(
+          applySwapToFloat(
+            await runWithLedgerReadSession(jwt, () => loadFleetFloat(jwt, fleet)),
+            {
+              traderParty: pick.traderParty,
+              fromAsset: result.fromAsset,
+              inAmount: result.inAmount,
+              outAmount: result.outAmount
+            }
+          )
         );
       }
       lastSwapLogAt = loggedAt;
