@@ -29,8 +29,11 @@ export interface QuoteResponse {
   feeBps: number;
   wbtcPriceRaw?: string;
   wbtcPriceDecimals?: number;
+  evmChain?: string;
+  chainId?: number;
   escrow?: string;
   wbtc: string;
+  blockExplorerUrl?: string;
   expires: number;
   fillDeadline?: number;
   networkFeeCc?: string;
@@ -235,6 +238,7 @@ export function getQuote(input: {
   cbtcAmount?: string;
   direction?: "evm-to-canton" | "canton-to-evm";
   counterMode?: "managed" | "loop";
+  evmChain?: string;
 }): Promise<QuoteResponse> {
   return req<QuoteResponse>("/quote", {
     method: "POST",

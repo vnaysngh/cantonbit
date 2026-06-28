@@ -13,6 +13,7 @@ import { assertOrderAmounts } from "@/lib/htlc-quote";
 import { assertValidTimelocks, MIN_GAP } from "@/lib/htlc-timelock";
 import { toBaseUnits } from "@/lib/amount-units";
 import { assertSwapPayAmountLimit } from "@/lib/swap-amount-limits";
+import { bindEnabledHtlcEvmChain } from "@/lib/htlc-chain-binding";
 
 export async function POST(req: Request) {
   try {
@@ -35,6 +36,7 @@ export async function POST(req: Request) {
         { status: 503 }
       );
     }
+    const { fields: evmChainFields } = bindEnabledHtlcEvmChain(body.evmChain);
     const now = Math.floor(Date.now() / 1000);
     assertValidTimelocks(
       now,
@@ -59,7 +61,8 @@ export async function POST(req: Request) {
         solverCantonParty: vault,
         cbtcAmount: String(body.cbtcAmount),
         solverTimelock: Number(body.solverTimelock),
-        counterMode: "loop"
+        counterMode: "loop",
+        ...evmChainFields
       },
       Array.isArray(body.holdingCids) ? body.holdingCids : []
     );

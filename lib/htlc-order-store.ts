@@ -17,6 +17,11 @@ function rowToOrder(r: Record<string, unknown>): SwapOrder {
     id: r.id as string,
     direction: r.direction as SwapOrder["direction"],
     status: r.status as SwapStatus,
+    evmChainSlug: (r.evm_chain_slug as string) ?? undefined,
+    evmChainId:
+      r.evm_chain_id == null ? undefined : Number(r.evm_chain_id as number),
+    evmEscrowAddress: (r.evm_escrow_address as string) ?? undefined,
+    evmWbtcAddress: (r.evm_wbtc_address as string) ?? undefined,
     hashLock: r.hash_lock as `0x${string}`,
     userEvmAddress: (r.user_evm_address as string) ?? undefined,
     solverEvmAddress: (r.solver_evm_address as string) ?? undefined,
@@ -62,6 +67,10 @@ function orderToRow(o: SwapOrder): Record<string, unknown> {
     id: o.id,
     direction: o.direction,
     status: o.status,
+    evm_chain_slug: o.evmChainSlug ?? null,
+    evm_chain_id: o.evmChainId ?? null,
+    evm_escrow_address: o.evmEscrowAddress ?? null,
+    evm_wbtc_address: o.evmWbtcAddress ?? null,
     hash_lock: o.hashLock,
     user_evm_address: o.userEvmAddress ?? null,
     solver_evm_address: o.solverEvmAddress ?? null,
@@ -121,7 +130,7 @@ export interface SwapStore {
    */
   putIfStatus(o: SwapOrder, expectedStatus: SwapStatus): Promise<boolean>;
   byStatus(s: SwapStatus): Promise<SwapOrder[]>;
-  active(): Promise<SwapOrder[]>;
+  active(evmChainSlug?: string): Promise<SwapOrder[]>;
   /** Order history for one user party, newest first. */
   byParty(party: string, limit?: number): Promise<SwapOrder[]>;
   pendingNetworkFeeAccounting(): Promise<SwapOrder[]>;
@@ -330,10 +339,16 @@ export class SupabaseSwapStore implements SwapStore {
     }
     return (data ?? []).map(rowToOrder);
   }
-  async active(): Promise<SwapOrder[]> {
+  async active(evmChainSlug?: string): Promise<SwapOrder[]> {
     const sb = await createSupabaseServiceClient();
-    const { data, error } = await sb.from(TABLE).select("*")
+    let query = sb
+      .from(TABLE)
+      .select("*")
       .not("status", "in", "(main_claimed,refunded,cancelled,failed)");
+    if (evmChainSlug) {
+      query = query.eq("evm_chain_slug", evmChainSlug);
+    }
+    const { data, error } = await query;
     if (error) throw new Error(`htlc_orders active: ${error.message}`);
     return (data ?? []).map(rowToOrder);
   }

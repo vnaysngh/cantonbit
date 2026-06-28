@@ -28,6 +28,7 @@ import {
   NetworkFeePrepareError
 } from "@/lib/canton-network-fee";
 import { distributedRateLimitOk } from "@/lib/api-rate-limit";
+import { bindEnabledHtlcEvmChain } from "@/lib/htlc-chain-binding";
 
 export async function POST(req: Request) {
   try {
@@ -104,6 +105,8 @@ export async function POST(req: Request) {
     }
     body.userEvmAddress = String(body.userEvmAddress).toLowerCase();
     body.solverEvmAddress = solverEvm.toLowerCase();
+    const { fields: evmChainFields } = bindEnabledHtlcEvmChain(body.evmChain);
+    Object.assign(body, evmChainFields);
 
     const now = Math.floor(Date.now() / 1000);
     assertValidTimelocks(now, Number(body.userTimelock), Number(body.solverTimelock), MIN_GAP);

@@ -15,16 +15,17 @@ import {
   legDisplay,
   swapLegPickerDisabled
 } from "@/lib/swap-leg";
-import { SWAP_CHAIN } from "@/lib/swap-evm";
+import { SWAP_CHAIN, type SwapChain as HtlcEvmChain } from "@/lib/swap-evm";
 import { cn } from "@/lib/utils";
 
-type NetworkFilter = "all" | SwapChain;
+type NetworkFilter = "all" | "canton" | `evm:${string}`;
 
 type TokenRow = {
   leg: SwapLeg;
   symbol: string;
   name: string;
   network: string;
+  evmChainSlug?: string;
   disabled: boolean;
 };
 
@@ -34,7 +35,11 @@ export function SwapLegBadge({
   onChange,
   cantonAssets,
   getBalance,
-  disabled
+  disabled,
+  evmNetworkName,
+  evmChains,
+  selectedEvmChainSlug,
+  onEvmChainSelect
 }: {
   leg: SwapLeg;
   otherLeg?: SwapLeg;
@@ -42,9 +47,21 @@ export function SwapLegBadge({
   cantonAssets: CantonSwapAssetMeta[];
   getBalance?: (leg: SwapLeg) => string | undefined;
   disabled?: boolean;
+  evmNetworkName?: string;
+  evmChains?: HtlcEvmChain[];
+  selectedEvmChainSlug?: string;
+  onEvmChainSelect?: (slug: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const { token, network } = legDisplay(leg);
+  const selectedEvmChain =
+    leg.chain === "evm" && selectedEvmChainSlug
+      ? evmChains?.find((chain) => chain.slug === selectedEvmChainSlug)
+      : undefined;
+  const displayNetwork =
+    leg.chain === "evm"
+      ? (selectedEvmChain?.name ?? evmNetworkName ?? network)
+      : network;
   const tokenId: SwapTokenId = leg.chain === "evm" ? "WBTC" : leg.token;
 
   return (
@@ -63,7 +80,7 @@ export function SwapLegBadge({
         <span className="relative inline-flex">
           <TokenIcon token={tokenId} size="md" />
           <ChainIcon
-            network={network}
+            network={displayNetwork}
             className="absolute -bottom-0.5 -right-0.5 size-3.5 ring-2 ring-card"
           />
         </span>
@@ -74,6 +91,11 @@ export function SwapLegBadge({
               expand_more
             </span>
           </div>
+          {leg.chain === "evm" && (
+            <div className="max-w-[7rem] truncate text-[10px] font-medium text-muted-foreground">
+              {displayNetwork}
+            </div>
+          )}
         </div>
       </button>
 
@@ -83,6 +105,10 @@ export function SwapLegBadge({
           otherLeg={otherLeg}
           cantonAssets={cantonAssets}
           getBalance={getBalance}
+          evmNetworkName={evmNetworkName}
+          evmChains={evmChains}
+          selectedEvmChainSlug={selectedEvmChainSlug}
+          onEvmChainSelect={onEvmChainSelect}
           onClose={() => setOpen(false)}
           onSelect={(next) => {
             onChange(next);
@@ -99,6 +125,10 @@ function SwapTokenSelectModal({
   otherLeg,
   cantonAssets,
   getBalance,
+  evmNetworkName,
+  evmChains,
+  selectedEvmChainSlug,
+  onEvmChainSelect,
   onClose,
   onSelect
 }: {
@@ -106,12 +136,33 @@ function SwapTokenSelectModal({
   otherLeg?: SwapLeg;
   cantonAssets: CantonSwapAssetMeta[];
   getBalance?: (leg: SwapLeg) => string | undefined;
+  evmNetworkName?: string;
+  evmChains?: HtlcEvmChain[];
+  selectedEvmChainSlug?: string;
+  onEvmChainSelect?: (slug: string) => void;
   onClose: () => void;
   onSelect: (leg: SwapLeg) => void;
 }) {
+  const availableEvmChains =
+    evmChains && evmChains.length > 0
+      ? evmChains
+      : [
+          {
+            slug: SWAP_CHAIN.slug,
+            id: SWAP_CHAIN.id,
+            name: evmNetworkName ?? SWAP_CHAIN.name,
+            wbtc: SWAP_CHAIN.wbtc,
+            escrow: SWAP_CHAIN.escrow,
+            rpcUrls: SWAP_CHAIN.rpcUrls,
+            blockExplorerUrls: SWAP_CHAIN.blockExplorerUrls,
+            nativeCurrency: SWAP_CHAIN.nativeCurrency
+          }
+        ];
   const [query, setQuery] = useState("");
   const [network, setNetwork] = useState<NetworkFilter>(() =>
-    leg.chain === "evm" ? "evm" : "canton"
+    leg.chain === "evm"
+      ? `evm:${selectedEvmChainSlug ?? availableEvmChains[0]?.slug ?? SWAP_CHAIN.slug}`
+      : "canton"
   );
   const [mounted, setMounted] = useState(false);
 
@@ -160,27 +211,30 @@ function SwapTokenSelectModal({
       }
     }
 
-    if (network === "all" || network === "evm") {
+    for (const chain of availableEvmChains) {
+      if (network !== "all" && network !== `evm:${chain.slug}`) continue;
       if (
-        !q ||
-        "wbtc".includes(q) ||
-        "wrapped".includes(q) ||
-        "bitcoin".includes(q) ||
-        SWAP_CHAIN.name.toLowerCase().includes(q)
+        q &&
+        !"wbtc".includes(q) &&
+        !"wrapped".includes(q) &&
+        !"bitcoin".includes(q) &&
+        !chain.name.toLowerCase().includes(q)
       ) {
-        const candidate = { chain: "evm", token: "WBTC" } as SwapLeg;
-        out.push({
-          leg: candidate,
-          symbol: "WBTC",
-          name: "Wrapped Bitcoin",
-          network: SWAP_CHAIN.name,
-          disabled: swapLegPickerDisabled(candidate, otherLeg)
-        });
+        continue;
       }
+      const candidate = { chain: "evm", token: "WBTC" } as SwapLeg;
+      out.push({
+        leg: candidate,
+        symbol: "WBTC",
+        name: "Wrapped Bitcoin",
+        network: chain.name,
+        evmChainSlug: chain.slug,
+        disabled: swapLegPickerDisabled(candidate, otherLeg)
+      });
     }
 
     return out;
-  }, [cantonList, network, otherLeg, query]);
+  }, [availableEvmChains, cantonList, network, otherLeg, query]);
 
   if (!mounted || typeof document === "undefined") return null;
 
@@ -234,13 +288,14 @@ function SwapTokenSelectModal({
           </div>
 
           <div className="flex flex-wrap gap-2">
-            {(
-              [
-                { id: "all" as const, label: "All networks" },
-                { id: "canton" as const, label: "Canton" },
-                { id: "evm" as const, label: SWAP_CHAIN.name }
-              ] as const
-            ).map((n) => (
+            {[
+              { id: "all" as const, label: "All networks" },
+              { id: "canton" as const, label: "Canton" },
+              ...availableEvmChains.map((chain) => ({
+                id: `evm:${chain.slug}` as const,
+                label: chain.name
+              }))
+            ].map((n) => (
               <button
                 key={n.id}
                 type="button"
@@ -268,23 +323,36 @@ function SwapTokenSelectModal({
               {rows.map((row) => {
                 const tokenId: SwapTokenId =
                   row.leg.chain === "evm" ? "WBTC" : row.leg.token;
-                const bal = getBalance?.(row.leg);
+                const bal =
+                  row.leg.chain === "evm" &&
+                  row.evmChainSlug &&
+                  selectedEvmChainSlug &&
+                  row.evmChainSlug !== selectedEvmChainSlug
+                    ? undefined
+                    : getBalance?.(row.leg);
                 const active =
                   !row.disabled &&
                   leg.chain === row.leg.chain &&
-                  (leg.chain === "evm" ||
+                  ((leg.chain === "evm" &&
+                    row.evmChainSlug === selectedEvmChainSlug) ||
                     (leg.chain === "canton" &&
                       row.leg.chain === "canton" &&
                       leg.token === row.leg.token));
                 const disabled = row.disabled;
 
                 return (
-                  <li key={`${row.leg.chain}-${row.symbol}`}>
+                  <li
+                    key={`${row.leg.chain}-${row.symbol}-${row.evmChainSlug ?? row.network}`}
+                  >
                     <button
                       type="button"
                       disabled={disabled}
                       onClick={() => {
-                        if (!disabled) onSelect(row.leg);
+                        if (disabled) return;
+                        if (row.leg.chain === "evm" && row.evmChainSlug) {
+                          onEvmChainSelect?.(row.evmChainSlug);
+                        }
+                        onSelect(row.leg);
                       }}
                       className={cn(
                         "flex w-full items-center gap-3 rounded-2xl px-3 py-2.5 text-left transition-colors",

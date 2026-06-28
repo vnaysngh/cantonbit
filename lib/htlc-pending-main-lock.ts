@@ -19,6 +19,7 @@ export type PendingMainLock = {
   userTimelock?: number;
   solverTimelock?: number;
   counterMode?: "managed" | "loop";
+  evmChain?: string;
 };
 
 type StorageLike = {

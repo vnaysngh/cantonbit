@@ -23,6 +23,11 @@ export interface SwapOrder {
   id: string;
   direction: SwapDirection;
   status: SwapStatus;
+  /** EVM chain bound to this HTLC order. Legacy rows may omit these and use deployment fallback. */
+  evmChainSlug?: string;
+  evmChainId?: number;
+  evmEscrowAddress?: string;
+  evmWbtcAddress?: string;
   hashLock: `0x${string}`;
   userEvmAddress?: string;
   solverEvmAddress?: string;

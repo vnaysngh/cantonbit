@@ -84,13 +84,16 @@ export function assertReverseCounterLockMatches(
 /** Read locks(hashLock) from escrow — unlockTime + amount + receiver. */
 export async function readEvmLockMapping(
   hashLock: string,
-  rpcUrl?: string
+  opts?: string | EvmProofOpts
 ): Promise<{
   unlockTime: number;
   amount: bigint;
   tokenAddress: string;
   receiver: string;
 }> {
+  const rpcUrl = typeof opts === "string" ? opts : opts?.rpcUrl;
+  const escrowAddress =
+    typeof opts === "string" ? HTLC_ESCROW_ADDRESS : proofEscrow(opts);
   const hash = normalizeHashLock(hashLock);
   const selector = toHexLower(
     keccak_256(new TextEncoder().encode("locks(bytes32)"))
@@ -99,7 +102,7 @@ export async function readEvmLockMapping(
     "eth_call",
     [
       {
-        to: HTLC_ESCROW_ADDRESS,
+        to: escrowAddress,
         data: `0x${selector}${hash}`
       },
       "latest"
@@ -147,7 +150,7 @@ export function parseLockTxCalldata(input: string): {
   };
 }
 
-async function readLockArgsFromTx(txHash: string): Promise<{
+async function readLockArgsFromTx(txHash: string, rpcUrl?: string): Promise<{
   unlockTime: number;
   amount: bigint;
   tokenAddress: string;
@@ -155,7 +158,8 @@ async function readLockArgsFromTx(txHash: string): Promise<{
 }> {
   const tx = await rpcCall<{ input?: string } | null>(
     "eth_getTransactionByHash",
-    [txHash]
+    [txHash],
+    rpcUrl
   );
   if (!tx?.input) throw new Error(`counter-lock tx input missing: ${txHash}`);
   return parseLockTxCalldata(tx.input);
@@ -167,6 +171,22 @@ type RpcReceipt = {
   blockHash?: string;
   logs?: { address?: string; topics?: string[]; data?: string }[];
 };
+
+export type EvmProofOpts = {
+  rpcUrl?: string;
+  escrowAddress?: string;
+  chainName?: string;
+  chainSlug?: string;
+  minConfirmations?: number;
+};
+
+function proofEscrow(opts?: Pick<EvmProofOpts, "escrowAddress">): string {
+  return (opts?.escrowAddress?.trim() || HTLC_ESCROW_ADDRESS).toLowerCase();
+}
+
+function proofChainName(opts?: Pick<EvmProofOpts, "chainName">): string {
+  return opts?.chainName?.trim() || SWAP_CHAIN.name;
+}
 
 async function rpcCall<T>(
   method: string,
@@ -244,11 +264,12 @@ export async function readErc20Balance(
 
 function findLockedLog(
   receipt: RpcReceipt,
-  hashLock: string
+  hashLock: string,
+  escrowAddress?: string
 ): ParsedLockedEvent | null {
   const want = normalizeHashLock(hashLock);
   const topic1 = `0x${want}`;
-  const escrow = HTLC_ESCROW_ADDRESS.toLowerCase();
+  const escrow = proofEscrow({ escrowAddress });
   for (const log of receipt.logs ?? []) {
     if ((log.address ?? "").toLowerCase() !== escrow) continue;
     const topics = log.topics ?? [];
@@ -264,27 +285,31 @@ function findLockedLog(
 export async function verifyReverseCounterLockTx(
   counterLockTx: string,
   req: ReverseCounterLockRequirements,
-  opts?: { requireFinality?: boolean }
+  opts?: EvmProofOpts & { requireFinality?: boolean }
 ): Promise<ParsedLockedEvent> {
   const tx = counterLockTx.trim();
   if (!tx.startsWith("0x") || tx.length !== 66) {
     throw new Error("counterLockTx must be a 32-byte tx hash (0x + 64 hex)");
   }
-  const receipt = await rpcCall<RpcReceipt>("eth_getTransactionReceipt", [tx]);
+  const receipt = await rpcCall<RpcReceipt>(
+    "eth_getTransactionReceipt",
+    [tx],
+    opts?.rpcUrl
+  );
   if (!receipt) {
-    throw new Error(`counter-lock tx not found on ${SWAP_CHAIN.name}: ${tx}`);
+    throw new Error(`counter-lock tx not found on ${proofChainName(opts)}: ${tx}`);
   }
   if (receipt.status !== "0x1") {
     throw new Error(`counter-lock tx reverted on-chain: ${tx}`);
   }
-  const locked = findLockedLog(receipt, req.hashLock);
+  const locked = findLockedLog(receipt, req.hashLock, opts?.escrowAddress);
   if (!locked) {
     throw new Error(
-      `counter-lock tx has no matching Locked event for hashLock on escrow ${HTLC_ESCROW_ADDRESS}`
+      `counter-lock tx has no matching Locked event for hashLock on escrow ${proofEscrow(opts)}`
     );
   }
   assertReverseCounterLockMatches(locked, req);
-  const args = await readLockArgsFromTx(tx);
+  const args = await readLockArgsFromTx(tx, opts?.rpcUrl);
   if (args.unlockTime !== req.solverTimelock) {
     throw new Error(
       `EVM counter-lock unlockTime mismatch (${args.unlockTime} != ${req.solverTimelock})`
@@ -299,10 +324,10 @@ export async function verifyReverseCounterLockTx(
     throw new Error("EVM counter-lock tx receiver mismatch");
   }
   for (let i = 0; i < 6; i++) {
-    const onChain = await readEvmLockMapping(req.hashLock);
+    const onChain = await readEvmLockMapping(req.hashLock, opts);
     if (onChain.amount >= BigInt(req.wbtcAmount)) {
       if (opts?.requireFinality !== false) {
-        await assertEvmTransactionFinalized(tx);
+        await assertEvmTransactionFinalized(tx, opts);
       }
       return locked;
     }
@@ -315,8 +340,11 @@ async function getBlockNumberHex(rpcUrl?: string): Promise<string> {
   return rpcCall<string>("eth_blockNumber", [], rpcUrl);
 }
 
-export function evmMinConfirmations(): number {
-  const raw = process.env.EVM_MIN_CONFIRMATIONS?.trim();
+export function evmMinConfirmations(chainSlug?: string): number {
+  const suffix = chainSlug?.trim().toUpperCase().replace(/-/g, "_");
+  const raw =
+    (suffix ? process.env[`EVM_MIN_CONFIRMATIONS_${suffix}`]?.trim() : "") ||
+    process.env.EVM_MIN_CONFIRMATIONS?.trim();
   if (process.env.NODE_ENV === "production" && !raw) {
     return 12;
   }
@@ -330,7 +358,7 @@ export function evmMinConfirmations(): number {
 /** Refuse to treat a merely included transaction as final settlement evidence. */
 export async function assertEvmTransactionFinalized(
   txHash: string,
-  opts?: { minConfirmations?: number; rpcUrl?: string }
+  opts?: EvmProofOpts
 ): Promise<void> {
   const receipt = await rpcCall<RpcReceipt | null>(
     "eth_getTransactionReceipt",
@@ -343,7 +371,9 @@ export async function assertEvmTransactionFinalized(
   const tip = BigInt(await getBlockNumberHex(opts?.rpcUrl));
   const block = BigInt(receipt.blockNumber);
   const confirmations = tip >= block ? tip - block + 1n : 0n;
-  const required = BigInt(opts?.minConfirmations ?? evmMinConfirmations());
+  const required = BigInt(
+    opts?.minConfirmations ?? evmMinConfirmations(opts?.chainSlug)
+  );
   if (confirmations < required) {
     throw new Error(
       `EVM transaction awaiting finality (${confirmations}/${required} confirmations)`
@@ -368,7 +398,7 @@ export async function assertEvmTransactionFinalized(
 /** True if a Claimed event exists for this hashLock (user revealed preimage on EVM). */
 export async function hasEvmClaimedForHashLock(
   hashLock: string,
-  opts?: { fromBlockHex?: string; rpcUrl?: string }
+  opts?: EvmProofOpts & { fromBlockHex?: string }
 ): Promise<boolean> {
   const want = normalizeHashLock(hashLock);
   const topic1 = `0x${want}`;
@@ -388,7 +418,7 @@ export async function hasEvmClaimedForHashLock(
       "eth_getLogs",
       [
         {
-          address: HTLC_ESCROW_ADDRESS,
+          address: proofEscrow(opts),
           topics: [HTLC_CLAIMED_EVENT_TOPIC, topic1],
           fromBlock: `0x${from.toString(16)}`,
           toBlock: `0x${to.toString(16)}`
@@ -405,7 +435,7 @@ export async function hasEvmClaimedForHashLock(
 /** Latest Claimed tx hash for this hashLock, if any (newest log in scan range). */
 export async function findEvmClaimTxForHashLock(
   hashLock: string,
-  opts?: { fromBlockHex?: string; rpcUrl?: string }
+  opts?: EvmProofOpts & { fromBlockHex?: string }
 ): Promise<string | undefined> {
   const want = normalizeHashLock(hashLock);
   const topic1 = `0x${want}`;
@@ -422,7 +452,7 @@ export async function findEvmClaimTxForHashLock(
       "eth_getLogs",
       [
         {
-          address: HTLC_ESCROW_ADDRESS,
+          address: proofEscrow(opts),
           topics: [HTLC_CLAIMED_EVENT_TOPIC, topic1],
           fromBlock: `0x${from.toString(16)}`,
           toBlock: `0x${to.toString(16)}`
@@ -441,7 +471,7 @@ export async function findEvmClaimTxForHashLock(
 /** Latest Retaken tx hash for this hashLock, if any (newest log in scan range). */
 export async function findEvmRetakeTxForHashLock(
   hashLock: string,
-  opts?: { fromBlockHex?: string; rpcUrl?: string }
+  opts?: EvmProofOpts & { fromBlockHex?: string }
 ): Promise<string | undefined> {
   const want = normalizeHashLock(hashLock);
   const topic1 = `0x${want}`;
@@ -458,7 +488,7 @@ export async function findEvmRetakeTxForHashLock(
       "eth_getLogs",
       [
         {
-          address: HTLC_ESCROW_ADDRESS,
+          address: proofEscrow(opts),
           topics: [HTLC_RETAKEN_EVENT_TOPIC, topic1],
           fromBlock: `0x${from.toString(16)}`,
           toBlock: `0x${to.toString(16)}`
@@ -483,10 +513,10 @@ export type ReverseEvmCounterLockProbe = {
 /** Fast on-chain probe: is WBTC locked for this user at hashLock? (single eth_call) */
 export async function isReverseEvmCounterLockReady(
   probe: ReverseEvmCounterLockProbe,
-  opts?: { rpcUrl?: string }
+  opts?: EvmProofOpts
 ): Promise<{ ready: true } | { ready: false; reason: string }> {
   try {
-    const lock = await readEvmLockMapping(probe.hashLock, opts?.rpcUrl);
+    const lock = await readEvmLockMapping(probe.hashLock, opts);
     const need = BigInt(probe.wbtcAmount);
     if (lock.amount < need) {
       return {
@@ -512,11 +542,15 @@ export async function isReverseEvmCounterLockReady(
 }
 
 /** Block number hex for a tx hash, if mined. */
-export async function evmTxBlockHex(txHash: string): Promise<string | undefined> {
+export async function evmTxBlockHex(
+  txHash: string,
+  opts?: EvmProofOpts
+): Promise<string | undefined> {
   if (!txHash.startsWith("0x") || txHash.length !== 66) return undefined;
   const receipt = await rpcCall<RpcReceipt | null>(
     "eth_getTransactionReceipt",
-    [txHash]
+    [txHash],
+    opts?.rpcUrl
   );
   return receipt?.blockNumber;
 }
@@ -524,11 +558,12 @@ export async function evmTxBlockHex(txHash: string): Promise<string | undefined>
 function receiptHasHashLockEvent(
   receipt: RpcReceipt,
   hashLock: string,
-  eventTopic: string
+  eventTopic: string,
+  escrowAddress?: string
 ): boolean {
   const want = normalizeHashLock(hashLock);
   const topic1 = `0x${want}`;
-  const escrow = HTLC_ESCROW_ADDRESS.toLowerCase();
+  const escrow = proofEscrow({ escrowAddress });
   for (const log of receipt.logs ?? []) {
     if ((log.address ?? "").toLowerCase() !== escrow) continue;
     const topics = log.topics ?? [];
@@ -542,23 +577,35 @@ function receiptHasHashLockEvent(
 /** Verify forward user retake tx emitted Retaken for this hashLock. */
 export async function verifyForwardRetakeTx(
   retakeTx: string,
-  hashLock: string
+  hashLock: string,
+  opts?: EvmProofOpts
 ): Promise<void> {
   const tx = retakeTx.trim();
   if (!tx.startsWith("0x") || tx.length !== 66) {
     throw new Error("retakeTx must be a 32-byte tx hash (0x + 64 hex)");
   }
-  const receipt = await rpcCall<RpcReceipt>("eth_getTransactionReceipt", [tx]);
+  const receipt = await rpcCall<RpcReceipt>(
+    "eth_getTransactionReceipt",
+    [tx],
+    opts?.rpcUrl
+  );
   if (!receipt) {
-    throw new Error(`retake tx not found on ${SWAP_CHAIN.name}: ${tx}`);
+    throw new Error(`retake tx not found on ${proofChainName(opts)}: ${tx}`);
   }
   if (receipt.status !== "0x1") {
     throw new Error(`retake tx reverted on-chain: ${tx}`);
   }
-  await assertEvmTransactionFinalized(tx);
-  if (!receiptHasHashLockEvent(receipt, hashLock, HTLC_RETAKEN_EVENT_TOPIC)) {
+  await assertEvmTransactionFinalized(tx, opts);
+  if (
+    !receiptHasHashLockEvent(
+      receipt,
+      hashLock,
+      HTLC_RETAKEN_EVENT_TOPIC,
+      opts?.escrowAddress
+    )
+  ) {
     throw new Error(
-      `retake tx has no matching Retaken event for hashLock on escrow ${HTLC_ESCROW_ADDRESS}`
+      `retake tx has no matching Retaken event for hashLock on escrow ${proofEscrow(opts)}`
     );
   }
 }
@@ -566,23 +613,35 @@ export async function verifyForwardRetakeTx(
 /** Verify reverse user claim tx emitted Claimed for this hashLock. */
 export async function verifyReverseClaimTx(
   claimTx: string,
-  hashLock: string
+  hashLock: string,
+  opts?: EvmProofOpts
 ): Promise<void> {
   const tx = claimTx.trim();
   if (!tx.startsWith("0x") || tx.length !== 66) {
     throw new Error("claim tx must be a 32-byte tx hash (0x + 64 hex)");
   }
-  const receipt = await rpcCall<RpcReceipt>("eth_getTransactionReceipt", [tx]);
+  const receipt = await rpcCall<RpcReceipt>(
+    "eth_getTransactionReceipt",
+    [tx],
+    opts?.rpcUrl
+  );
   if (!receipt) {
-    throw new Error(`claim tx not found on ${SWAP_CHAIN.name}: ${tx}`);
+    throw new Error(`claim tx not found on ${proofChainName(opts)}: ${tx}`);
   }
   if (receipt.status !== "0x1") {
     throw new Error(`claim tx reverted on-chain: ${tx}`);
   }
-  await assertEvmTransactionFinalized(tx);
-  if (!receiptHasHashLockEvent(receipt, hashLock, HTLC_CLAIMED_EVENT_TOPIC)) {
+  await assertEvmTransactionFinalized(tx, opts);
+  if (
+    !receiptHasHashLockEvent(
+      receipt,
+      hashLock,
+      HTLC_CLAIMED_EVENT_TOPIC,
+      opts?.escrowAddress
+    )
+  ) {
     throw new Error(
-      `claim tx has no matching Claimed event for hashLock on escrow ${HTLC_ESCROW_ADDRESS}`
+      `claim tx has no matching Claimed event for hashLock on escrow ${proofEscrow(opts)}`
     );
   }
 }

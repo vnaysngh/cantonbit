@@ -6,6 +6,7 @@
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
 import { requireDaemon } from "@/lib/htlc-auth";
+import { assertDaemonOrderChain } from "@/lib/htlc-chain-binding";
 
 export async function POST(
   req: Request,
@@ -15,7 +16,13 @@ export async function POST(
   try {
     const auth = requireDaemon(req);
     if (auth.error) return auth.error;
-    const { order, updateId } = await htlcService().refundCounter(id);
+    const service = htlcService();
+    const existing = await service.getOrder(id);
+    if (!existing) {
+      return NextResponse.json({ error: "not found" }, { status: 404 });
+    }
+    assertDaemonOrderChain(req, existing);
+    const { order, updateId } = await service.refundCounter(id);
     return NextResponse.json({ ok: true, updateId, status: order.status });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

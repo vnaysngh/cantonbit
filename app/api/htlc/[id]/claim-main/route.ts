@@ -7,6 +7,7 @@ import { NextResponse } from "next/server";
 import { htlcClaimErrorStatus } from "@/lib/htlc-claim-http";
 import { htlcService } from "@/lib/htlc-service-singleton";
 import { requireDaemon } from "@/lib/htlc-auth";
+import { assertDaemonOrderChain } from "@/lib/htlc-chain-binding";
 
 export async function POST(
   req: Request,
@@ -18,6 +19,9 @@ export async function POST(
     if (auth.error) return auth.error;
     const svc = htlcService();
     const body = await req.json().catch(() => ({}));
+    const existing = await svc.getOrder(id, { mode: "light" });
+    if (!existing) return NextResponse.json({ error: "not found" }, { status: 404 });
+    assertDaemonOrderChain(req, existing);
     const { order, updateId } = await svc.claimMainAsSolver(id, body.preimage);
     return NextResponse.json({ order, updateId });
   } catch (e) {

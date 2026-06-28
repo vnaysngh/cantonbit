@@ -11,7 +11,7 @@ import { useCantonIdentity } from "@/hooks/useCantonIdentity";
 import { useWallet } from "@/hooks/useWallet";
 import { useEvmWallet } from "@/hooks/useEvmWallet";
 import { useBalance } from "@/hooks/useBalance";
-import { SWAP_CHAIN } from "@/lib/swap-evm";
+import { SWAP_CHAINS, SWAP_CHAIN, enabledHtlcEvmChains } from "@/lib/swap-evm";
 import { formatCc } from "@/lib/format";
 import { truncateEvmAddress, truncatePartyId } from "@/lib/party-display";
 import { cn } from "@/lib/utils";
@@ -65,18 +65,28 @@ function NavLinks({ pathname }: { pathname: string }) {
 export function TopNav() {
   const pathname = usePathname();
   const evm = useEvmWallet();
+  const enabledEvmChains = enabledHtlcEvmChains();
+  const enabledEvmChainIds = new Set(enabledEvmChains.map((chain) => chain.id));
+  const connectedEvmChain =
+    evm.chainId == null
+      ? null
+      : Object.values(SWAP_CHAINS).find((chain) => chain.id === evm.chainId) ??
+        null;
+  const fallbackEvmChain = enabledEvmChains[0] ?? SWAP_CHAIN;
   const evmWrongChain =
-    !!evm.account && evm.chainId != null && evm.chainId !== SWAP_CHAIN.id;
+    !!evm.account &&
+    evm.chainId != null &&
+    !enabledEvmChainIds.has(evm.chainId);
 
   // Click the wrong-network warning to switch the connected EVM provider to the
   // swap chain (Arbitrum). Adds the chain if the wallet doesn't have it.
   const handleEvmSwitch = () => {
     void evm
-      .switchChain(SWAP_CHAIN.id, {
-        chainName: SWAP_CHAIN.name,
-        rpcUrls: SWAP_CHAIN.rpcUrls,
+      .switchChain(fallbackEvmChain.id, {
+        chainName: fallbackEvmChain.name,
+        rpcUrls: fallbackEvmChain.rpcUrls,
         nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
-        blockExplorerUrls: SWAP_CHAIN.blockExplorerUrls
+        blockExplorerUrls: fallbackEvmChain.blockExplorerUrls
       })
       .catch(() => {
         /* evm.error is set in switchChain */
@@ -102,7 +112,22 @@ export function TopNav() {
             evmSwitching={evm.switchingChain}
             evmError={evm.error}
             onEvmSwitch={handleEvmSwitch}
-            swapChainName={SWAP_CHAIN.name}
+            onEvmChainSwitch={(chain) => {
+              void evm
+                .switchChain(chain.id, {
+                  chainName: chain.name,
+                  rpcUrls: chain.rpcUrls,
+                  nativeCurrency: chain.nativeCurrency,
+                  blockExplorerUrls: chain.blockExplorerUrls
+                })
+                .catch(() => {
+                  /* evm.error is set in switchChain */
+                });
+            }}
+            swapChainName={connectedEvmChain?.name ?? fallbackEvmChain.name}
+            switchTargetName={fallbackEvmChain.name}
+            enabledEvmChains={enabledEvmChains}
+            connectedEvmChainId={evm.chainId}
           />
           <LogoutControl />
         </div>
@@ -194,14 +219,22 @@ function WalletsMenu({
   evmSwitching,
   evmError,
   onEvmSwitch,
-  swapChainName
+  onEvmChainSwitch,
+  swapChainName,
+  switchTargetName,
+  enabledEvmChains,
+  connectedEvmChainId
 }: {
   evm: EvmLike;
   evmWrongChain: boolean;
   evmSwitching: boolean;
   evmError: string | null;
   onEvmSwitch: () => void;
+  onEvmChainSwitch: (chain: (typeof SWAP_CHAIN)) => void;
   swapChainName: string;
+  switchTargetName: string;
+  enabledEvmChains: (typeof SWAP_CHAIN)[];
+  connectedEvmChainId: number | null;
 }) {
   const { party, ready } = useCantonIdentity();
   const [open, setOpen] = useState(false);
@@ -285,7 +318,7 @@ function WalletsMenu({
             copied={copied === "evm"}
             warn={evmWrongChain}
             warnAction={{
-              label: evmSwitching ? "Switching…" : `Switch to ${swapChainName}`,
+              label: evmSwitching ? "Switching…" : `Switch to ${switchTargetName}`,
               onClick: onEvmSwitch,
               disabled: evmSwitching
             }}
@@ -301,6 +334,37 @@ function WalletsMenu({
             connectDisabled={evm.connecting || !evm.available}
             onDisconnect={() => void evm.disconnect()}
           />
+          {enabledEvmChains.length > 1 && (
+            <div className="px-2 pb-2">
+              <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-on-surface-variant">
+                EVM networks
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {enabledEvmChains.map((chain) => {
+                  const active = connectedEvmChainId === chain.id;
+                  return (
+                    <button
+                      key={chain.slug}
+                      type="button"
+                      disabled={!evm.available || evmSwitching || active}
+                      onClick={() => onEvmChainSwitch(chain)}
+                      className={cn(
+                        "inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-[11px] font-medium transition-colors",
+                        active
+                          ? "border-primary/30 bg-primary/10 text-primary"
+                          : "border-outline-variant bg-surface-container text-on-surface-variant hover:text-on-surface",
+                        (!evm.available || evmSwitching) &&
+                          "cursor-not-allowed opacity-60"
+                      )}
+                    >
+                      <ChainIcon network={chain.name} className="size-3.5" />
+                      {chain.name}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           {evmError && (
             <p className="px-2 pb-1 text-[11px] leading-snug text-destructive">
               {evmError}
@@ -354,7 +418,7 @@ function WalletRow({
         />
         <div className="min-w-0">
           <div className="text-[11px] leading-tight text-on-surface-variant">
-            {label}
+            {label} · {network}
           </div>
           {connected ? (
             warn && warnAction ? (

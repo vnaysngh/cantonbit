@@ -46,7 +46,7 @@ export default function RootLayout({
       // suppressHydrationWarning needed because next-themes injects the
       // resolved theme class on <html> before React hydrates.
       suppressHydrationWarning
-      className={`${jakarta.variable} h-full antialiased`}
+      className={`${jakarta.variable} light h-full antialiased`}
     >
       <head>
         {/* Material Symbols (Outlined) — nav + status iconography. This is a

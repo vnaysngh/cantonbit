@@ -19,11 +19,13 @@ export function ChainIcon({
   className?: string;
 }) {
   const key = network.toLowerCase();
-  const logo = key.includes("arbitrum") || key.includes("base")
+  const logo = key.includes("base")
     ? { src: "/base-logo.jpg", alt: "Base" }
-    : key.includes("canton")
-      ? { src: "/cc-logo.png", alt: "Canton" }
-      : null;
+    : key.includes("arbitrum")
+      ? { src: "/arbitrum-logo.svg", alt: "Arbitrum" }
+      : key.includes("canton")
+        ? { src: "/cc-logo.png", alt: "Canton" }
+        : null;
 
   if (logo) {
     return (
@@ -47,7 +49,8 @@ export function ChainIcon({
   return (
     <span
       className={cn(
-        "flex size-7 shrink-0 items-center justify-center rounded-full bg-[#f7931a] text-sm font-bold text-white",
+        "flex size-7 shrink-0 items-center justify-center rounded-full text-sm font-bold text-white",
+        "bg-[#f7931a]",
         className
       )}
     >

@@ -1,16 +1,25 @@
 "use client";
 
-import { ThemeProvider as NextThemesProvider } from "next-themes";
-import type { ComponentProps } from "react";
+import { useEffect, type ReactNode } from "react";
 
 /**
- * Thin client wrapper around next-themes. Lives in its own file so we can
- * import it from a server component (`app/layout.tsx`) without that file
- * needing to become a client component.
+ * Light-mode-only wrapper.
+ *
+ * The app no longer needs next-themes runtime script injection because the UI is
+ * intentionally pinned to light mode in `app/layout.tsx`. Rendering
+ * next-themes' script from this client component triggers React's "script tag
+ * while rendering" warning, so keep this as a no-op compatibility wrapper for
+ * existing layout props.
  */
 export function ThemeProvider({
-  children,
-  ...props
-}: ComponentProps<typeof NextThemesProvider>) {
-  return <NextThemesProvider {...props}>{children}</NextThemesProvider>;
+  children
+}: {
+  children: ReactNode;
+  [key: string]: unknown;
+}) {
+  useEffect(() => {
+    document.documentElement.classList.add("light");
+  }, []);
+
+  return <>{children}</>;
 }

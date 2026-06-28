@@ -24,6 +24,7 @@ export interface HtlcOrderInput {
   solverCantonParty: string;
   solverTimelock: number;
   /** Cross-chain EVM leg fields */
+  evmChain?: string;
   userEvmAddress?: string;
   solverEvmAddress?: string;
   wbtcAmount?: string;
@@ -149,12 +150,14 @@ export const htlcApi = {
   quoteReverse: (
     user: string,
     cbtcUnits: string,
-    cantonParty: string
+    cantonParty: string,
+    evmChain?: string
   ): Promise<{ wbtcAmount: string; wbtcPriceRaw: string; expires: number }> =>
     jpost("/api/htlc/quote", {
       user,
       cbtcAmount: cbtcUnits,
       cantonParty,
+      evmChain,
       direction: "canton-to-evm"
     }),
   getOrder: (

@@ -27,7 +27,7 @@ import {
   isSwapClaimable
 } from "@/lib/htlc-order-logic";
 import type { SwapOrder } from "@/lib/htlc-types";
-import { formatWbtc, HTLC_ESCROW_ADDRESS, SWAP_CHAIN } from "@/lib/swap-evm";
+import { chainConfigForOrder, formatWbtc, type SwapChain } from "@/lib/swap-evm";
 import { getSwapErrorMessage } from "@/lib/swap-api";
 import type { CantonSwapOrder } from "@/lib/canton-swap-types";
 import {
@@ -55,7 +55,16 @@ type LoadedOrder =
   | { kind: "htlc"; order: SwapOrder }
   | { kind: "c2c"; order: CantonSwapOrder };
 
-const HTLC_ESCROW = HTLC_ESCROW_ADDRESS;
+function htlcEscrowForOrder(order: SwapOrder): string {
+  const chain = chainConfigForOrder(order);
+  const escrow = chain.escrow?.trim();
+  if (!escrow) throw new Error(`HTLC escrow is not configured for ${chain.name}.`);
+  return escrow;
+}
+
+function htlcChainForOrder(order: SwapOrder): SwapChain {
+  return chainConfigForOrder(order);
+}
 
 function orderIdParam(raw: string | string[] | undefined): string {
   return Array.isArray(raw) ? raw[0] ?? "" : raw ?? "";
@@ -407,7 +416,7 @@ export default function SwapOrderStatusPage() {
           counterMode: order.counterMode
         },
         secret,
-        escrow: HTLC_ESCROW,
+        escrow: htlcEscrowForOrder(order),
         send: evm.sendTransaction,
         loop: wallet.provider as unknown as {
           party_id?: string;
@@ -490,7 +499,11 @@ export default function SwapOrderStatusPage() {
     try {
       if (order.direction === "evm-to-canton") {
         if (!evm.account) throw new Error("Connect your EVM wallet first.");
-        const tx = await evmRetake(evm.sendTransaction, HTLC_ESCROW, order.id);
+        const tx = await evmRetake(
+          evm.sendTransaction,
+          htlcEscrowForOrder(order),
+          order.id
+        );
         await evm.waitForReceipt(tx);
         await htlcApi.recordRetake(order.id, tx);
       } else {
@@ -628,6 +641,7 @@ export default function SwapOrderStatusPage() {
           revealedPreimage: order.revealedPreimage
         }));
     const reverseLocking = reverse && phase === "lock";
+    const evmChain = htlcChainForOrder(order);
     const recoverable =
       !claimable &&
       !claimInFlight &&
@@ -698,7 +712,7 @@ export default function SwapOrderStatusPage() {
           : "Your CBTC is being locked on Canton by the platform.";
       }
       return reverse
-        ? `Your CBTC is locked. Waiting for the solver to lock WBTC on ${SWAP_CHAIN.name}.`
+        ? `Your CBTC is locked. Waiting for the solver to lock WBTC on ${evmChain.name}.`
         : "Your WBTC is locked. The solver is locking CBTC on Canton — usually under a minute.";
     })();
     return {
@@ -712,14 +726,14 @@ export default function SwapOrderStatusPage() {
       steps: reverse
         ? reverseLoopHtlcSteps({
             phase: stepperPhase,
-            chainName: SWAP_CHAIN.name,
+            chainName: evmChain.name,
             managed: order.counterMode === "managed"
           })
         : forwardLoopHtlcSteps({
             phase: stepperPhase,
             networkFeeEnabled: false,
             managed: order.counterMode === "managed",
-            chainName: SWAP_CHAIN.name
+            chainName: evmChain.name
           }),
       claimable,
       claiming: claimInFlight,

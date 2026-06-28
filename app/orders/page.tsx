@@ -58,7 +58,7 @@ import {
 } from "@/lib/swap-pending-loop-commit";
 import { listLoopCbtcHoldingCids } from "@/lib/loop-holdings";
 import { getSwapErrorMessage } from "@/lib/swap-api";
-import { SWAP_CHAIN, HTLC_ESCROW_ADDRESS } from "@/lib/swap-evm";
+import { chainConfigForOrder, type SwapChain } from "@/lib/swap-evm";
 import { cn } from "@/lib/utils";
 import {
   projectC2cStatus,
@@ -67,9 +67,6 @@ import {
   type ProjectedSwapStatus
 } from "@/lib/swap-status-projector";
 
-// Shared resolver — fails closed in production if NEXT_PUBLIC_HTLC_ESCROW is unset.
-const HTLC_ESCROW = HTLC_ESCROW_ADDRESS;
-const EVM_CHAIN = SWAP_CHAIN.name;
 const SOLVER_EVM =
   process.env.NEXT_PUBLIC_SOLVER_EVM ??
   "0x0B95ec21579aee6Ef7b712976bD86689D68b5A08";
@@ -105,6 +102,21 @@ interface HistoryOrder {
   failureReason?: string;
   walletMode?: string;
   networkFeeCollected?: boolean;
+  evmChainSlug?: string;
+  evmChainId?: number;
+  evmEscrowAddress?: string;
+  evmWbtcAddress?: string;
+}
+
+function evmChainForOrder(order: Pick<HistoryOrder, "evmChainSlug" | "evmChainId" | "evmEscrowAddress" | "evmWbtcAddress">): SwapChain {
+  return chainConfigForOrder(order);
+}
+
+function htlcEscrowForOrder(order: Pick<HistoryOrder, "evmChainSlug" | "evmChainId" | "evmEscrowAddress" | "evmWbtcAddress">): string {
+  const chain = evmChainForOrder(order);
+  const escrow = chain.escrow?.trim();
+  if (!escrow) throw new Error(`HTLC escrow is not configured for ${chain.name}.`);
+  return escrow;
 }
 
 function isCantonSwapOrder(
@@ -298,8 +310,9 @@ function Route({ order }: { order: HistoryOrder }) {
     );
   }
   const reverse = order.direction === "canton-to-evm";
-  const from = reverse ? "Canton" : EVM_CHAIN;
-  const to = reverse ? EVM_CHAIN : "Canton";
+  const evmChain = evmChainForOrder(order).name;
+  const from = reverse ? "Canton" : evmChain;
+  const to = reverse ? evmChain : "Canton";
   return (
     <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-xs">
       <span className="rounded-md bg-foreground/[0.06] px-1.5 py-0.5 font-medium text-foreground/75">
@@ -588,7 +601,11 @@ function OrdersPageInner() {
         if (action === "retake-wbtc") {
           if (!evm.account)
             throw new Error("Connect your EVM wallet to retake your WBTC.");
-          const tx = await evmRetake(evm.sendTransaction, HTLC_ESCROW, o.id);
+          const tx = await evmRetake(
+            evm.sendTransaction,
+            htlcEscrowForOrder(o),
+            o.id
+          );
           await evm.waitForReceipt(tx);
           await htlcApi.recordRetake(o.id, tx);
           forgetSecret(o.id);
@@ -687,6 +704,7 @@ function OrdersPageInner() {
         cbtcAmount: o.cbtcAmount,
         solverTimelock: o.solverTimelock,
         counterMode: "loop",
+        evmChain: o.evmChainSlug,
         createdAt: pending.createdAt,
         submitUpdateId: pending.submitUpdateId,
         offerCidHint: pending.offerCidHint
@@ -804,7 +822,7 @@ function OrdersPageInner() {
             counterMode: o.counterMode
           },
           secret,
-          escrow: HTLC_ESCROW,
+          escrow: htlcEscrowForOrder(o),
           send: evm.sendTransaction,
           loop: wallet.provider as unknown as {
             party_id?: string;
@@ -907,7 +925,6 @@ function OrdersPageInner() {
     setTimeout(() => setCopied((c) => (c === text ? null : c)), 1200);
   }, []);
 
-  const explorer = SWAP_CHAIN.blockExplorerUrls?.[0] ?? "";
   const activeBase = useMemo(() => {
     if (!openId) return null;
     const fromList = orders?.find((x) => x.id === openId);
@@ -919,6 +936,10 @@ function OrdersPageInner() {
     activeBase && optimisticStatus[activeBase.id]
       ? { ...activeBase, status: optimisticStatus[activeBase.id] }
       : activeBase;
+  const activeExplorer =
+    active && !isCantonSwapOrder(active)
+      ? (evmChainForOrder(active).blockExplorerUrls?.[0] ?? "")
+      : "";
 
   return (
     <div className="mx-auto w-full max-w-[920px] px-4 py-6 sm:py-10">
@@ -1081,7 +1102,7 @@ function OrdersPageInner() {
         createPortal(
           <DetailDrawer
             o={active}
-            explorer={explorer}
+            explorer={activeExplorer}
             copied={copied}
             onCopy={copy}
             onClose={() => setOpenId(null)}
@@ -1134,6 +1155,7 @@ function DetailDrawer({
 }) {
   const cantonSwap = isCantonSwapOrder(o);
   const reverse = !cantonSwap && o.direction === "canton-to-evm";
+  const evmChainName = cantonSwap ? "EVM" : evmChainForOrder(o).name;
   const action = recoveryAction(o);
   const claimable = isClaimableOrder(o);
   const lockConfirm = !cantonSwap && needsLoopLockConfirm(o);
@@ -1265,7 +1287,7 @@ function DetailDrawer({
                     : `${fmtWbtc(o.wbtcAmount)} WBTC`}
               </div>
               <div className="text-xs text-foreground/45">
-                {cantonSwap ? "Canton" : reverse ? "Canton" : EVM_CHAIN}
+                {cantonSwap ? "Canton" : reverse ? "Canton" : evmChainName}
               </div>
             </div>
             <div className="rounded-xl bg-foreground/[0.04] px-3 py-2.5">
@@ -1278,7 +1300,7 @@ function DetailDrawer({
                     : `${fmtCbtc(o.cbtcAmount)} CBTC`}
               </div>
               <div className="text-xs text-foreground/45">
-                {cantonSwap ? "Canton" : reverse ? EVM_CHAIN : "Canton"}
+                {cantonSwap ? "Canton" : reverse ? evmChainName : "Canton"}
               </div>
             </div>
           </div>
@@ -1410,7 +1432,7 @@ function DetailDrawer({
             <div className="mt-4 space-y-2">
               <p className="rounded-xl bg-amber-500/10 px-4 py-3 text-center text-xs text-amber-700">
                 Your CBTC has been delivered. We&apos;re completing the final
-                step on {EVM_CHAIN} — this usually finishes in under a minute.
+                step on {evmChainName} — this usually finishes in under a minute.
                 Refresh this page in a few seconds; no action needed from you.
               </p>
             </div>

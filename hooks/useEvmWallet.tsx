@@ -42,7 +42,11 @@ export interface EvmWallet {
   error: string | null;
   connect: () => Promise<void>;
   signTypedData: (typedData: object) => Promise<string>;
-  sendTransaction: (tx: { to: string; data: string; value?: string }) => Promise<string>;
+  sendTransaction: (tx: {
+    to: string;
+    data: string;
+    value?: string;
+  }) => Promise<string>;
   /** Wait for a tx hash to be mined (and succeed) before treating it as done. */
   waitForReceipt: (hash: string, opts?: { timeoutMs?: number; pollMs?: number }) => Promise<void>;
   call: (to: string, data: string) => Promise<string>;
@@ -62,6 +66,61 @@ export interface AddChainParams {
 const DISCONNECTED_KEY = "oranj.evm.disconnected";
 
 const EvmContext = createContext<EvmWallet | null>(null);
+
+function toHexQuantity(value: bigint): string {
+  return `0x${value.toString(16)}`;
+}
+
+function parseHexQuantity(value: unknown): bigint | null {
+  if (typeof value !== "string" || !value.startsWith("0x")) return null;
+  try {
+    return BigInt(value);
+  } catch {
+    return null;
+  }
+}
+
+function isFeeBelowBaseFeeError(error: unknown): boolean {
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "object" && error && "message" in error
+        ? String((error as { message?: unknown }).message ?? "")
+        : String(error ?? "");
+  return /max fee per gas less than block base fee/i.test(message);
+}
+
+async function freshFeeCaps(
+  p: Eip1193Provider
+): Promise<{ maxFeePerGas?: string; maxPriorityFeePerGas?: string }> {
+  try {
+    const block = (await p.request({
+      method: "eth_getBlockByNumber",
+      params: ["latest", false]
+    })) as { baseFeePerGas?: string } | null;
+    const baseFee = parseHexQuantity(block?.baseFeePerGas);
+    if (baseFee == null) return {};
+
+    let priority = 1_000_000n; // small L2-safe fallback.
+    try {
+      const rawPriority = parseHexQuantity(
+        await p.request({ method: "eth_maxPriorityFeePerGas" })
+      );
+      if (rawPriority != null) priority = rawPriority;
+    } catch {
+      // Some wallets/RPCs don't implement eth_maxPriorityFeePerGas.
+    }
+
+    return {
+      maxPriorityFeePerGas: toHexQuantity(priority),
+      // Buffer the current base fee so a small bump during wallet confirmation
+      // does not make the RPC reject the tx before it enters the mempool.
+      maxFeePerGas: toHexQuantity(baseFee * 2n + priority)
+    };
+  } catch {
+    return {};
+  }
+}
 
 function readDisconnectedFlag(): boolean {
   try {
@@ -202,11 +261,27 @@ function useEvmWalletState(): EvmWallet {
   const sendTransaction = useCallback(async (tx: { to: string; data: string; value?: string }): Promise<string> => {
     const p = getProvider();
     if (!p || !account) throw new Error("wallet not connected");
-    const hash = await p.request({
-      method: "eth_sendTransaction",
-      params: [{ from: account, to: tx.to, data: tx.data, value: tx.value ?? "0x0" }],
+    const buildTx = async () => ({
+      from: account,
+      to: tx.to,
+      data: tx.data,
+      value: tx.value ?? "0x0",
+      ...(await freshFeeCaps(p))
     });
-    return hash as string;
+    try {
+      const hash = await p.request({
+        method: "eth_sendTransaction",
+        params: [await buildTx()],
+      });
+      return hash as string;
+    } catch (e) {
+      if (!isFeeBelowBaseFeeError(e)) throw e;
+      const hash = await p.request({
+        method: "eth_sendTransaction",
+        params: [await buildTx()],
+      });
+      return hash as string;
+    }
   }, [account]);
 
   /**

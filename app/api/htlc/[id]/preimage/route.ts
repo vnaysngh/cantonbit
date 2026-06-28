@@ -6,6 +6,7 @@
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
 import { expectedSettlementParty, requireDaemon } from "@/lib/htlc-auth";
+import { assertDaemonOrderChain } from "@/lib/htlc-chain-binding";
 import { htlcCanExposePreimageToSolver } from "@/lib/swap-product-invariants";
 
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -17,6 +18,7 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
     if (!order) {
       return NextResponse.json({ error: "not found" }, { status: 404 });
     }
+    assertDaemonOrderChain(req, order);
     const vault = expectedSettlementParty();
     if (vault && order.solverCantonParty !== vault) {
       return NextResponse.json({ error: "order vault party mismatch" }, { status: 403 });

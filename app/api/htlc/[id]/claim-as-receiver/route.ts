@@ -5,6 +5,7 @@ import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
 import { claimAsReceiver } from "@/lib/htlc-onledger";
 import { requireDaemon } from "@/lib/htlc-auth";
+import { assertDaemonOrderChain } from "@/lib/htlc-chain-binding";
 
 function testRouteEnabled(): boolean {
   return (
@@ -24,6 +25,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     const { preimage } = await req.json();
     const order = await htlcService().getOrder(id);
     if (!order) return NextResponse.json({ error: "not found" }, { status: 404 });
+    assertDaemonOrderChain(req, order);
     if (!order.htlcCid || !order.allocationCid) {
       return NextResponse.json({ error: "counter not locked" }, { status: 400 });
     }

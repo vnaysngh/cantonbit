@@ -16,7 +16,7 @@ import { Buffer } from "node:buffer";
 
 import { getHoldings } from "./canton";
 import { alert } from "./alert";
-import { SWAP_CHAIN, HTLC_ESCROW_ADDRESS } from "./swap-evm";
+import { chainConfigForOrder } from "./swap-evm";
 import {
   createTransfer,
   findOfferFromSender,
@@ -65,6 +65,7 @@ import {
 } from "./htlc-evm-lock-guard";
 import {
   evmTxBlockHex,
+  type EvmProofOpts,
   assertEvmTransactionFinalized,
   evmBlockAtOrBeforeUnixTime,
   hasEvmClaimedForHashLock,
@@ -121,6 +122,13 @@ function isExpiredTransferInstructionError(err: unknown): boolean {
   );
 }
 
+function isInactiveTransferInstructionError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /LOCAL_VERDICT_INACTIVE_CONTRACT|INACTIVE_CONTRACT|contract.*inactive|not active/i.test(
+    msg
+  );
+}
+
 function toHexLower(bytes: Uint8Array): string {
   return (
     "0x" +
@@ -130,7 +138,6 @@ function toHexLower(bytes: Uint8Array): string {
   );
 }
 
-const HTLC_ESCROW_ADDR = HTLC_ESCROW_ADDRESS;
 /** Re-export for daemon alignment — defined in htlc-evm-lock-guard. */
 export { EVM_CLAIM_MARGIN_SECONDS };
 /** Loop-seller custody: if the WBTC counter-lock hasn't happened within this grace,
@@ -177,6 +184,25 @@ function reverseLoopCustodyMemo(order: SwapOrder): string {
   });
 }
 
+function evmProofOptsForOrder(order: SwapOrder): EvmProofOpts & {
+  expectedWbtcAddress: string;
+} {
+  const chain = chainConfigForOrder(order);
+  if (!chain.escrow?.trim()) {
+    throw new Error(`HTLC escrow not configured for ${chain.slug}`);
+  }
+  if (!chain.wbtc?.trim()) {
+    throw new Error(`WBTC address not configured for ${chain.slug}`);
+  }
+  return {
+    rpcUrl: chain.rpcUrls[0],
+    escrowAddress: chain.escrow,
+    chainName: chain.name,
+    chainSlug: chain.slug,
+    expectedWbtcAddress: chain.wbtc
+  };
+}
+
 function transferOfferMemo(offer: { meta?: Record<string, unknown> }): string {
   const values = offer.meta?.values;
   if (!values || typeof values !== "object") return "";
@@ -189,51 +215,14 @@ function transferOfferRequestedAtMs(offer: { requestedAt?: string }): number {
   return Number.isFinite(ms) ? ms : 0;
 }
 
-/** Raw read of the escrow's lock for a hashLock: { unlockTime, amount, receiver }. */
-async function readEvmLock(
-  hashLockRaw: string
-): Promise<{
+/** Raw read of the order-bound escrow's lock for a hashLock. */
+async function readOrderEvmLock(order: SwapOrder): Promise<{
   unlockTime: number;
   amount: bigint;
   tokenAddress: string;
   receiver: string;
 }> {
-  const hashLock = (
-    hashLockRaw.startsWith("0x") ? hashLockRaw.slice(2) : hashLockRaw
-  ).toLowerCase();
-  const selector = toHexLower(
-    keccak_256(new TextEncoder().encode("locks(bytes32)"))
-  ).slice(2, 10);
-  const res = await fetch(SWAP_CHAIN.rpcUrls[0], {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "eth_call",
-      params: [
-        { to: HTLC_ESCROW_ADDR, data: `0x${selector}${hashLock}` },
-        "latest"
-      ]
-    }),
-    cache: "no-store"
-  });
-  if (!res.ok) throw new Error(`EVM lock check failed (rpc ${res.status})`);
-  const { result, error } = (await res.json()) as {
-    result?: string;
-    error?: { message?: string };
-  };
-  if (error || !result || result.length < 2 + 5 * 64)
-    throw new Error(
-      `EVM lock check failed: ${error?.message ?? "bad rpc result"}`
-    );
-  const word = (i: number) => result.slice(2 + i * 64, 2 + (i + 1) * 64);
-  return {
-    unlockTime: parseInt(word(0), 16),
-    amount: BigInt(`0x${word(1)}`),
-    tokenAddress: `0x${word(2).slice(24)}`.toLowerCase(),
-    receiver: `0x${word(4).slice(24)}`.toLowerCase()
-  };
+  return readEvmLockMapping(order.hashLock, evmProofOptsForOrder(order));
 }
 
 /**
@@ -249,29 +238,29 @@ async function verifyEvmLock(o: SwapOrder): Promise<void> {
     throw new Error("EVM leg fields missing on order");
   }
   if (o.mainLockTx) {
-    await waitForEvmTransactionFinality(o.mainLockTx);
+    await waitForEvmTransactionFinality(o, o.mainLockTx);
   }
-  const expectedWbtc = SWAP_CHAIN.wbtc?.trim().toLowerCase();
-  if (!expectedWbtc) {
-    throw new Error("WBTC address not configured — cannot verify EVM lock");
-  }
-  const { unlockTime, amount, tokenAddress, receiver } = await readEvmLock(o.hashLock);
+  const evm = evmProofOptsForOrder(o);
+  const { unlockTime, amount, tokenAddress, receiver } = await readOrderEvmLock(o);
   assertEvmLockSafeForReveal(
     { unlockTime, amount, tokenAddress, receiver },
     {
       wbtcAmount: o.wbtcAmount,
       solverEvmAddress: o.solverEvmAddress,
-      expectedWbtcAddress: expectedWbtc,
+      expectedWbtcAddress: evm.expectedWbtcAddress,
       expectedUserTimelock: o.userTimelock
     }
   );
 }
 
-async function waitForEvmTransactionFinality(txHash: string): Promise<void> {
+async function waitForEvmTransactionFinality(
+  order: SwapOrder,
+  txHash: string
+): Promise<void> {
   let lastError: unknown;
   for (let attempt = 0; attempt < 12; attempt++) {
     try {
-      await assertEvmTransactionFinalized(txHash);
+      await assertEvmTransactionFinalized(txHash, evmProofOptsForOrder(order));
       return;
     } catch (e) {
       lastError = e;
@@ -300,18 +289,20 @@ async function assertEvmCounterNotClaimed(o: SwapOrder): Promise<void> {
     throw new Error("counter already claimed — swap must settle, not refund");
   }
   try {
-    const lock = await readEvmLock(o.hashLock);
+    const evm = evmProofOptsForOrder(o);
+    const lock = await readOrderEvmLock(o);
     if (lock.amount > 0n) {
       throw new Error(
         "EVM counter is still locked — settlement or solver retake must complete before Canton refund"
       );
     }
     const fromBlockHex = o.counterLockTx
-      ? await evmTxBlockHex(o.counterLockTx)
+      ? await evmTxBlockHex(o.counterLockTx, evm)
       : o.createdAt
-        ? await evmBlockAtOrBeforeUnixTime(o.createdAt - 10 * 60)
+        ? await evmBlockAtOrBeforeUnixTime(o.createdAt - 10 * 60, evm.rpcUrl)
         : undefined;
     const claimed = await hasEvmClaimedForHashLock(o.hashLock, {
+      ...evm,
       fromBlockHex
     });
     if (claimed) {
@@ -582,12 +573,25 @@ class HtlcService {
         offerCidHint: params.offerCidHint
       }
     );
-    if (!evidence.offerCid) {
-      throw new Error(
-        "Loop CBTC custody must be a pending transfer offer — preapproval holdings are not supported"
-      );
+    if (!evidence.offerCid && !evidence.inboundHoldingCid) {
+      throw new Error("Loop CBTC custody evidence missing");
     }
-    o.counterTransferOfferCid = evidence.offerCid;
+    if (evidence.inboundHoldingCid && !evidence.offerCid) {
+      o.counterTransferOfferCid = undefined;
+      o.counterTransferUpdateId = params.submitUpdateId;
+      o.status = "main_locked";
+      if (!(await this.store.putIfStatus(o, "main_locking"))) {
+        const fresh = await this.must(incoming.id);
+        if (fresh.status === "main_locked") return fresh;
+        throw new Error("could not bind direct Loop custody to pre-locked order");
+      }
+      return o;
+    }
+    const offerCid = evidence.offerCid;
+    if (!offerCid) {
+      throw new Error("Loop CBTC custody offer evidence missing");
+    }
+    o.counterTransferOfferCid = offerCid;
     if (!(await this.store.putIfStatus(o, "main_locking"))) {
       const fresh = await this.must(incoming.id);
       if (fresh.status === "main_locked") return fresh;
@@ -601,9 +605,21 @@ class HtlcService {
     try {
       ({ updateId } = await acceptTransfer({
         receiverParty: o.solverCantonParty,
-        offerContractId: evidence.offerCid
+        offerContractId: offerCid
       }));
     } catch (e) {
+      if (isInactiveTransferInstructionError(e) && evidence.inboundHoldingCid) {
+        o = await this.must(incoming.id);
+        o.counterTransferOfferCid = undefined;
+        o.counterTransferUpdateId = params.submitUpdateId;
+        o.status = "main_locked";
+        if (!(await this.store.putIfStatus(o, "main_locking"))) {
+          const fresh = await this.must(incoming.id);
+          if (fresh.status === "main_locked") return fresh;
+          throw new Error("could not recover direct Loop custody after inactive offer");
+        }
+        return o;
+      }
       if (!isExpiredTransferInstructionError(e)) throw e;
       o.status = "failed";
       o.evmFloatReserved = false;
@@ -656,8 +672,8 @@ class HtlcService {
   /** Orders the solver should act on (not terminal). Runs light reconcile only
    *  (Loop delivery proof repair) — no per-order EVM event scans, so many
    *  concurrent orders do not serialize on Base RPC during every poll tick. */
-  async activeOrders(): Promise<SwapOrder[]> {
-    const all = await this.store.active();
+  async activeOrders(evmChainSlug?: string): Promise<SwapOrder[]> {
+    const all = await this.store.active(evmChainSlug);
     const actionable = new Set([
       "main_locking",
       "main_locked",
@@ -726,8 +742,9 @@ class HtlcService {
     }
     const gate = htlcCanExposePreimageToSolver(o);
     if (!gate.ok) return o;
+    const evm = evmProofOptsForOrder(o);
     try {
-      const lock = await readEvmLockMapping(o.hashLock);
+      const lock = await readEvmLockMapping(o.hashLock, evm);
       if (lock.amount > 0n) return o;
     } catch (e) {
       console.warn(
@@ -736,11 +753,14 @@ class HtlcService {
       return o;
     }
     const fromBlockHex = o.mainLockTx
-      ? await evmTxBlockHex(o.mainLockTx)
+      ? await evmTxBlockHex(o.mainLockTx, evm)
       : undefined;
     let claimTx: string | undefined;
     try {
-      claimTx = await findEvmClaimTxForHashLock(o.hashLock, { fromBlockHex });
+      claimTx = await findEvmClaimTxForHashLock(o.hashLock, {
+        ...evm,
+        fromBlockHex
+      });
     } catch (e) {
       console.warn(
         `[htlc] forward main-claim reconcile ${o.id.slice(0, 12)} Claimed scan failed: ${e instanceof Error ? e.message : e}`
@@ -749,7 +769,7 @@ class HtlcService {
     }
     if (!claimTx) return o;
     try {
-      await verifyReverseClaimTx(claimTx, o.hashLock);
+      await verifyReverseClaimTx(claimTx, o.hashLock, evm);
     } catch {
       return o;
     }
@@ -802,17 +822,21 @@ class HtlcService {
 
     const anchorTx =
       o.direction === "evm-to-canton" ? o.mainLockTx : o.counterLockTx;
+    const evm = evmProofOptsForOrder(o);
     let fromBlockHex: string | undefined;
     if (anchorTx) {
       try {
-        fromBlockHex = await evmTxBlockHex(anchorTx);
+        fromBlockHex = await evmTxBlockHex(anchorTx, evm);
       } catch {
         /* scan from genesis */
       }
     }
     let claimTx: string | undefined;
     try {
-      claimTx = await findEvmClaimTxForHashLock(o.hashLock, { fromBlockHex });
+      claimTx = await findEvmClaimTxForHashLock(o.hashLock, {
+        ...evm,
+        fromBlockHex
+      });
     } catch (e) {
       console.warn(
         `[htlc] main_claimed proof reconcile ${o.id.slice(0, 12)} Claimed scan failed: ${e instanceof Error ? e.message : e}`
@@ -821,7 +845,7 @@ class HtlcService {
     }
     if (!claimTx) return o;
     try {
-      await verifyReverseClaimTx(claimTx, o.hashLock);
+      await verifyReverseClaimTx(claimTx, o.hashLock, evm);
     } catch {
       return o;
     }
@@ -956,6 +980,7 @@ class HtlcService {
     if (!o.wbtcAmount || !o.userEvmAddress || o.solverTimelock == null) {
       return o;
     }
+    const evm = evmProofOptsForOrder(o);
 
     // C-02: a zero lock amount means the user Claimed OR the solver Retook. We may
     // ONLY advance to counter_claimed on a confirmed Claim, and we must NEVER roll
@@ -966,7 +991,7 @@ class HtlcService {
     // order in counter_locked (no rollback) and retry on the next poll.
     let lockAmount: bigint;
     try {
-      lockAmount = (await readEvmLockMapping(o.hashLock)).amount;
+      lockAmount = (await readEvmLockMapping(o.hashLock, evm)).amount;
     } catch (e) {
       console.warn(
         `[htlc] reconcile ${o.id.slice(0, 12)} lock read failed — keeping counter_locked: ${e instanceof Error ? e.message : e}`
@@ -980,9 +1005,12 @@ class HtlcService {
       let claimed: boolean;
       try {
         const fromBlockHex = o.counterLockTx
-          ? await evmTxBlockHex(o.counterLockTx)
+          ? await evmTxBlockHex(o.counterLockTx, evm)
           : undefined;
-        claimed = await hasEvmClaimedForHashLock(o.hashLock, { fromBlockHex });
+        claimed = await hasEvmClaimedForHashLock(o.hashLock, {
+          ...evm,
+          fromBlockHex
+        });
       } catch (e) {
         console.warn(
           `[htlc] reconcile ${o.id.slice(0, 12)} Claimed scan failed — keeping counter_locked: ${e instanceof Error ? e.message : e}`
@@ -998,10 +1026,6 @@ class HtlcService {
 
       if (o.counterLockTx) {
         try {
-          const expectedWbtc = SWAP_CHAIN.wbtc?.trim();
-          if (!expectedWbtc) {
-            throw new Error("WBTC address not configured");
-          }
           await verifyReverseCounterLockTx(
             o.counterLockTx,
             {
@@ -1009,12 +1033,13 @@ class HtlcService {
               wbtcAmount: o.wbtcAmount,
               userEvmAddress: o.userEvmAddress,
               solverTimelock: o.solverTimelock,
-              expectedWbtcAddress: expectedWbtc
+              expectedWbtcAddress: evm.expectedWbtcAddress
             },
-            { requireFinality: false }
+            { ...evm, requireFinality: false }
           );
-          const fromBlockHex = await evmTxBlockHex(o.counterLockTx);
+          const fromBlockHex = await evmTxBlockHex(o.counterLockTx, evm);
           const retakeTx = await findEvmRetakeTxForHashLock(o.hashLock, {
+            ...evm,
             fromBlockHex
           });
           if (retakeTx) {
@@ -1058,7 +1083,7 @@ class HtlcService {
       hashLock: o.hashLock,
       wbtcAmount: o.wbtcAmount,
       userEvmAddress: o.userEvmAddress
-    });
+    }, evm);
     if (probe.ready) return o;
     // Fail-closed: transient RPC errors must not roll back a valid counter_lock.
     if (probe.reason.includes("Could not read WBTC lock status")) {
@@ -1259,7 +1284,7 @@ class HtlcService {
     try {
       // A receipt timeout only means the transaction may still land. Do not advance
       // the order until the escrow mapping itself proves the exact expected lock.
-      await waitForEvmTransactionFinality(mainLockTx);
+      await waitForEvmTransactionFinality(o, mainLockTx);
       await verifyEvmLock(o);
     } catch (e) {
       const rollback = { ...o, status: "accepted" as const };
@@ -1298,6 +1323,11 @@ class HtlcService {
         evmFloatUnits
       );
       if (!reservation.reserved) {
+        if (reservation.reason === "unbound_chain") {
+          throw new Error(
+            "order missing EVM chain binding; backfill legacy order before reserving WBTC float"
+          );
+        }
         const available =
           evmFloatUnits > reservation.reservedUnits
             ? evmFloatUnits - reservation.reservedUnits
@@ -1323,15 +1353,21 @@ class HtlcService {
     if (order.status !== "accepted") {
       throw new Error(`order not accepted (${order.status})`);
     }
-    const wbtc = SWAP_CHAIN.wbtc?.trim();
+    const evm = evmProofOptsForOrder(order);
+    const wbtc = evm.expectedWbtcAddress;
     const solver = order.solverEvmAddress?.trim();
     if (!wbtc || !solver) {
       throw new Error("canonical solver WBTC inventory is not configured");
     }
-    const balance = await readErc20Balance(wbtc, solver);
+    const balance = await readErc20Balance(wbtc, solver, evm.rpcUrl);
     const reservation =
       await this.store.reserveReverseEvmFloatBeforeMainLock(order.id, balance);
     if (!reservation.reserved) {
+      if (reservation.reason === "unbound_chain") {
+        throw new Error(
+          "order missing EVM chain binding; backfill legacy order before reserving WBTC float"
+        );
+      }
       const available =
         balance > reservation.reservedUnits
           ? balance - reservation.reservedUnits
@@ -2383,18 +2419,19 @@ class HtlcService {
     if (!o.wbtcAmount || !o.userEvmAddress || o.solverTimelock == null) {
       throw new Error("order missing EVM counter-lock fields");
     }
-    const expectedWbtc = SWAP_CHAIN.wbtc?.trim();
-    if (!expectedWbtc) {
-      throw new Error("WBTC address not configured — cannot verify counter-lock");
-    }
+    const evm = evmProofOptsForOrder(o);
     try {
-      await verifyReverseCounterLockTx(counterLockTx, {
-        hashLock: o.hashLock,
-        wbtcAmount: o.wbtcAmount,
-        userEvmAddress: o.userEvmAddress,
-        solverTimelock: o.solverTimelock,
-        expectedWbtcAddress: expectedWbtc
-      });
+      await verifyReverseCounterLockTx(
+        counterLockTx,
+        {
+          hashLock: o.hashLock,
+          wbtcAmount: o.wbtcAmount,
+          userEvmAddress: o.userEvmAddress,
+          solverTimelock: o.solverTimelock,
+          expectedWbtcAddress: evm.expectedWbtcAddress
+        },
+        evm
+      );
     } catch (e) {
       if (!isAwaitingEvmFinality(e)) throw e;
 
@@ -2409,9 +2446,9 @@ class HtlcService {
           wbtcAmount: o.wbtcAmount,
           userEvmAddress: o.userEvmAddress,
           solverTimelock: o.solverTimelock,
-          expectedWbtcAddress: expectedWbtc
+          expectedWbtcAddress: evm.expectedWbtcAddress
         },
-        { requireFinality: false }
+        { ...evm, requireFinality: false }
       );
       o.counterLockTx = counterLockTx;
       o.status = "counter_locking";
@@ -2457,10 +2494,12 @@ class HtlcService {
         ? preimage.slice(2)
         : preimage)) as `0x${string}`;
 
+    const evm = evmProofOptsForOrder(o);
     const fromBlockHex = o.counterLockTx
-      ? await evmTxBlockHex(o.counterLockTx)
+      ? await evmTxBlockHex(o.counterLockTx, evm)
       : undefined;
     const claimTx = await findEvmClaimTxForHashLock(o.hashLock, {
+      ...evm,
       fromBlockHex
     });
     if (!claimTx) {
@@ -2896,7 +2935,7 @@ class HtlcService {
           throw new Error("claim tx mismatch");
         }
         if (!o.mainClaimTx) {
-          await verifyReverseClaimTx(claimRef, o.hashLock);
+          await verifyReverseClaimTx(claimRef, o.hashLock, evmProofOptsForOrder(o));
           const patched = { ...o, mainClaimTx: claimRef as `0x${string}` };
           if (await this.store.putIfStatus(patched, "main_claimed")) {
             return patched;
@@ -2994,10 +3033,12 @@ class HtlcService {
       return o;
     }
     if (o.direction === "canton-to-evm") {
+      const evm = evmProofOptsForOrder(o);
       const fromBlockHex = o.counterLockTx
-        ? await evmTxBlockHex(o.counterLockTx)
+        ? await evmTxBlockHex(o.counterLockTx, evm)
         : undefined;
       const claimed = await hasEvmClaimedForHashLock(o.hashLock, {
+        ...evm,
         fromBlockHex
       });
       if (!claimed) {
@@ -3006,7 +3047,7 @@ class HtlcService {
         );
       }
       if (isEvmTxHash(claimRef)) {
-        await verifyReverseClaimTx(claimRef, o.hashLock);
+        await verifyReverseClaimTx(claimRef, o.hashLock, evm);
       }
     }
     o.revealedPreimage = ("0x" +
@@ -3040,7 +3081,7 @@ class HtlcService {
     if (!canComplete.ok) {
       throw new Error(canComplete.reason);
     }
-    await verifyReverseClaimTx(mainClaimTx, o.hashLock);
+    await verifyReverseClaimTx(mainClaimTx, o.hashLock, evmProofOptsForOrder(o));
     o.status = "main_claimed";
     o.mainClaimTx = mainClaimTx;
     if (!(await this.store.putIfStatus(o, "counter_claimed"))) {
@@ -3141,7 +3182,7 @@ class HtlcService {
     if (o.status !== "counter_locked") {
       throw new Error(`not retake-eligible (${o.status})`);
     }
-    await verifyForwardRetakeTx(retakeTx, o.hashLock);
+    await verifyForwardRetakeTx(retakeTx, o.hashLock, evmProofOptsForOrder(o));
     const previousStatus = o.status;
     o.mainClaimTx = retakeTx;
     o.evmFloatReserved = false;
@@ -3173,7 +3214,7 @@ class HtlcService {
     ) {
       throw new Error(`order already terminal (${o.status})`);
     }
-    await verifyForwardRetakeTx(retakeTx, o.hashLock);
+    await verifyForwardRetakeTx(retakeTx, o.hashLock, evmProofOptsForOrder(o));
     // STRANDED-FLOAT GUARD: if the order is still counter_locked, the SOLVER's CBTC
     // is locked on-ledger. Marking 'refunded' here would drop it from refundableOrders()
     // (which scans counter_locked) and the auto-refund sweep would never free it. So
@@ -3205,10 +3246,12 @@ class HtlcService {
     if (o.status !== "main_locked") {
       throw new Error(`not stale forward main (${o.status})`);
     }
+    const evm = evmProofOptsForOrder(o);
     const fromBlockHex = o.mainLockTx
-      ? await evmTxBlockHex(o.mainLockTx)
+      ? await evmTxBlockHex(o.mainLockTx, evm)
       : undefined;
     const retakeTx = await findEvmRetakeTxForHashLock(o.hashLock, {
+      ...evm,
       fromBlockHex
     });
     if (!retakeTx) {
@@ -3441,9 +3484,9 @@ class HtlcService {
     }
 
     if (o.direction === "evm-to-canton") {
-      let lock: Awaited<ReturnType<typeof readEvmLock>>;
+      let lock: Awaited<ReturnType<typeof readOrderEvmLock>>;
       try {
-        lock = await readEvmLock(o.hashLock);
+        lock = await readOrderEvmLock(o);
       } catch (e) {
         throw new Error(
           `could not verify stale accepted EVM lock: ${e instanceof Error ? e.message : e}`
@@ -3483,7 +3526,7 @@ class HtlcService {
       throw new Error("preimage revealed — swap must settle, not refund");
     if (!o.counterTransferUpdateId)
       throw new Error("no custody transfer recorded");
-    const lock = await readEvmLock(o.hashLock);
+    const lock = await readOrderEvmLock(o);
     if (lock.amount > 0n)
       throw new Error("WBTC lock exists on-chain — not stalled, do not refund");
     // CONCURRENCY + CRASH GUARD (F2): durable `refunding` CAS + deterministic

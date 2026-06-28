@@ -117,6 +117,34 @@ interface Order {
   counterTransferUpdateId?: string;
   counterTransferOfferCid?: string;
   counterClaimUpdateId?: string;
+  evmChainSlug?: string;
+  evmChainId?: number;
+  evmEscrowAddress?: string;
+  evmWbtcAddress?: string;
+}
+
+function assertOrderEvmBinding(o: Order, expectedWbtc: Address): void {
+  if (o.evmChainSlug !== daemonEvmChainSlug) {
+    throw new Error(
+      `order chain ${o.evmChainSlug ?? "missing"} does not match daemon chain ${daemonEvmChainSlug}`
+    );
+  }
+  if (!o.evmEscrowAddress) {
+    throw new Error("order EVM escrow missing");
+  }
+  if (o.evmEscrowAddress.toLowerCase() !== ESCROW.toLowerCase()) {
+    throw new Error(
+      `order escrow ${o.evmEscrowAddress} does not match daemon escrow ${ESCROW}`
+    );
+  }
+  if (!o.evmWbtcAddress) {
+    throw new Error("order WBTC address missing");
+  }
+  if (o.evmWbtcAddress.toLowerCase() !== expectedWbtc.toLowerCase()) {
+    throw new Error(
+      `order WBTC ${o.evmWbtcAddress} does not match daemon WBTC ${expectedWbtc}`
+    );
+  }
 }
 
 /** Process user-revealed/claim phases first; those timelocks are actively ticking. */
@@ -351,12 +379,22 @@ async function discoverEscrowStartBlock(
   return lo;
 }
 
+let daemonEvmChainSlug = "";
+
+function apiHeaders(extra?: HeadersInit): HeadersInit {
+  return {
+    ...(API_AUTH_TOKEN ? { Authorization: `Bearer ${API_AUTH_TOKEN}` } : {}),
+    ...(daemonEvmChainSlug
+      ? { "X-WarpX-Evm-Chain": daemonEvmChainSlug }
+      : {}),
+    ...(extra ?? {})
+  };
+}
+
 async function jget(path: string) {
   const r = await fetch(`${API_BASE}${path}`, {
     signal: AbortSignal.timeout(API_TIMEOUT_MS),
-    headers: API_AUTH_TOKEN
-      ? { Authorization: `Bearer ${API_AUTH_TOKEN}` }
-      : undefined
+    headers: apiHeaders()
   });
   if (!r.ok) throw new Error(`GET ${path} ${r.status}`);
   return r.json();
@@ -365,10 +403,7 @@ async function jpost(path: string, body?: unknown) {
   const r = await fetch(`${API_BASE}${path}`, {
     method: "POST",
     signal: AbortSignal.timeout(API_TIMEOUT_MS),
-    headers: {
-      "Content-Type": "application/json",
-      ...(API_AUTH_TOKEN ? { Authorization: `Bearer ${API_AUTH_TOKEN}` } : {})
-    },
+    headers: apiHeaders({ "Content-Type": "application/json" }),
     body: body ? JSON.stringify(body) : undefined
   });
   const j = await r.json().catch(() => ({}));
@@ -404,9 +439,11 @@ async function main() {
     );
   }
   const { network, slug, chain, rpcUrl } = resolveHtlcEvmConfig();
+  daemonEvmChainSlug = slug;
   const account = privateKeyToAccount(norm(solverEvmPk()));
   const pub = createPublicClient({ chain, transport: http(rpcUrl) });
   await verifyRpcChainId(pub, chain);
+  const daemonWbtc = resolveWbtcAddress(slug);
 
   if (!isMainnet && escrowStartBlock <= 0n) {
     escrowStartBlock = await discoverEscrowStartBlock(pub);
@@ -491,7 +528,9 @@ async function main() {
       }
       // The API has no list endpoint yet; the daemon learns order ids from a
       // shared ids feed. We poll the known-active set via /api/htlc/active.
-      const { orders: rawOrders } = (await jget("/api/htlc/active")) as {
+      const { orders: rawOrders } = (await jget(
+        `/api/htlc/active?evmChain=${encodeURIComponent(slug)}`
+      )) as {
         orders: Order[];
       };
       const orders = sortDaemonOrders(rawOrders ?? []);
@@ -509,6 +548,7 @@ async function main() {
         ) {
           continue;
         }
+        assertOrderEvmBinding(o, daemonWbtc);
         // ================= REVERSE (canton-to-evm) =================
         // Main leg = user's CBTC (locked by our backend, LONG timelock); counter
         // leg = OUR WBTC (SHORT timelock). See docs/canton-to-evm-design.md.
@@ -551,7 +591,7 @@ async function main() {
           ) {
             const beganThisAttempt = o.status === "main_locked";
             const amount = BigInt(o.wbtcAmount);
-            const wbtc = resolveWbtcAddress(slug);
+            const wbtc = daemonWbtc;
             const unlock = BigInt(o.solverTimelock ?? 0);
             let counterLockFinalized = false;
             if (
@@ -884,9 +924,7 @@ async function main() {
             );
             continue;
           }
-          const expectedWbtc = resolveWbtcAddress(
-            resolveHtlcEvmConfig().slug
-          ).toLowerCase();
+          const expectedWbtc = daemonWbtc.toLowerCase();
           if (lock[2].toLowerCase() !== expectedWbtc) {
             console.log(
               `[solver] ${o.id.slice(0, 12)} lock token != WBTC — skip`

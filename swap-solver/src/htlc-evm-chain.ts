@@ -4,6 +4,7 @@
  */
 import {
   arbitrum,
+  arbitrumSepolia,
   base,
   baseSepolia,
   type Chain,
@@ -18,7 +19,11 @@ const MAINNET_WBTC: Record<"arbitrum" | "base", Address> = {
 };
 
 export type SwapNetwork = "devnet" | "testnet" | "mainnet";
-export type EvmChainSlug = "base-sepolia" | "arbitrum" | "base";
+export type EvmChainSlug =
+  | "base-sepolia"
+  | "arbitrum-sepolia"
+  | "arbitrum"
+  | "base";
 
 export function resolveSwapNetwork(): SwapNetwork {
   const raw = (
@@ -48,9 +53,16 @@ export function resolveEvmChainSlug(network: SwapNetwork): EvmChainSlug {
   const override = process.env.EVM_CHAIN ?? process.env.NEXT_PUBLIC_SWAP_CHAIN;
   if (override) {
     const c = override.toLowerCase();
-    if (c === "base-sepolia" || c === "arbitrum" || c === "base") return c;
+    if (
+      c === "base-sepolia" ||
+      c === "arbitrum-sepolia" ||
+      c === "arbitrum" ||
+      c === "base"
+    ) {
+      return c;
+    }
     throw new Error(
-      `EVM_CHAIN/NEXT_PUBLIC_SWAP_CHAIN must be base-sepolia|arbitrum|base, got '${c}'`,
+      `EVM_CHAIN/NEXT_PUBLIC_SWAP_CHAIN must be base-sepolia|arbitrum-sepolia|arbitrum|base, got '${c}'`,
     );
   }
   return network === "mainnet" ? "arbitrum" : "base-sepolia";
@@ -60,6 +72,8 @@ export function viemChainFor(slug: EvmChainSlug): Chain {
   switch (slug) {
     case "arbitrum":
       return arbitrum;
+    case "arbitrum-sepolia":
+      return arbitrumSepolia;
     case "base":
       return base;
     case "base-sepolia":
@@ -71,6 +85,8 @@ export function defaultRpcFor(slug: EvmChainSlug): string {
   switch (slug) {
     case "arbitrum":
       return "https://arb1.arbitrum.io/rpc";
+    case "arbitrum-sepolia":
+      return "https://sepolia-rollup.arbitrum.io/rpc";
     case "base":
       return "https://mainnet.base.org";
     case "base-sepolia":
@@ -108,12 +124,27 @@ export function resolveHtlcEvmConfig(): {
 
 /** WBTC token for reverse (canton→evm) counter-locks. */
 export function resolveWbtcAddress(slug: EvmChainSlug): Address {
-  const fromEnv =
+  const suffix = slug.toUpperCase().replace(/-/g, "_");
+  const chainSpecific =
+    process.env[`WBTC_ADDRESS_${suffix}`] ??
+    process.env[`NEXT_PUBLIC_WBTC_${suffix}`];
+  const generic =
     process.env.WBTC_ADDRESS ?? process.env.NEXT_PUBLIC_WBTC_ADDRESS;
-  if (fromEnv) return getAddress(fromEnv);
-  if (slug === "base-sepolia") {
+  if (chainSpecific && generic) {
+    const chainSpecificAddress = getAddress(chainSpecific);
+    const genericAddress = getAddress(generic);
+    if (chainSpecificAddress.toLowerCase() !== genericAddress.toLowerCase()) {
+      throw new Error(
+        `WBTC_ADDRESS conflicts with WBTC_ADDRESS_${suffix}; remove the generic value or make them match`
+      );
+    }
+    return chainSpecificAddress;
+  }
+  if (chainSpecific) return getAddress(chainSpecific);
+  if (generic) return getAddress(generic);
+  if (slug === "base-sepolia" || slug === "arbitrum-sepolia") {
     throw new Error(
-      "missing env WBTC_ADDRESS (set in swap-solver/.env or .env.htlc-devnet)",
+      `missing env WBTC_ADDRESS_${suffix} or WBTC_ADDRESS (set in swap-solver/.env or .env.htlc-devnet)`,
     );
   }
   const chainKey = slug === "arbitrum" ? "arbitrum" : "base";

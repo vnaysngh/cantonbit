@@ -139,7 +139,11 @@ export function resolveCreateOrder(
       "solverCantonParty",
       "cbtcAmount",
       "solverTimelock",
-      "counterMode"
+      "counterMode",
+      "evmChainSlug",
+      "evmChainId",
+      "evmEscrowAddress",
+      "evmWbtcAddress"
     ];
     for (const field of immutableFields) {
       const current = existing[field as keyof SwapOrder];

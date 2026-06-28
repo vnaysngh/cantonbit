@@ -17,6 +17,7 @@ import {
   assertSwapPayAmountLimit,
   assertSwapPayAmountLimitUnits
 } from "@/lib/swap-amount-limits";
+import { bindEnabledHtlcEvmChain } from "@/lib/htlc-chain-binding";
 
 export async function POST(req: Request) {
   try {
@@ -40,6 +41,7 @@ export async function POST(req: Request) {
     if (!vault || !solverEvm) {
       return NextResponse.json({ error: "solver not configured" }, { status: 503 });
     }
+    const { fields: evmChainFields } = bindEnabledHtlcEvmChain(body.evmChain);
     const now = Math.floor(Date.now() / 1000);
     assertValidTimelocks(
       now,
@@ -67,7 +69,8 @@ export async function POST(req: Request) {
         solverCantonParty: vault,
         cbtcAmount: String(body.cbtcAmount),
         solverTimelock: Number(body.solverTimelock),
-        counterMode
+        counterMode,
+        ...evmChainFields
       },
       mainLockTx
     );

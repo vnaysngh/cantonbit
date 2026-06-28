@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { requireDaemon } from "@/lib/htlc-auth";
 import { htlcService } from "@/lib/htlc-service-singleton";
+import { assertDaemonOrderChain } from "@/lib/htlc-chain-binding";
 
 export async function POST(
   req: Request,
@@ -14,7 +15,13 @@ export async function POST(
     const body = (await req.json().catch(() => ({}))) as {
       evmFloatUnits?: string;
     };
-    const order = await htlcService().beginCounterLock(
+    const svc = htlcService();
+    const existing = await svc.getOrder(id, { mode: "light" });
+    if (!existing) {
+      return NextResponse.json({ error: "not found" }, { status: 404 });
+    }
+    assertDaemonOrderChain(req, existing);
+    const order = await svc.beginCounterLock(
       id,
       body.evmFloatUnits == null ? undefined : BigInt(body.evmFloatUnits)
     );

@@ -1,9 +1,6 @@
 import "server-only";
 
-import {
-  assertOfferOnlyUserLegEvidence,
-  parseUserLegEvidenceFromEvents
-} from "./canton-swap-leg-verify-logic";
+import { parseUserLegEvidenceFromEvents } from "./canton-swap-leg-verify-logic";
 import { fetchUpdateEventsById } from "./canton-swap-leg-verify";
 import { NETWORK } from "./constants";
 
@@ -41,6 +38,5 @@ export async function verifyHtlcReverseLoopCustodySubmit(
       "Loop CBTC transfer is not visible with this order memo — start a new swap"
     );
   }
-  assertOfferOnlyUserLegEvidence(evidence);
   return evidence;
 }

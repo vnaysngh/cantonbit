@@ -26,11 +26,13 @@ import {
 } from "@/lib/canton-network-fee";
 import { distributedRateLimitOk } from "@/lib/api-rate-limit";
 import { clientIpFromRequest } from "@/lib/canton-swap-rate-limit";
+import { bindEnabledHtlcEvmChain } from "@/lib/htlc-chain-binding";
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
     const { user, wbtcAmount, cbtcAmount, cantonParty, direction } = body;
+    const { chain } = bindEnabledHtlcEvmChain(body.evmChain);
 
     const reverse = direction === "canton-to-evm";
     const inRaw = reverse ? cbtcAmount : wbtcAmount;
@@ -137,7 +139,11 @@ export async function POST(req: Request) {
       cantonParty,
       cbtcAmount: (reverse ? q.inUnits : q.outUnits).toString(),
       wbtcAmount: (reverse ? q.outUnits : q.inUnits).toString(),
-      wbtc: "",
+      evmChain: chain.slug,
+      chainId: chain.id,
+      escrow: chain.escrow,
+      wbtc: chain.wbtc,
+      blockExplorerUrl: chain.blockExplorerUrls[0],
       wbtcPriceRaw: q.price8.toString(),
       wbtcPriceDecimals: 8,
       expires: q.expiresAt,

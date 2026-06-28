@@ -55,16 +55,19 @@ import {
 import {
   PERMIT2_ADDRESS,
   SWAP_CHAIN,
-  HTLC_ESCROW_ADDRESS,
+  chainConfigForOrder,
   encodeApprove,
   encodeAllowance,
   encodeBalanceOf,
   decodeUint,
+  enabledHtlcEvmChains,
   formatWbtc,
   parseWbtc,
+  resolveHtlcChainConfig,
   sanitizeAmountInput,
   cleanPastedAmount,
-  truncateToDecimals
+  truncateToDecimals,
+  type SwapChain
 } from "@/lib/swap-evm";
 import {
   generateSecret,
@@ -188,9 +191,6 @@ function formatQuoteCountdown(secondsRemaining: number): string {
   return seconds > 0 ? `in ${minutes}m ${seconds}s` : `in ${minutes}m`;
 }
 
-// HTLC EVM leg config (Base Sepolia). Trustless HTLCEscrow — shared resolver
-// fails closed in production.
-const HTLC_ESCROW = HTLC_ESCROW_ADDRESS;
 const SOLVER_EVM =
   process.env.NEXT_PUBLIC_SOLVER_EVM ??
   "0x0B95ec21579aee6Ef7b712976bD86689D68b5A08";
@@ -198,6 +198,23 @@ const SOLVER_EVM =
 const SETTLEMENT_PARTY =
   process.env.NEXT_PUBLIC_CANTON_SWAP_SETTLEMENT_PARTY ?? "";
 const SOLVER_CANTON = SETTLEMENT_PARTY;
+const EVM_CHAIN_STORAGE_KEY = "warpx.swap.evmChain";
+
+function initialSelectedEvmChainSlug(): string {
+  return SWAP_CHAIN.slug;
+}
+
+function htlcEscrowForChain(chain: SwapChain): string {
+  const escrow = chain.escrow?.trim();
+  if (!escrow) throw new Error(`HTLC escrow is not configured for ${chain.name}.`);
+  return escrow;
+}
+
+function htlcWbtcForChain(chain: SwapChain): string {
+  const wbtc = chain.wbtc?.trim();
+  if (!wbtc) throw new Error(`WBTC is not configured for ${chain.name}.`);
+  return wbtc;
+}
 
 type Stage =
   | { kind: "idle" }
@@ -399,6 +416,27 @@ export default function SwapPage() {
     chain: "canton",
     token: "CBTC"
   });
+  const enabledEvmChains = useMemo(() => enabledHtlcEvmChains(), []);
+  const [selectedEvmChainSlug, setSelectedEvmChainSlug] = useState<string>(
+    initialSelectedEvmChainSlug
+  );
+  const selectedEvmChain = useMemo(() => {
+    const found = enabledEvmChains.find((c) => c.slug === selectedEvmChainSlug);
+    return found ?? resolveHtlcChainConfig(enabledEvmChains[0]?.slug);
+  }, [enabledEvmChains, selectedEvmChainSlug]);
+  useEffect(() => {
+    const stored = window.localStorage.getItem(EVM_CHAIN_STORAGE_KEY);
+    if (stored && enabledEvmChains.some((c) => c.slug === stored)) {
+      setSelectedEvmChainSlug(stored);
+    }
+  }, [enabledEvmChains]);
+  useEffect(() => {
+    if (!enabledEvmChains.some((c) => c.slug === selectedEvmChainSlug)) {
+      setSelectedEvmChainSlug(enabledEvmChains[0]?.slug ?? SWAP_CHAIN.slug);
+      return;
+    }
+    window.localStorage.setItem(EVM_CHAIN_STORAGE_KEY, selectedEvmChain.slug);
+  }, [enabledEvmChains, selectedEvmChain.slug, selectedEvmChainSlug]);
   const swapKind = useMemo(
     () => resolveSwapKind(payLeg, receiveLeg),
     [payLeg, receiveLeg]
@@ -476,6 +514,10 @@ export default function SwapPage() {
   const activeMainLockRecordingRef = useRef<string | null>(null);
 
   const [wbtcBalance, setWbtcBalance] = useState<bigint | null>(null);
+  const [wbtcBalanceStatus, setWbtcBalanceStatus] = useState<
+    "idle" | "loading" | "ready" | "error"
+  >("idle");
+  const [wbtcBalanceError, setWbtcBalanceError] = useState<string | null>(null);
   /** Live WBTC/BTC from GET /api/htlc/price — same cache as server quotes. */
   const [wbtcPrice, setWbtcPrice] = useState<{
     raw: bigint;
@@ -544,17 +586,42 @@ export default function SwapPage() {
     refetchInterval: 30_000
   });
 
+  const wrongChain =
+    !!evm.account &&
+    evm.chainId != null &&
+    evm.chainId !== selectedEvmChain.id;
+
   const balanceForLeg = useCallback(
     (leg: SwapLeg): string | undefined => {
       if (leg.chain === "evm") {
-        return wbtcBalance != null ? formatWbtc(wbtcBalance) : undefined;
+        if (!evm.account) return undefined;
+        if (wrongChain) return `Switch to ${selectedEvmChain.name}`;
+        if (!selectedEvmChain.wbtc) return "WBTC not configured";
+        if (wbtcBalanceStatus === "loading" || wbtcBalanceStatus === "idle") {
+          return "Loading…";
+        }
+        if (wbtcBalanceStatus === "error") {
+          return wbtcBalanceError ? "Balance unavailable" : "Unavailable";
+        }
+        return wbtcBalance != null ? formatWbtc(wbtcBalance) : "0";
       }
       if (leg.token === "CBTC") return cbtcBalance || undefined;
       if (leg.token === "CC") return ccTotal ?? undefined;
       if (leg.token === "USDCX") return usdcxBalance;
       return undefined;
     },
-    [wbtcBalance, cbtcBalance, ccTotal, usdcxBalance]
+    [
+      evm.account,
+      wrongChain,
+      selectedEvmChain.name,
+      selectedEvmChain.wbtc,
+      wbtcBalanceStatus,
+      wbtcBalanceError,
+      wbtcBalance,
+      cbtcBalance,
+      ccTotal,
+      usdcxBalance
+    ]
   );
 
   const c2cFromAsset = payLeg.chain === "canton" ? payLeg.token : null;
@@ -685,20 +752,24 @@ export default function SwapPage() {
     };
   }, [stage]);
 
-  const wrongChain =
-    !!evm.account && evm.chainId != null && evm.chainId !== SWAP_CHAIN.id;
-
   // --- read the WBTC balance from the connected EVM wallet (for "You pay") ---
   const refreshBalance = useCallback(
     async (wbtc: string) => {
       if (!evm.account) return;
+      setWbtcBalanceStatus("loading");
+      setWbtcBalanceError(null);
       try {
         const bal = decodeUint(
           await evm.call(wbtc, encodeBalanceOf(evm.account))
         );
         setWbtcBalance(bal);
-      } catch {
-        /* non-fatal */
+        setWbtcBalanceStatus("ready");
+      } catch (e) {
+        setWbtcBalance(null);
+        setWbtcBalanceStatus("error");
+        setWbtcBalanceError(
+          e instanceof Error ? e.message : "Could not read WBTC balance"
+        );
       }
     },
     [evm]
@@ -707,22 +778,48 @@ export default function SwapPage() {
   // Proactively load the WBTC balance once the EVM wallet is connected on the
   // right chain — so the "You pay" panel shows a balance BEFORE quoting (like a
   // normal DEX). Reads the user's own balance directly via eth_call using the
-  // chain's fixed WBTC address (SWAP_CHAIN.wbtc). This deliberately does NOT
+  // selected chain's fixed WBTC address. This deliberately does NOT
   // touch the solver: your on-chain balance only needs the token + your wallet,
   // so it must keep showing even when the solver is down.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      if (!evm.account || wrongChain || !SWAP_CHAIN.wbtc) {
-        if (!cancelled) setWbtcBalance(null);
+      if (!evm.account) {
+        if (!cancelled) {
+          setWbtcBalance(null);
+          setWbtcBalanceStatus("idle");
+          setWbtcBalanceError(null);
+        }
         return;
       }
-      await refreshBalance(SWAP_CHAIN.wbtc);
+      if (wrongChain) {
+        if (!cancelled) {
+          setWbtcBalance(null);
+          setWbtcBalanceStatus("idle");
+          setWbtcBalanceError(null);
+        }
+        return;
+      }
+      if (!selectedEvmChain.wbtc) {
+        if (!cancelled) {
+          setWbtcBalance(null);
+          setWbtcBalanceStatus("error");
+          setWbtcBalanceError(`WBTC is not configured for ${selectedEvmChain.name}`);
+        }
+        return;
+      }
+      await refreshBalance(selectedEvmChain.wbtc);
     })();
     return () => {
       cancelled = true;
     };
-  }, [evm.account, wrongChain, refreshBalance]);
+  }, [
+    evm.account,
+    wrongChain,
+    refreshBalance,
+    selectedEvmChain.name,
+    selectedEvmChain.wbtc
+  ]);
 
   // --- CBTC auto-accept (preapproval) gate. With it ON, the delivered CBTC
   //     auto-accepts → solver finalises safely (accept-first, pay-second).
@@ -913,16 +1010,16 @@ export default function SwapPage() {
   const handleSwitchChain = useCallback(async () => {
     setStage({ kind: "idle" });
     try {
-      await evm.switchChain(SWAP_CHAIN.id, {
-        chainName: SWAP_CHAIN.name,
-        rpcUrls: SWAP_CHAIN.rpcUrls,
+      await evm.switchChain(selectedEvmChain.id, {
+        chainName: selectedEvmChain.name,
+        rpcUrls: selectedEvmChain.rpcUrls,
         nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
-        blockExplorerUrls: SWAP_CHAIN.blockExplorerUrls
+        blockExplorerUrls: selectedEvmChain.blockExplorerUrls
       });
     } catch (e) {
       fail(e instanceof Error ? e.message : "Failed to switch network.");
     }
-  }, [evm]);
+  }, [evm, selectedEvmChain]);
 
   // --- 1. quote (cross-chain + canton-to-canton) ---
   const handleQuote = useCallback(async () => {
@@ -1090,14 +1187,16 @@ export default function SwapPage() {
               cantonParty: destinationParty,
               cbtcAmount: inUnits.toString(),
               direction: "canton-to-evm",
-              counterMode: isParticipantManaged ? "managed" : "loop"
+              counterMode: isParticipantManaged ? "managed" : "loop",
+              evmChain: selectedEvmChain.slug
             }
           : {
               user: evm.account,
               wbtcAmount: inUnits.toString(),
               cantonParty: destinationParty,
               direction: "evm-to-canton",
-              counterMode: isParticipantManaged ? "managed" : "loop"
+              counterMode: isParticipantManaged ? "managed" : "loop",
+              evmChain: selectedEvmChain.slug
             }
       );
       if (!isReverse) void refreshBalance(quote.wbtc);
@@ -1133,6 +1232,7 @@ export default function SwapPage() {
     wallet.provider,
     sessionReady,
     isParticipantManaged,
+    selectedEvmChain.slug,
     probeCbtcAutoAccept
   ]);
 
@@ -1444,6 +1544,7 @@ export default function SwapPage() {
       const orderInput = {
         id,
         direction: "evm-to-canton" as const,
+        evmChain: selectedEvmChain.slug,
         hashLock,
         userEvmAddress: evm.account,
         solverEvmAddress: SOLVER_EVM,
@@ -1478,14 +1579,15 @@ export default function SwapPage() {
           patchPendingLoopCommit({ flow: "forward-htlc", prepared: true });
         }
         setStage({ kind: "approving", quote });
-        const wbtcToken = SWAP_CHAIN.wbtc || quote.wbtc;
+        const wbtcToken = quote.wbtc || htlcWbtcForChain(selectedEvmChain);
+        const escrow = quote.escrow || htlcEscrowForChain(selectedEvmChain);
         lockTx = await evmApproveAndLock(
           evm.sendTransaction,
           evm.call,
           evm.account,
           {
             wbtc: wbtcToken,
-            escrow: HTLC_ESCROW,
+            escrow,
             amount: wbtcUnits,
             hashLock,
             unlockTime: userTimelock,
@@ -1511,7 +1613,8 @@ export default function SwapPage() {
           cbtcAmount: orderInput.cbtcAmount,
           userTimelock: orderInput.userTimelock,
           solverTimelock: orderInput.solverTimelock,
-          counterMode: orderInput.counterMode
+          counterMode: orderInput.counterMode,
+          evmChain: orderInput.evmChain
         });
         try {
           await evm.waitForReceipt(lockTx);
@@ -1574,6 +1677,7 @@ export default function SwapPage() {
       isParticipantManaged,
       ensureSwapSecret,
       handleC2cConfirm,
+      selectedEvmChain,
       startTracking,
       vaultRecallContext
     ]
@@ -1597,6 +1701,9 @@ export default function SwapPage() {
         const doneAmounts = claimOrder as
           | { wbtcAmount?: string; cbtcAmount?: string }
           | undefined;
+        const orderChain = chainConfigForOrder(
+          (claimOrder ?? {}) as Parameters<typeof chainConfigForOrder>[0]
+        );
         const mode =
           (claimOrder as { counterMode?: string } | undefined)?.counterMode ??
           (isParticipantManaged ? "managed" : "loop");
@@ -1634,7 +1741,7 @@ export default function SwapPage() {
             counterMode: "loop"
           },
           secret,
-          escrow: HTLC_ESCROW,
+          escrow: htlcEscrowForChain(orderChain),
           loop: provider as unknown as {
             party_id?: string;
             submitAndWaitForTransaction: (
@@ -1733,6 +1840,7 @@ export default function SwapPage() {
       const orderInput = {
         id,
         direction: "canton-to-evm" as const,
+        evmChain: selectedEvmChain.slug,
         hashLock,
         userEvmAddress: evm.account,
         solverEvmAddress: SOLVER_EVM,
@@ -1886,6 +1994,7 @@ export default function SwapPage() {
       isParticipantManaged,
       wallet,
       ensureSwapSecret,
+      selectedEvmChain.slug,
       startTracking,
       vaultRecallContext
     ]
@@ -1910,15 +2019,21 @@ export default function SwapPage() {
         let wbtcAmount = preflight?.wbtcAmount;
         let userEvmAddress = preflight?.userEvmAddress ?? evm.account ?? "";
         let cbtcAmount = preflight?.cbtcAmount;
+        const { order } = await htlcApi.getOrder(swapId).catch(() => ({
+          order: null
+        }));
+        const o = order as {
+          hashLock?: string;
+          wbtcAmount?: string;
+          userEvmAddress?: string;
+          cbtcAmount?: string;
+          evmChainSlug?: string;
+          evmChainId?: number;
+          evmEscrowAddress?: string;
+          evmWbtcAddress?: string;
+        } | null;
 
-        if (!wbtcAmount) {
-          const { order } = await htlcApi.getOrder(swapId);
-          const o = order as {
-            hashLock?: string;
-            wbtcAmount?: string;
-            userEvmAddress?: string;
-            cbtcAmount?: string;
-          } | null;
+        if (!wbtcAmount && o) {
           hashLock = o?.hashLock ?? hashLock;
           wbtcAmount = o?.wbtcAmount ?? "0";
           userEvmAddress = o?.userEvmAddress ?? userEvmAddress;
@@ -1926,7 +2041,11 @@ export default function SwapPage() {
         }
 
         const preimage = secretToPreimage(secret);
-        const tx = await evmClaim(evm.sendTransaction, HTLC_ESCROW, preimage);
+        const tx = await evmClaim(
+          evm.sendTransaction,
+          htlcEscrowForChain(chainConfigForOrder(o ?? {})),
+          preimage
+        );
         // Wait for the claim to be MINED before recording — the API verifies the
         // on-chain receipt, which won't exist if we record the pending hash.
         await evm.waitForReceipt(tx);
@@ -1953,6 +2072,10 @@ export default function SwapPage() {
           status?: string;
           mainClaimTx?: string;
           direction?: "canton-to-evm";
+          evmChainSlug?: string;
+          evmChainId?: number;
+          evmEscrowAddress?: string;
+          evmWbtcAddress?: string;
         } | null;
         if (
           o?.status === "main_claimed" ||
@@ -1978,6 +2101,11 @@ export default function SwapPage() {
                 hashLock: o.hashLock ?? swapId,
                 wbtcAmount: o.wbtcAmount,
                 userEvmAddress: o.userEvmAddress
+              }, {
+                rpcUrl: chainConfigForOrder(o).rpcUrls[0],
+                escrowAddress: htlcEscrowForChain(chainConfigForOrder(o)),
+                chainName: chainConfigForOrder(o).name,
+                chainSlug: chainConfigForOrder(o).slug
               }).catch(() => ({ ready: false as const, reason: msg }))
             : { ready: false as const, reason: msg };
         if (!probe.ready && o?.status === "main_locked") {
@@ -2005,7 +2133,18 @@ export default function SwapPage() {
   const handleRetake = useCallback(
     async (swapId: string) => {
       try {
-        const tx = await evmRetake(evm.sendTransaction, HTLC_ESCROW, swapId);
+        const { order } = await htlcApi.getOrder(swapId).catch(() => ({
+          order: null
+        }));
+        const tx = await evmRetake(
+          evm.sendTransaction,
+          htlcEscrowForChain(
+            chainConfigForOrder(
+              (order ?? {}) as Parameters<typeof chainConfigForOrder>[0]
+            )
+          ),
+          swapId
+        );
         // Wait for the retake to be MINED before recording (the API verifies the
         // on-chain Retaken receipt).
         await evm.waitForReceipt(tx);
@@ -2134,6 +2273,7 @@ export default function SwapPage() {
                 cbtcAmount: stored.cbtcAmount,
                 solverTimelock: stored.solverTimelock,
                 counterMode: stored.counterMode ?? "loop",
+                evmChain: stored.evmChain,
                 mainLockTx: stored.lockTx
               })) as {
                 order?: {
@@ -2742,8 +2882,8 @@ export default function SwapPage() {
     } else if (!isC2c && wrongChain) {
       primary = {
         label: evm.switchingChain
-          ? `Switching to ${SWAP_CHAIN.name}…`
-          : `Switch to ${SWAP_CHAIN.name}`,
+          ? `Switching to ${selectedEvmChain.name}…`
+          : `Switch to ${selectedEvmChain.name}`,
         onClick: handleSwitchChain,
         busy: evm.switchingChain,
         disabled: evm.switchingChain
@@ -2831,6 +2971,17 @@ export default function SwapPage() {
                   ? () => setAmount(balanceForLeg(payLeg)!)
                   : undefined
               }
+              evmNetworkName={selectedEvmChain.name}
+              evmChains={enabledEvmChains}
+              selectedEvmChainSlug={selectedEvmChain.slug}
+              onEvmChainSelect={(slug) => {
+                setSelectedEvmChainSlug(slug);
+                setWbtcBalance(null);
+                setWbtcBalanceStatus("loading");
+                setWbtcBalanceError(null);
+                setWbtcBalanceStatus("loading");
+                setWbtcBalanceError(null);
+              }}
             />
 
             <div className="relative z-10 -my-3 flex justify-center">
@@ -2868,6 +3019,17 @@ export default function SwapPage() {
               approximate={receiveDisplay.approximate}
               editable={false}
               balance={balanceForLeg(receiveLeg)}
+              evmNetworkName={selectedEvmChain.name}
+              evmChains={enabledEvmChains}
+              selectedEvmChainSlug={selectedEvmChain.slug}
+              onEvmChainSelect={(slug) => {
+                setSelectedEvmChainSlug(slug);
+                setWbtcBalance(null);
+                setWbtcBalanceStatus("loading");
+                setWbtcBalanceError(null);
+                setWbtcBalanceStatus("loading");
+                setWbtcBalanceError(null);
+              }}
             />
 
             <div className="px-1 pb-1 pt-3">
@@ -3417,7 +3579,7 @@ export default function SwapPage() {
                       ? isParticipantManaged
                         ? "Locking CBTC on Canton…"
                         : "Sign in Loop wallet…"
-                      : `Locking WBTC on ${SWAP_CHAIN.name}…`
+                      : `Locking WBTC on ${selectedEvmChain.name}…`
                   : null
           }
           expirationSeconds={expirationSeconds}
@@ -3641,7 +3803,11 @@ function TokenPanel({
   editable,
   onAmountChange,
   balance,
-  onMax
+  onMax,
+  evmNetworkName,
+  evmChains,
+  selectedEvmChainSlug,
+  onEvmChainSelect
 }: {
   title: string;
   leg: SwapLeg;
@@ -3655,6 +3821,10 @@ function TokenPanel({
   onAmountChange?: (v: string) => void;
   balance?: string;
   onMax?: () => void;
+  evmNetworkName?: string;
+  evmChains?: SwapChain[];
+  selectedEvmChainSlug?: string;
+  onEvmChainSelect?: (slug: string) => void;
 }) {
   const decimals =
     leg.chain === "evm"
@@ -3715,6 +3885,10 @@ function TokenPanel({
           onChange={onLegChange}
           cantonAssets={cantonAssets}
           getBalance={getBalance}
+          evmNetworkName={evmNetworkName}
+          evmChains={evmChains}
+          selectedEvmChainSlug={selectedEvmChainSlug}
+          onEvmChainSelect={onEvmChainSelect}
         />
       </div>
       {/* Balance + MAX row — only on the editable (pay) panel, or when a balance
@@ -4130,10 +4304,16 @@ function ReviewModal({
       : truncatePartyId(quote.cantonParty);
     payAmount = reverse ? cbtc : wbtc;
     payToken = reverse ? "CBTC" : "WBTC";
-    payNetwork = reverse ? "Canton" : SWAP_CHAIN.name;
+    const quoteChain = chainConfigForOrder({
+      evmChainSlug: quote.evmChain,
+      evmChainId: quote.chainId,
+      evmEscrowAddress: quote.escrow,
+      evmWbtcAddress: quote.wbtc
+    });
+    payNetwork = reverse ? "Canton" : quoteChain.name;
     receiveAmount = reverse ? wbtc : cbtc;
     receiveToken = reverse ? "WBTC" : "CBTC";
-    receiveNetwork = reverse ? SWAP_CHAIN.name : "Canton";
+    receiveNetwork = reverse ? quoteChain.name : "Canton";
   }
 
   const reviewPayAsset = swapPayAssetFromToken(payToken);
