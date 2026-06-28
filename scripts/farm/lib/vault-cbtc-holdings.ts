@@ -167,6 +167,48 @@ export function removeVaultCbtcFromCache(contractIds: string[]): void {
   for (const cid of contractIds) byCid.delete(cid);
 }
 
+export function isStaleVaultHoldingError(msg: string): boolean {
+  return (
+    msg.includes("Given holdings are invalid") ||
+    msg.includes("LOCAL_VERDICT_INACTIVE_CONTRACTS") ||
+    msg.includes("inactive contracts")
+  );
+}
+
+/** Largest-first pick — avoids stale dust UTXOs in polluted vault cache. */
+export function pickVaultCbtcInputsForAmount(
+  holdings: Holding[],
+  amount: string
+): Holding[] {
+  const sorted = [...holdings].sort(
+    (a, b) => parseFloat(b.payload?.amount ?? "0") - parseFloat(a.payload?.amount ?? "0")
+  );
+  const target = toBaseUnitsFloor(amount, CBTC_ASSET.decimals);
+  const picked: Holding[] = [];
+  let acc = 0n;
+  for (const h of sorted) {
+    if (acc >= target) break;
+    picked.push(h);
+    acc += toBaseUnitsFloor(h.payload?.amount ?? "0", CBTC_ASSET.decimals);
+  }
+  if (acc < target) {
+    throw new Error(`vault cache short: need ${amount} CBTC`);
+  }
+  return picked;
+}
+
+/** Bootstrap recent vault CBTC cache when empty (ACS-blind vault). */
+export async function ensureVaultCbtcCacheReady(
+  jwt: string,
+  vaultParty: string
+): Promise<number> {
+  configureVaultCbtcCache(vaultParty);
+  if (getVaultCbtcCachedHoldings().length > 0) {
+    return getVaultCbtcCachedHoldings().length;
+  }
+  return bootstrapVaultCbtcCacheRecent(jwt, vaultParty);
+}
+
 /** Sum of spendable cached vault CBTC (the only balance that can be delivered on CC→CBTC). */
 export function vaultCbtcCachedBalance(): string {
   let total = 0n;

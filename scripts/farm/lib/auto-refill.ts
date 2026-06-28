@@ -55,7 +55,7 @@ function needsTraderCbtc(msg: string): boolean {
   if (needsVaultCacheRefresh(msg)) return false;
   return (
     /CBTC→CC: traders=0\//i.test(msg) ||
-    (/need 0\.00001\+0\.0000/i.test(msg) && /CBTC→CC/i.test(msg))
+    (/need [\d.]+/i.test(msg) && /CBTC→CC/i.test(msg))
   );
 }
 

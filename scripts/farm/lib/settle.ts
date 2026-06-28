@@ -10,7 +10,14 @@ import {
   registrarForAsset,
   submitLedgerCommands
 } from "./ledger";
-import { ingestVaultCbtcFromFill } from "./vault-cbtc-holdings";
+import {
+  ensureVaultCbtcCacheReady,
+  getVaultCbtcCachedHoldings,
+  ingestVaultCbtcFromFill,
+  isStaleVaultHoldingError,
+  pickVaultCbtcInputsForAmount,
+  removeVaultCbtcFromCache
+} from "./vault-cbtc-holdings";
 
 const USER_LEG_TTL_SECONDS = 600;
 const COUNTER_LEG_TTL_SECONDS = 24 * 60 * 60;
@@ -105,65 +112,98 @@ async function fillFromUserOffer(params: ManagedSettleParams & {
     registryKind: fromReg.kind
   });
 
-  const vaultHoldings = await holdingsForAsset(
-    params.jwt,
-    params.vaultParty,
-    params.toAsset
-  );
-  if (vaultHoldings.length === 0) {
-    throw new Error(`vault has insufficient ${params.toAsset} float`);
+  const commandId = `farm-swap-${params.swapId}`;
+  const maxAttempts = params.toAsset === "CBTC" ? 8 : 1;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let vaultHoldings;
+    if (params.toAsset === "CBTC") {
+      await ensureVaultCbtcCacheReady(params.jwt, params.vaultParty);
+      vaultHoldings = getVaultCbtcCachedHoldings();
+    } else {
+      vaultHoldings = await holdingsForAsset(
+        params.jwt,
+        params.vaultParty,
+        params.toAsset
+      );
+    }
+    if (vaultHoldings.length === 0) {
+      throw new Error(`vault has insufficient ${params.toAsset} float`);
+    }
+
+    const deliverInputs =
+      params.toAsset === "CBTC"
+        ? pickVaultCbtcInputsForAmount(vaultHoldings, params.outAmount)
+        : vaultHoldings;
+
+    let deliverLeg;
+    try {
+      deliverLeg = await buildTransferExercise({
+        jwt: params.jwt,
+        senderParty: params.vaultParty,
+        receiverParty: params.traderParty,
+        amount: params.outAmount,
+        inputHoldings: deliverInputs,
+        useAllInputHoldings: params.toAsset === "CBTC",
+        expirationSeconds: COUNTER_LEG_TTL_SECONDS,
+        instrumentId: toReg.instrumentId,
+        registrarAdmin: toReg.admin,
+        registryKind: toReg.kind,
+        assetSymbol: params.toAsset,
+        memo: "OranjSwap"
+      });
+
+      const synchronizerId = assertSameSynchronizer([acceptLeg, deliverLeg], "fill legs");
+
+      const { updateId, eventsById } = await submitLedgerCommands({
+        jwt: params.jwt,
+        actAs: [params.vaultParty],
+        commands: [acceptLeg.command, deliverLeg.command],
+        disclosedContracts: mergeDisclosed([
+          acceptLeg.disclosedContracts,
+          deliverLeg.disclosedContracts
+        ]),
+        commandId,
+        workflowId: commandId,
+        applicationId: "cbtc-farm",
+        synchronizerId: synchronizerId || undefined
+      });
+
+      await ingestVaultCbtcFromFill({
+        jwt: params.jwt,
+        vaultParty: params.vaultParty,
+        traderParty: params.traderParty,
+        updateId,
+        submitEventsById: eventsById
+      });
+
+      const counterLegOfferCid = extractCreatedOfferCid(eventsById) ?? undefined;
+      const counterPendingAccept = Boolean(
+        counterLegOfferCid && !isDirectTransferKind(deliverLeg.transferKind)
+      );
+
+      return {
+        fillUpdateId: updateId,
+        userLegOfferCid: params.userLegOfferCid,
+        counterPendingAccept,
+        counterLegOfferCid
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (
+        params.toAsset === "CBTC" &&
+        isStaleVaultHoldingError(msg) &&
+        attempt < maxAttempts
+      ) {
+        removeVaultCbtcFromCache(deliverInputs.map((h) => h.contractId));
+        console.warn(`  vault CBTC deliver retry ${attempt}: dropped stale UTXO(s)`);
+        continue;
+      }
+      throw e;
+    }
   }
 
-  const deliverLeg = await buildTransferExercise({
-    jwt: params.jwt,
-    senderParty: params.vaultParty,
-    receiverParty: params.traderParty,
-    amount: params.outAmount,
-    inputHoldings: vaultHoldings,
-    expirationSeconds: COUNTER_LEG_TTL_SECONDS,
-    instrumentId: toReg.instrumentId,
-    registrarAdmin: toReg.admin,
-    registryKind: toReg.kind,
-    assetSymbol: params.toAsset,
-    memo: "OranjSwap"
-  });
-
-  const synchronizerId = assertSameSynchronizer([acceptLeg, deliverLeg], "fill legs");
-  const commandId = `farm-swap-${params.swapId}`;
-
-  const { updateId, eventsById } = await submitLedgerCommands({
-    jwt: params.jwt,
-    actAs: [params.vaultParty],
-    commands: [acceptLeg.command, deliverLeg.command],
-    disclosedContracts: mergeDisclosed([
-      acceptLeg.disclosedContracts,
-      deliverLeg.disclosedContracts
-    ]),
-    commandId,
-    workflowId: commandId,
-    applicationId: "cbtc-farm",
-    synchronizerId: synchronizerId || undefined
-  });
-
-  await ingestVaultCbtcFromFill({
-    jwt: params.jwt,
-    vaultParty: params.vaultParty,
-    traderParty: params.traderParty,
-    updateId,
-    submitEventsById: eventsById
-  });
-
-  const counterLegOfferCid = extractCreatedOfferCid(eventsById) ?? undefined;
-  const counterPendingAccept = Boolean(
-    counterLegOfferCid && !isDirectTransferKind(deliverLeg.transferKind)
-  );
-
-  return {
-    fillUpdateId: updateId,
-    userLegOfferCid: params.userLegOfferCid,
-    counterPendingAccept,
-    counterLegOfferCid
-  };
+  throw new Error("vault CBTC deliver exhausted UTXO retries");
 }
 
 export async function settleManagedSwap(

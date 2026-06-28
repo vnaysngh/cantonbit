@@ -6,6 +6,7 @@ import { quoteFarmSwap } from "./quote";
 import {
   isVaultCbtcCacheParty,
   refreshVaultCbtcCacheIfEmpty,
+  reconcileVaultCbtcInFloat,
   vaultCbtcCachedBalance,
   vaultCbtcCacheSpendable
 } from "./vault-cbtc-holdings";

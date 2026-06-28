@@ -52,7 +52,7 @@ export function defaultPacing(): PacingConfig {
     calibrateEvery: 5,
     minIntervalSec: 20,
     maxIntervalSec: 600,
-    cbtcInAmount: "0.00001",
+    cbtcInAmount: "0.000001",
     ccInAmount: "10",
     cbtcDirectionBias: 0.5,
     refillBytesPerSec: 333

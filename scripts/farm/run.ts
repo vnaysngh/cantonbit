@@ -27,7 +27,6 @@ import {
   applySwapToFloat,
   applyTraderCbtcFundToFloat,
   applyVaultFundToFloat,
-  balancePacingAmounts,
   loadFleetFloat,
   planNextSwap,
   type FleetFloatSnapshot,
@@ -260,7 +259,6 @@ export async function runFarmBot(): Promise<void> {
   const fleet = loadFleet();
   configureVaultCbtcCache(fleet.vault);
   let pacing = pacingFromArgs();
-  pacing = await balancePacingAmounts(pacing);
   const maxSwaps = parseNumberArg("max-swaps", 0);
   const dryRun = parseFlag("dry-run");
 
