@@ -14,6 +14,7 @@ import {
 import { getBrowserEvmProvider, waitForEvmReceipt } from "./evm-wait-receipt";
 import { htlcForwardLoopDeliveryProven } from "./swap-product-invariants";
 import { getSwapErrorMessage, isTransientEvmFinalityError } from "./swap-api";
+import { ORDERS_HISTORY_PAGE_SIZE } from "./htlc-order-logic";
 
 export interface HtlcOrderInput {
   id: string;
@@ -94,20 +95,37 @@ export async function fetchMergedSwapHistory(opts: {
   loopParty: string | null;
   /** When set, email-session history hides other wallets + never-started drafts. */
   userEvmAddress?: string | null;
-}): Promise<{ orders: unknown[] }> {
+  limit?: number;
+  /** Unix seconds cursor — load rows strictly older than this timestamp. */
+  beforeCreatedAt?: number;
+}): Promise<{ orders: unknown[]; hasMore: boolean }> {
+  const limit = opts.limit ?? ORDERS_HISTORY_PAGE_SIZE;
+  const pageQ = new URLSearchParams({ limit: String(limit) });
+  if (opts.beforeCreatedAt !== undefined) {
+    pageQ.set("before", String(opts.beforeCreatedAt));
+  }
+  const pageSuffix = pageQ.toString();
+
   const urls: string[] = [];
   const evmQ = opts.userEvmAddress
     ? `&evm=${encodeURIComponent(opts.userEvmAddress)}`
     : "";
-  if (opts.sessionAuthed && opts.sessionParty) urls.push(`/api/htlc/history?party=${encodeURIComponent(opts.sessionParty)}${evmQ}`);
-  if (opts.loopParty && opts.loopParty !== opts.sessionParty) {
-    urls.push(`/api/htlc/history?party=${encodeURIComponent(opts.loopParty)}`);
+  if (opts.sessionAuthed && opts.sessionParty) {
+    urls.push(
+      `/api/htlc/history?party=${encodeURIComponent(opts.sessionParty)}&${pageSuffix}${evmQ}`
+    );
   }
-  if (urls.length === 0) urls.push("/api/htlc/history");
+  if (opts.loopParty && opts.loopParty !== opts.sessionParty) {
+    urls.push(
+      `/api/htlc/history?party=${encodeURIComponent(opts.loopParty)}&${pageSuffix}`
+    );
+  }
+  if (urls.length === 0) urls.push(`/api/htlc/history?${pageSuffix}`);
 
   const results = await Promise.allSettled(urls.map((u) => jget(u)));
   const merged = new Map<string, unknown>();
   let lastError: Error | null = null;
+  let hasMore = false;
   for (const result of results) {
     if (result.status === "rejected") {
       lastError =
@@ -116,6 +134,7 @@ export async function fetchMergedSwapHistory(opts: {
           : new Error(String(result.reason));
       continue;
     }
+    if (result.value.hasMore === true) hasMore = true;
     for (const o of (result.value.orders ?? []) as { id: string }[]) {
       merged.set(o.id, o);
     }
@@ -126,7 +145,7 @@ export async function fetchMergedSwapHistory(opts: {
       (b as { createdAt: number }).createdAt -
       (a as { createdAt: number }).createdAt
   );
-  return { orders };
+  return { orders, hasMore };
 }
 
 export const htlcApi = {
@@ -167,6 +186,14 @@ export const htlcApi = {
     jget(`/api/htlc/${id}${opts?.light ? "?light=1" : ""}`, {
       signal: opts?.signal
     }),
+  counterLockStatus: (
+    id: string
+  ): Promise<{
+    ready: boolean;
+    reason?: string;
+    chainName?: string;
+    chainSlug?: string;
+  }> => jget(`/api/htlc/${id}/counter-lock-status`),
   accept: (id: string) => jpost(`/api/htlc/${id}/accept`),
   recordMainLock: (id: string, mainLockTx: string) =>
     jpost(`/api/htlc/${id}/main-lock`, { mainLockTx }),
@@ -307,6 +334,18 @@ export async function evmClaim(
   preImage: string
 ): Promise<string> {
   return send({ to: escrow, data: encodeClaim(preImage) });
+}
+
+export async function assertReverseCounterLockReadyForClaim(
+  orderId: string
+): Promise<void> {
+  const status = await htlcApi.counterLockStatus(orderId);
+  if (status.ready) return;
+  const chain = status.chainName ?? status.chainSlug ?? "the selected EVM chain";
+  const detail = status.reason ? ` (${status.reason})` : "";
+  throw new Error(
+    `WBTC is not locked on ${chain} for this order yet${detail}. Do not claim this swap until the solver lock is present on the order's EVM chain.`
+  );
 }
 
 /** Refund — retake after the timelock. */
@@ -515,6 +554,7 @@ export async function claimSwap(opts: {
   if (order.direction === "canton-to-evm") {
     if (!opts.send)
       throw new Error("Connect your EVM wallet to claim your WBTC.");
+    await assertReverseCounterLockReadyForClaim(order.id);
     const tx = await evmClaim(opts.send, escrow, preimage);
     const provider = getBrowserEvmProvider();
     if (!provider) throw new Error("no EVM provider");

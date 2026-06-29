@@ -7,7 +7,7 @@
  */
 import { NextResponse } from "next/server";
 import { htlcService } from "@/lib/htlc-service-singleton";
-import { filterHistoryOrders } from "@/lib/htlc-order-logic";
+import { filterHistoryOrders, parsePartyHistoryQuery } from "@/lib/htlc-order-logic";
 import { createSupabaseServerClient, createSupabaseServiceClient } from "@/lib/supabase/server";
 import { requirePartyOwner } from "@/lib/htlc-auth";
 
@@ -30,14 +30,19 @@ export async function GET(req: Request) {
         party = (row?.canton_party_id as string) ?? "";
       }
     }
-    if (!party) return NextResponse.json({ orders: [] });
-    const raw = filterHistoryOrders(await htlcService().historyForParty(party), {
+    if (!party) return NextResponse.json({ orders: [], hasMore: false });
+    const query = parsePartyHistoryQuery(url);
+    const { orders: page, hasMore } = await htlcService().historyForParty(
+      party,
+      query
+    );
+    const raw = filterHistoryOrders(page, {
       userEvmAddress: userEvm,
     });
     const orders = raw.map((o) =>
       o.counterMode === "loop" ? { ...o, networkFeeCc: undefined } : o
     );
-    return NextResponse.json({ orders });
+    return NextResponse.json({ orders, hasMore });
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 500 });
   }

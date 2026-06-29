@@ -155,9 +155,17 @@ export const cantonSwapApi = {
     );
   },
 
-  history(party: string) {
-    return json<{ orders: CantonSwapOrder[] }>(
-      `/api/canton/swap/history?party=${encodeURIComponent(party)}`
+  history(
+    party: string,
+    opts?: { limit?: number; beforeCreatedAt?: number }
+  ) {
+    const q = new URLSearchParams({ party });
+    if (opts?.limit !== undefined) q.set("limit", String(opts.limit));
+    if (opts?.beforeCreatedAt !== undefined) {
+      q.set("before", String(opts.beforeCreatedAt));
+    }
+    return json<{ orders: CantonSwapOrder[]; hasMore: boolean }>(
+      `/api/canton/swap/history?${q}`
     );
   },
 

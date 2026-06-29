@@ -16,7 +16,7 @@ import { Buffer } from "node:buffer";
 
 import { getHoldings } from "./canton";
 import { alert } from "./alert";
-import { chainConfigForOrder } from "./swap-evm";
+import { chainConfigForOrder, enabledHtlcEvmChains } from "./swap-evm";
 import {
   createTransfer,
   findOfferFromSender,
@@ -76,7 +76,8 @@ import {
   readEvmLockMapping,
   verifyForwardRetakeTx,
   verifyReverseClaimTx,
-  verifyReverseCounterLockTx
+  verifyReverseCounterLockTx,
+  detectWrongChainCounterLockTx
 } from "./htlc-evm-counter-lock";
 import type { SwapOrder, SwapStatus, SwapDirection } from "./htlc-types";
 import { fetchTransactionTreeByCommandId, fetchTransactionTreeForOfferAccept } from "./canton-command-recovery";
@@ -704,7 +705,9 @@ class HtlcService {
     ) {
       return o;
     }
-    return this.reconcileLoopForwardCounterDelivery(o);
+    let row = await this.reconcileWrongChainReverseCounterLock(o);
+    row = await this.reconcileLoopForwardCounterDelivery(row);
+    return row;
   }
 
   /** Full reconcile for list/detail views (history, getOrder). */
@@ -953,7 +956,45 @@ class HtlcService {
     }
   }
 
-  /** Sync reverse order state with Base Sepolia — fix phantom locks AND recover after user claim. */
+  /** Roll back counter_locked when the recorded tx mined on the wrong EVM chain. */
+  private async reconcileWrongChainReverseCounterLock(
+    o: SwapOrder
+  ): Promise<SwapOrder> {
+    if (o.direction !== "canton-to-evm" || o.status !== "counter_locked") {
+      return o;
+    }
+    if (!o.counterLockTx || !o.evmChainSlug) return o;
+    const evm = evmProofOptsForOrder(o);
+    try {
+      const lock = await readEvmLockMapping(o.hashLock, evm);
+      if (lock.amount >= BigInt(o.wbtcAmount ?? "0")) return o;
+    } catch {
+      return o;
+    }
+    const wrongChain = await detectWrongChainCounterLockTx(
+      o.counterLockTx,
+      o.evmChainSlug,
+      enabledHtlcEvmChains()
+    );
+    if (!wrongChain) return o;
+    console.warn(
+      `[htlc] wrong-chain counter lock ${o.id.slice(0, 12)} — tx on ${wrongChain}, order bound to ${o.evmChainSlug}`
+    );
+    void alert("warn", "HTLC counter-lock on wrong EVM chain", {
+      order: o.id.slice(0, 18),
+      counterLockTx: o.counterLockTx.slice(0, 18),
+      txChain: wrongChain,
+      orderChain: o.evmChainSlug
+    });
+    o.status = "main_locked";
+    o.counterLockTx = undefined;
+    o.evmFloatReserved = false;
+    return (await this.store.putIfStatus(o, "counter_locked"))
+      ? o
+      : this.must(o.id);
+  }
+
+  /** Sync reverse order state with the order-bound EVM chain — fix phantom locks AND recover after user claim. */
   async reconcilePhantomEvmCounterLock(o: SwapOrder): Promise<SwapOrder> {
     if (o.direction !== "canton-to-evm") return o;
     if (
@@ -976,6 +1017,8 @@ class HtlcService {
 
     if (o.status === "counter_claimed") return o;
 
+    if (o.status !== "counter_locked") return o;
+    o = await this.reconcileWrongChainReverseCounterLock(o);
     if (o.status !== "counter_locked") return o;
     if (!o.wbtcAmount || !o.userEvmAddress || o.solverTimelock == null) {
       return o;
@@ -1107,11 +1150,27 @@ class HtlcService {
       ? o
       : this.must(o.id);
   }
-  /** Order history for one user party (newest first). Reconciles in-flight rows so
-   *  list views match getOrder() proof repair (Loop delivery + EVM main claim). */
-  async historyForParty(party: string): Promise<SwapOrder[]> {
-    const orders = await this.store.byParty(party);
-    return Promise.all(orders.map((o) => this.reconcileOrderIfNeeded(o)));
+  /** Order history for one user party (newest first). Uses light reconcile only —
+   *  no per-row EVM event scans (those belong in getOrder full mode / daemon). */
+  async historyForParty(
+    party: string,
+    query?: import("@/lib/htlc-order-logic").PartyHistoryQuery
+  ): Promise<{ orders: SwapOrder[]; hasMore: boolean }> {
+    const { orders, hasMore } = await this.store.byPartyPage(party, query);
+    const reconciled = await Promise.all(
+      orders.map(async (o) => {
+        if (
+          o.status === "refunded" ||
+          o.status === "cancelled" ||
+          o.status === "failed" ||
+          htlcVisibleCompleted(o)
+        ) {
+          return o;
+        }
+        return this.reconcileOrderLight(o);
+      })
+    );
+    return { orders: reconciled, hasMore };
   }
 
   async accept(id: string) {
@@ -2418,6 +2477,16 @@ class HtlcService {
     const expectedStatus = o.status;
     if (!o.wbtcAmount || !o.userEvmAddress || o.solverTimelock == null) {
       throw new Error("order missing EVM counter-lock fields");
+    }
+    const wrongChain = await detectWrongChainCounterLockTx(
+      counterLockTx,
+      o.evmChainSlug ?? "",
+      enabledHtlcEvmChains()
+    );
+    if (wrongChain) {
+      throw new Error(
+        `counter-lock tx was mined on ${wrongChain} but this order is bound to ${o.evmChainSlug} — start the ${o.evmChainSlug} HTLC daemon and retry`
+      );
     }
     const evm = evmProofOptsForOrder(o);
     try {

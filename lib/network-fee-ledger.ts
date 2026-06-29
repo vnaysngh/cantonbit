@@ -100,3 +100,22 @@ export async function hasNetworkFeeLedgerEntry(
   }
   return !!data;
 }
+
+/** Batch fee-collected lookup for history list views (one query vs N). */
+export async function networkFeeLedgerEntrySet(
+  orderIds: string[],
+  orderKind: "c2c" | "htlc"
+): Promise<Set<string>> {
+  if (orderIds.length === 0) return new Set();
+  const sb = await createSupabaseServiceClient();
+  const { data, error } = await sb
+    .from(TABLE)
+    .select("order_id")
+    .eq("order_kind", orderKind)
+    .in("order_id", orderIds);
+  if (error) {
+    console.warn(`[network-fee-ledger] batch lookup failed: ${error.message}`);
+    throw new NetworkFeeLedgerLookupError(error.message);
+  }
+  return new Set((data ?? []).map((row) => String(row.order_id)));
+}

@@ -78,6 +78,32 @@ export const ORDERS_LIVE_POLL_MAX = 8;
 
 export const ORDERS_LIVE_POLL_MS = 6_000;
 
+/** Default page size for /orders history (HTLC + C2C). */
+export const ORDERS_HISTORY_PAGE_SIZE = 20;
+
+export type PartyHistoryQuery = {
+  limit?: number;
+  /** Unix seconds — return rows strictly older than this cursor. */
+  beforeCreatedAt?: number;
+};
+
+export function parsePartyHistoryQuery(url: URL): PartyHistoryQuery {
+  const limitRaw = url.searchParams.get("limit");
+  const beforeRaw = url.searchParams.get("before");
+  const parsedLimit = limitRaw ? Number.parseInt(limitRaw, 10) : ORDERS_HISTORY_PAGE_SIZE;
+  const parsedBefore = beforeRaw ? Number.parseInt(beforeRaw, 10) : undefined;
+  return {
+    limit:
+      Number.isFinite(parsedLimit) && parsedLimit > 0
+        ? Math.min(parsedLimit, 100)
+        : ORDERS_HISTORY_PAGE_SIZE,
+    beforeCreatedAt:
+      parsedBefore !== undefined && Number.isFinite(parsedBefore)
+        ? parsedBefore
+        : undefined
+  };
+}
+
 /** True when /orders should poll this row (skip abandoned drafts and stale C2C open). */
 export function shouldPollOrderOnOrdersPage(o: {
   id?: string;

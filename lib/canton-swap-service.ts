@@ -1405,8 +1405,11 @@ export class CantonSwapService {
     return n;
   }
 
-  async history(party: string, limit = 50): Promise<CantonSwapOrder[]> {
-    const orders = await this.store.byParty(party, limit);
+  async history(
+    party: string,
+    query?: import("@/lib/htlc-order-logic").PartyHistoryQuery
+  ): Promise<{ orders: CantonSwapOrder[]; hasMore: boolean }> {
+    const { orders, hasMore } = await this.store.byPartyPage(party, query);
     const out: CantonSwapOrder[] = [];
     for (const o of orders) {
       if (
@@ -1422,7 +1425,7 @@ export class CantonSwapService {
         out.push(o);
       }
     }
-    return out;
+    return { orders: out, hasMore };
   }
 
   async markCounterAccepted(id: string): Promise<CantonSwapOrder> {

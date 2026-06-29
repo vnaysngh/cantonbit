@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Start the swap stack for local development:
-#   1. HTLC daemon       (swap-solver/src/htlc-solver-daemon.mts)
+#   1. HTLC daemon(s)    (one per enabled EVM chain — base + arbitrum sepolia on devnet)
 #   2. C2C swap daemon   (swap-solver/src/canton-swap-daemon.mts)
 #   3. Next app          (next dev — the UI, port 3000)
 #
@@ -36,15 +36,20 @@ run() {
   pids+=("$!")
 }
 
-echo "[dev-all] starting HTLC daemon, C2C daemon, and app…"
+echo "[dev-all] starting HTLC daemon(s), C2C daemon, and app…"
 if [ "$NETWORK" = "mainnet" ]; then
   HTLC_SCRIPT="htlc-daemon:mainnet"
   C2C_SCRIPT="canton-swap-daemon:mainnet"
+  ( cd "$SOLVER" && run "htlc" "36" npm run "$HTLC_SCRIPT" )
 else
-  HTLC_SCRIPT="htlc-daemon"
   C2C_SCRIPT="canton-swap-daemon"
+  ( cd "$SOLVER" && run "htlc-base" "36" npm run htlc-daemon )
+  if [ -f "$SOLVER/.env.htlc-arbitrum-sepolia" ]; then
+    ( cd "$SOLVER" && run "htlc-arb" "35" npm run htlc-daemon:arbitrum-sepolia )
+  else
+    echo "[dev-all] skip arbitrum-sepolia HTLC daemon — copy swap-solver/.env.htlc-arbitrum-sepolia.example → .env.htlc-arbitrum-sepolia"
+  fi
 fi
-( cd "$SOLVER" && run "htlc" "36" npm run "$HTLC_SCRIPT" )
 ( cd "$SOLVER" && run "c2c"  "33" npm run "$C2C_SCRIPT" )
 ( cd "$ROOT"   && run "app"  "32" npm run "dev:${NETWORK}" )
 

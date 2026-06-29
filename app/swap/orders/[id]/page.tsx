@@ -140,7 +140,7 @@ function c2cPayReceive(order: CantonSwapOrder): {
 
 function htlcPhase(
   order: SwapOrder,
-  opts?: { claiming?: boolean }
+  opts?: { claiming?: boolean; reverseCounterLockReady?: boolean | null }
 ): "lock" | "solver" | "claim" | "finalize" | "done" {
   if (htlcVisibleCompleted(order)) return "done";
   if (order.status === "main_claimed") return "finalize";
@@ -154,6 +154,13 @@ function htlcPhase(
       return "claim";
     }
     return "finalize";
+  }
+  if (
+    order.direction === "canton-to-evm" &&
+    order.status === "counter_locked" &&
+    opts?.reverseCounterLockReady === false
+  ) {
+    return "solver";
   }
   if (
     isSwapClaimable({
@@ -200,10 +207,12 @@ export default function SwapOrderStatusPage() {
   const [startedAt] = useState(() => Date.now());
   const [finalizeStartedAt, setFinalizeStartedAt] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  const [reverseCounterLockReady, setReverseCounterLockReady] = useState<
+    boolean | null
+  >(null);
   const loadedRef = useRef<LoadedOrder | null>(null);
   const loadInFlightRef = useRef(false);
   const pollAbortRef = useRef<AbortController | null>(null);
-  const pollCountRef = useRef(0);
   const busyRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -282,8 +291,40 @@ export default function SwapOrderStatusPage() {
   );
 
   useEffect(() => {
-    void loadOrder({ force: true });
+    void loadOrder({ force: true, light: true });
   }, [loadOrder]);
+
+  useEffect(() => {
+    if (!loaded || loaded.kind !== "htlc") {
+      setReverseCounterLockReady(null);
+      return;
+    }
+    const order = loaded.order;
+    if (
+      order.direction !== "canton-to-evm" ||
+      order.status !== "counter_locked"
+    ) {
+      setReverseCounterLockReady(null);
+      return;
+    }
+    let alive = true;
+    const poll = () =>
+      htlcApi
+        .counterLockStatus(order.id)
+        .then((status) => {
+          if (!alive) return;
+          setReverseCounterLockReady(status.ready);
+        })
+        .catch(() => {
+          if (alive) setReverseCounterLockReady(false);
+        });
+    void poll();
+    const timer = setInterval(() => void poll(), 6_000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [loaded]);
 
   useEffect(() => {
     if (!loaded || loaded.kind !== "htlc") return;
@@ -336,16 +377,7 @@ export default function SwapOrderStatusPage() {
           ? projectHtlcStatus(cur.order).terminal
           : projectC2cStatus(cur.order).terminal);
       if (terminal) return;
-      pollCountRef.current += 1;
-      const curOrder = loadedRef.current?.kind === "htlc" ? loadedRef.current.order : null;
-      const needsFullReconcile =
-        !!curOrder &&
-        (curOrder.status === "counter_claimed" ||
-          curOrder.status === "main_claimed") &&
-        !projectHtlcStatus(curOrder).proofComplete;
-      await loadOrder({
-        light: !(needsFullReconcile && pollCountRef.current % 2 === 0)
-      });
+      await loadOrder({ light: true });
       if (cancelled) return;
       const delay = pollDelayMs();
       if (delay > 0) timer = setTimeout(() => void tick(), delay);
@@ -603,10 +635,23 @@ export default function SwapOrderStatusPage() {
     const order = loaded.order;
     const reverse = order.direction === "canton-to-evm";
     const claimInFlight = busy === "claim" || busy === "confirming";
-    const phase = htlcPhase(order, { claiming: claimInFlight });
+    const phase = htlcPhase(order, {
+      claiming: claimInFlight,
+      reverseCounterLockReady
+    });
     const stepperPhase = phase === "finalize" ? "done" : phase;
     const { pay, receive } = htlcPayReceive(order);
-    const projected = projectHtlcStatus(order);
+    const projectedBase = projectHtlcStatus(order);
+    const projected =
+      reverse &&
+      order.status === "counter_locked" &&
+      reverseCounterLockReady === false
+        ? {
+            ...projectedBase,
+            label: "Waiting for solver",
+            tone: "waiting" as const
+          }
+        : projectedBase;
     const loopAcceptPending =
       order.direction === "evm-to-canton" &&
       order.counterMode === "loop" &&
@@ -633,6 +678,7 @@ export default function SwapOrderStatusPage() {
     const claimable =
       !claimInFlight &&
       !recordingProof &&
+      (!reverse || reverseCounterLockReady === true) &&
       (loopAcceptPending ||
         isSwapClaimable({
           status: order.status,
@@ -711,6 +757,13 @@ export default function SwapOrderStatusPage() {
           ? "Your Loop transfer was submitted. Waiting for it to become visible on Canton so the swap can continue."
           : "Your CBTC is being locked on Canton by the platform.";
       }
+      if (
+        reverse &&
+        order.status === "counter_locked" &&
+        reverseCounterLockReady === false
+      ) {
+        return `WBTC is not locked on ${evmChain.name} yet. Run the ${evmChain.name} HTLC solver locally (see dev-all / solver:htlc:arbitrum-sepolia).`;
+      }
       return reverse
         ? `Your CBTC is locked. Waiting for the solver to lock WBTC on ${evmChain.name}.`
         : "Your WBTC is locked. The solver is locking CBTC on Canton — usually under a minute.";
@@ -748,7 +801,7 @@ export default function SwapOrderStatusPage() {
           ? ("locking" as const)
           : ("solver" as const)
     };
-  }, [busy, elapsedSec, finalizeStartedAt, loaded, now, startedAt]);
+  }, [busy, elapsedSec, finalizeStartedAt, loaded, now, reverseCounterLockReady, startedAt]);
 
   if (!id) {
     return (

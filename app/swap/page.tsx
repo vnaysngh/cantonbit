@@ -75,6 +75,7 @@ import {
   htlcApi,
   claimSwap,
   evmApproveAndLock,
+  assertReverseCounterLockReadyForClaim,
   evmClaim,
   evmRetake,
   loopSubmitUpdateId
@@ -2019,7 +2020,7 @@ export default function SwapPage() {
         let wbtcAmount = preflight?.wbtcAmount;
         let userEvmAddress = preflight?.userEvmAddress ?? evm.account ?? "";
         let cbtcAmount = preflight?.cbtcAmount;
-        const { order } = await htlcApi.getOrder(swapId).catch(() => ({
+        const { order } = await htlcApi.getOrder(swapId, { light: true }).catch(() => ({
           order: null
         }));
         const o = order as {
@@ -2041,6 +2042,7 @@ export default function SwapPage() {
         }
 
         const preimage = secretToPreimage(secret);
+        await assertReverseCounterLockReadyForClaim(swapId);
         const tx = await evmClaim(
           evm.sendTransaction,
           htlcEscrowForChain(chainConfigForOrder(o ?? {})),
@@ -2365,7 +2367,7 @@ export default function SwapPage() {
       const unlockFailMsg =
         "Could not unlock the saved secret. Connect the same wallet/account or paste it from Orders.";
       try {
-        const { order } = await htlcApi.getOrder(swapId);
+        const { order } = await htlcApi.getOrder(swapId, { light: true });
         const o = order as {
           direction?: "evm-to-canton" | "canton-to-evm";
           counterMode?: "managed" | "loop";
@@ -2406,7 +2408,7 @@ export default function SwapPage() {
           return;
         }
         if (direction === "canton-to-evm") {
-          const { order: ord } = await htlcApi.getOrder(swapId).catch(() => ({
+          const { order: ord } = await htlcApi.getOrder(swapId, { light: true }).catch(() => ({
             order: null
           }));
           const meta = ord as {

@@ -23,6 +23,7 @@ import {
   htlcApi
 } from "@/lib/htlc-client";
 import { cantonSwapApi } from "@/lib/canton-swap-client";
+import type { CantonSwapOrder } from "@/lib/canton-swap-types";
 import {
   cantonSwapPayReceive,
   isCantonSwapHistoryRow,
@@ -33,6 +34,7 @@ import {
 import {
   isSmokeTestOrderId,
   isSwapClaimable,
+  ORDERS_HISTORY_PAGE_SIZE,
   ORDERS_LIVE_POLL_MAX,
   ORDERS_LIVE_POLL_MS,
   htlcUserWbtcClaimTx
@@ -373,6 +375,8 @@ function OrdersPageInner() {
   const [sessionAuthed, setSessionAuthed] = useState(false);
   const [sessionUserId, setSessionUserId] = useState<string | null>(null);
   const [identityProbed, setIdentityProbed] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   useEffect(() => {
     setMounted(true);
@@ -402,7 +406,9 @@ function OrdersPageInner() {
         ? cantonSwapApi
             .get(id)
             .then(({ order }) => mapCantonSwapToHistoryRow(order))
-        : htlcApi.getOrder(id).then(({ order }) => order as HistoryOrder);
+        : htlcApi
+            .getOrder(id, { light: true })
+            .then(({ order }) => order as HistoryOrder);
     void fetchOrder
       .then((row) => {
         if (!alive || !row) return;
@@ -451,7 +457,7 @@ function OrdersPageInner() {
             const { order } = await cantonSwapApi.get(row.id);
             return mapCantonSwapToHistoryRow(order);
           }
-          const { order } = await htlcApi.getOrder(row.id);
+          const { order } = await htlcApi.getOrder(row.id, { light: true });
           return order as HistoryOrder;
         })
       );
@@ -516,36 +522,51 @@ function OrdersPageInner() {
     sessionPartyId: sessionParty
   });
 
+  const mergeHistoryPage = useCallback(
+    async (beforeCreatedAt?: number) => {
+      const pageOpts = {
+        sessionAuthed,
+        sessionParty,
+        loopParty: wallet.partyId,
+        userEvmAddress: sessionAuthed ? evm.account : null,
+        limit: ORDERS_HISTORY_PAGE_SIZE,
+        beforeCreatedAt
+      };
+      const party = sessionParty ?? wallet.partyId;
+      const [htlcPage, c2cPage] = await Promise.all([
+        fetchMergedSwapHistory(pageOpts),
+        party
+          ? cantonSwapApi
+              .history(party, {
+                limit: ORDERS_HISTORY_PAGE_SIZE,
+                beforeCreatedAt
+              })
+              .catch(() => ({ orders: [] as CantonSwapOrder[], hasMore: false }))
+          : Promise.resolve({ orders: [] as CantonSwapOrder[], hasMore: false })
+      ]);
+      const htlcOrders = (htlcPage.orders ?? []).filter(
+        (o) => !isSmokeTestOrderId((o as HistoryOrder).id)
+      ) as HistoryOrder[];
+      const cantonRows = (c2cPage.orders ?? [])
+        .filter((o) => !isSmokeTestOrderId(o.id))
+        .map((o) => mapCantonSwapToHistoryRow(o));
+      const merged = [...htlcOrders, ...cantonRows].sort(
+        (a, b) => b.createdAt - a.createdAt
+      );
+      return { merged, hasMore: htlcPage.hasMore || c2cPage.hasMore };
+    },
+    [sessionAuthed, sessionParty, wallet.partyId, evm.account]
+  );
+
   useEffect(() => {
     if (wallet.isLoading || !identityProbed) return;
     let alive = true;
-    void fetchMergedSwapHistory({
-      sessionAuthed,
-      sessionParty,
-      loopParty: wallet.partyId,
-      userEvmAddress: sessionAuthed ? evm.account : null
-    })
-      .then(async (d) => {
+    setHasMore(false);
+    void mergeHistoryPage()
+      .then(({ merged, hasMore: more }) => {
         if (!alive) return;
-        const htlcOrders = (d.orders ?? []).filter(
-          (o) => !isSmokeTestOrderId((o as HistoryOrder).id)
-        ) as HistoryOrder[];
-        let cantonRows: HistoryOrder[] = [];
-        const party = sessionParty ?? wallet.partyId;
-        if (party) {
-          try {
-            const cs = await cantonSwapApi.history(party);
-            cantonRows = (cs.orders ?? [])
-              .filter((o) => !isSmokeTestOrderId(o.id))
-              .map((o) => mapCantonSwapToHistoryRow(o));
-          } catch {
-            /* optional */
-          }
-        }
-        const merged = [...htlcOrders, ...cantonRows].sort(
-          (a, b) => b.createdAt - a.createdAt
-        );
         setOrders(merged);
+        setHasMore(more);
         setOptimisticStatus((prev) => {
           const next = { ...prev };
           for (const order of merged) {
@@ -580,8 +601,28 @@ function OrdersPageInner() {
     sessionParty,
     evm.account,
     identityProbed,
-    reload
+    reload,
+    mergeHistoryPage
   ]);
+
+  const loadMoreOrders = useCallback(async () => {
+    if (!orders?.length || loadingMore || !hasMore) return;
+    const beforeCreatedAt = orders[orders.length - 1]!.createdAt;
+    setLoadingMore(true);
+    try {
+      const { merged, hasMore: more } = await mergeHistoryPage(beforeCreatedAt);
+      setOrders((prev) => {
+        const byId = new Map((prev ?? []).map((o) => [o.id, o]));
+        for (const o of merged) byId.set(o.id, o);
+        return [...byId.values()].sort((a, b) => b.createdAt - a.createdAt);
+      });
+      setHasMore(more);
+    } catch (e) {
+      setError(getSwapErrorMessage(e));
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [orders, loadingMore, hasMore, mergeHistoryPage]);
 
   // Close the drawer on Escape.
   useEffect(() => {
@@ -949,7 +990,8 @@ function OrdersPageInner() {
         </h1>
         {orders && orders.length > 0 && (
           <span className="text-sm text-foreground/50">
-            {orders.length} swap{orders.length === 1 ? "" : "s"}
+            {orders.length} loaded
+            {hasMore ? "+" : ""}
           </span>
         )}
       </div>
@@ -1093,6 +1135,19 @@ function OrdersPageInner() {
               })}
             </tbody>
           </table>
+        )}
+
+        {orders && orders.length > 0 && hasMore && (
+          <div className="border-t border-foreground/10 px-4 py-4 text-center">
+            <button
+              type="button"
+              onClick={() => void loadMoreOrders()}
+              disabled={loadingMore}
+              className="rounded-xl border border-foreground/15 px-4 py-2 text-sm font-medium text-foreground/80 transition-colors hover:bg-foreground/[0.04] disabled:opacity-50"
+            >
+              {loadingMore ? "Loading…" : "Load more"}
+            </button>
+          </div>
         )}
       </div>
 

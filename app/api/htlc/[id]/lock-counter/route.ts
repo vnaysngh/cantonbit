@@ -18,7 +18,7 @@ export async function POST(
     const auth = requireDaemon(req);
     if (auth.error) return auth.error;
     const svc = htlcService();
-    const existing = await svc.getOrder(id);
+    const existing = await svc.getOrder(id, { mode: "light" });
     if (!existing) return NextResponse.json({ error: "not found" }, { status: 404 });
     assertDaemonOrderChain(req, existing);
     const order =

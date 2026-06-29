@@ -132,7 +132,14 @@ export interface SwapStore {
   byStatus(s: SwapStatus): Promise<SwapOrder[]>;
   active(evmChainSlug?: string): Promise<SwapOrder[]>;
   /** Order history for one user party, newest first. */
-  byParty(party: string, limit?: number): Promise<SwapOrder[]>;
+  byParty(
+    party: string,
+    query?: number | import("@/lib/htlc-order-logic").PartyHistoryQuery
+  ): Promise<SwapOrder[]>;
+  byPartyPage(
+    party: string,
+    query?: import("@/lib/htlc-order-logic").PartyHistoryQuery
+  ): Promise<{ orders: SwapOrder[]; hasMore: boolean }>;
   pendingNetworkFeeAccounting(): Promise<SwapOrder[]>;
   /** Atomically reserve forward CBTC float and transition open -> accepted. */
   acceptWithFloatReservation(
@@ -319,14 +326,34 @@ export class SupabaseSwapStore implements SwapStore {
       needUnits: BigInt(result.needUnits ?? "0")
     };
   }
-  async byParty(party: string, limit = 50): Promise<SwapOrder[]> {
+  async byPartyPage(
+    party: string,
+    query?: import("@/lib/htlc-order-logic").PartyHistoryQuery
+  ): Promise<{ orders: SwapOrder[]; hasMore: boolean }> {
+    const limit = query?.limit ?? 50;
     const sb = await createSupabaseServiceClient();
-    const { data, error } = await sb.from(TABLE).select("*")
+    let q = sb
+      .from(TABLE)
+      .select("*")
       .eq("user_canton_party", party)
       .order("created_at", { ascending: false })
-      .limit(limit);
+      .limit(limit + 1);
+    if (query?.beforeCreatedAt !== undefined) {
+      q = q.lt("created_at", query.beforeCreatedAt);
+    }
+    const { data, error } = await q;
     if (error) throw new Error(`htlc_orders byParty: ${error.message}`);
-    return (data ?? []).map(rowToOrder);
+    const rows = (data ?? []).map(rowToOrder);
+    const hasMore = rows.length > limit;
+    return { orders: hasMore ? rows.slice(0, limit) : rows, hasMore };
+  }
+  async byParty(
+    party: string,
+    query?: number | import("@/lib/htlc-order-logic").PartyHistoryQuery
+  ): Promise<SwapOrder[]> {
+    const normalized =
+      typeof query === "number" ? { limit: query } : query;
+    return (await this.byPartyPage(party, normalized)).orders;
   }
   async pendingNetworkFeeAccounting(): Promise<SwapOrder[]> {
     const sb = await createSupabaseServiceClient();

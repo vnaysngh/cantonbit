@@ -137,7 +137,14 @@ export interface CantonSwapStore {
   byStatus(status: CantonSwapStatus): Promise<CantonSwapOrder[]>;
   /** All user-leg offer CIDs ever linked (including completed). */
   usedUserLegOfferCids(): Promise<Set<string>>;
-  byParty(party: string, limit?: number): Promise<CantonSwapOrder[]>;
+  byParty(
+    party: string,
+    query?: number | import("@/lib/htlc-order-logic").PartyHistoryQuery
+  ): Promise<CantonSwapOrder[]>;
+  byPartyPage(
+    party: string,
+    query?: import("@/lib/htlc-order-logic").PartyHistoryQuery
+  ): Promise<{ orders: CantonSwapOrder[]; hasMore: boolean }>;
   pendingNetworkFeeAccounting(): Promise<CantonSwapOrder[]>;
   /** Atomically reserve current vault float and transition the order. */
   reserveFloat(params: {
@@ -230,16 +237,34 @@ export class SupabaseCantonSwapStore implements CantonSwapStore {
     return (data ?? []).map(rowToOrder);
   }
 
-  async byParty(party: string, limit = 50): Promise<CantonSwapOrder[]> {
+  async byPartyPage(
+    party: string,
+    query?: import("@/lib/htlc-order-logic").PartyHistoryQuery
+  ): Promise<{ orders: CantonSwapOrder[]; hasMore: boolean }> {
+    const limit = query?.limit ?? 50;
     const sb = await createSupabaseServiceClient();
-    const { data, error } = await sb
+    let q = sb
       .from(TABLE)
       .select("*")
       .eq("user_party", party)
       .order("created_at", { ascending: false })
-      .limit(limit);
+      .limit(limit + 1);
+    if (query?.beforeCreatedAt !== undefined) {
+      q = q.lt("created_at", query.beforeCreatedAt);
+    }
+    const { data, error } = await q;
     if (error) throw new Error(enrichSchemaError("byParty", error.message));
-    return (data ?? []).map(rowToOrder);
+    const rows = (data ?? []).map(rowToOrder);
+    const hasMore = rows.length > limit;
+    return { orders: hasMore ? rows.slice(0, limit) : rows, hasMore };
+  }
+  async byParty(
+    party: string,
+    query?: number | import("@/lib/htlc-order-logic").PartyHistoryQuery
+  ): Promise<CantonSwapOrder[]> {
+    const normalized =
+      typeof query === "number" ? { limit: query } : query;
+    return (await this.byPartyPage(party, normalized)).orders;
   }
 
   async pendingNetworkFeeAccounting(): Promise<CantonSwapOrder[]> {

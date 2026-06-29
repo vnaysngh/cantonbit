@@ -555,6 +555,44 @@ export async function evmTxBlockHex(
   return receipt?.blockNumber;
 }
 
+/** True when a tx hash is mined on the given RPC (any chain). */
+export async function evmTxMinedOnRpc(
+  txHash: string,
+  rpcUrl: string
+): Promise<boolean> {
+  if (!txHash.startsWith("0x") || txHash.length !== 66) return false;
+  const receipt = await rpcCall<RpcReceipt | null>(
+    "eth_getTransactionReceipt",
+    [txHash],
+    rpcUrl
+  );
+  return receipt?.status === "0x1";
+}
+
+/** Scan enabled chains for where a tx hash was mined (first match). */
+export async function findEvmTransactionChainSlug(
+  txHash: string,
+  chains: Array<{ slug: string; rpcUrls: string[] }>
+): Promise<string | undefined> {
+  for (const chain of chains) {
+    const rpc = chain.rpcUrls[0]?.trim();
+    if (!rpc) continue;
+    if (await evmTxMinedOnRpc(txHash, rpc)) return chain.slug;
+  }
+  return undefined;
+}
+
+/** When counterLockTx mined on a chain other than the order's bound chain. */
+export async function detectWrongChainCounterLockTx(
+  counterLockTx: string,
+  orderChainSlug: string,
+  chains: Array<{ slug: string; rpcUrls: string[] }>
+): Promise<string | undefined> {
+  const minedOn = await findEvmTransactionChainSlug(counterLockTx, chains);
+  if (!minedOn || minedOn === orderChainSlug) return undefined;
+  return minedOn;
+}
+
 function receiptHasHashLockEvent(
   receipt: RpcReceipt,
   hashLock: string,
