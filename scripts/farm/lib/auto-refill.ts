@@ -55,7 +55,8 @@ function needsTraderCbtc(msg: string): boolean {
   if (needsVaultCacheRefresh(msg)) return false;
   return (
     /CBTC→CC: traders=0\//i.test(msg) ||
-    (/need [\d.]+/i.test(msg) && /CBTC→CC/i.test(msg))
+    (/need [\d.]+/i.test(msg) && /CBTC→CC/i.test(msg)) ||
+    /insufficient CBTC/i.test(msg)
   );
 }
 
@@ -65,7 +66,9 @@ function needsTraderCbtc(msg: string): boolean {
  */
 export function tryAutoRefillFromPlanError(msg: string): AutoRefillResult {
   const empty: AutoRefillResult = { ran: false, output: "" };
-  if (!/no viable swap/i.test(msg)) return empty;
+  const isPlanBlock = /no viable swap/i.test(msg);
+  const isSwapBlock = /insufficient CBTC/i.test(msg);
+  if (!isPlanBlock && !isSwapBlock) return empty;
   if (Date.now() - lastRefillAt < REFILL_COOLDOWN_MS) {
     console.warn(
       `  auto-refill skipped: cooldown (${Math.round((REFILL_COOLDOWN_MS - (Date.now() - lastRefillAt)) / 1000)}s left)`

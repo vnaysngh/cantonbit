@@ -395,6 +395,7 @@ export async function planNextSwap(params: {
   });
 
   if (candidates.length === 0) {
+    // Never unlock CBTC→CC on fallback — traders may be starved after a CBTC leg.
     candidates = buildCandidates({
       float,
       fleet: params.fleet,
@@ -402,7 +403,7 @@ export async function planNextSwap(params: {
       quotes,
       state: { ...effectiveState, lastDirection: undefined },
       vaultCbtcSpendable,
-      prioritizeCcToCbtc
+      prioritizeCcToCbtc: true
     });
   }
 

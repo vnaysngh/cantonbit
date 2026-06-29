@@ -52,7 +52,12 @@ export function defaultPacing(): PacingConfig {
     calibrateEvery: 5,
     minIntervalSec: 20,
     maxIntervalSec: 600,
-    cbtcInAmount: "0.000001",
+    // CBTC→CC sell size. The CC→CBTC return-leg size is NOT fixed at this CC
+    // value — it is quote-matched to this leg's CC output via
+    // balancePacingAmounts() so a full round-trip returns the SAME CBTC and the
+    // vault/traders never drift/drain. ccInAmount below is only the pre-balance
+    // seed for the very first CC→CBTC before the live quote is read.
+    cbtcInAmount: "0.000025",
     ccInAmount: "10",
     cbtcDirectionBias: 0.5,
     refillBytesPerSec: 333

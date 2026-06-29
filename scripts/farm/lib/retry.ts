@@ -50,7 +50,14 @@ export function isTransientError(err: unknown): boolean {
     "503",
     "504",
     "aborted",
-    "lighthouse fetch failed"
+    "lighthouse fetch failed",
+    // Node free-traffic bucket temporarily exhausted — refills over time, so
+    // backing off and retrying lets a slightly-too-big tx through once the base
+    // traffic remainder regenerates above its byte cost.
+    "traffic rejection",
+    "sequencer_request_failed",
+    "not_enough_traffic_credit",
+    "abovetrafficlimit"
   ];
   return transient.some((t) => combined.includes(t));
 }

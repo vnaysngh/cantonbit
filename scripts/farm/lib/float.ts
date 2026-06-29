@@ -1,4 +1,4 @@
-import { toBaseUnitsFloor } from "../../../lib/amount-units";
+import { fromBaseUnits, toBaseUnitsFloor } from "../../../lib/amount-units";
 import { CBTC_ASSET, CC_ASSET } from "../../../lib/canton-assets";
 import type { FarmAsset, FarmFleetConfig } from "./types";
 import { cbtcBalance, ccBalance, countHoldings, holdingsForAsset } from "./ledger";
@@ -45,7 +45,7 @@ export async function checkTraderFloat(params: {
   if (total < need) {
     return {
       ok: false,
-      reason: `trader insufficient ${params.fromAsset}: have ${total}, need ${need}`
+      reason: `trader insufficient ${params.fromAsset}: have ${fromBaseUnits(total, asset.decimals)}, need ${params.inAmount}`
     };
   }
   return { ok: true };

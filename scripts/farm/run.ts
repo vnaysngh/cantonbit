@@ -27,6 +27,7 @@ import {
   applySwapToFloat,
   applyTraderCbtcFundToFloat,
   applyVaultFundToFloat,
+  balancePacingAmounts,
   loadFleetFloat,
   planNextSwap,
   type FleetFloatSnapshot,
@@ -262,6 +263,26 @@ export async function runFarmBot(): Promise<void> {
   const maxSwaps = parseNumberArg("max-swaps", 0);
   const dryRun = parseFlag("dry-run");
 
+  // ROUND-TRIP CONSERVATION: match the CC→CBTC return-leg size to the live CC
+  // output of the CBTC→CC leg, so a trader's CBTC→CC then CC→CBTC returns the
+  // SAME CBTC and the vault/traders never drift/drain. Without this the two legs
+  // are independent fixed amounts (e.g. 0.000025 CBTC vs a flat 10 CC) and every
+  // round-trip leaks, eventually starving one side. Skip only when the operator
+  // explicitly pins --cc-in. Re-balanced periodically (calibration cycle) as the
+  // quote moves.
+  const ccInPinned = parseFlag("cc-in") || process.argv.some((a) => a.startsWith("--cc-in"));
+  if (!ccInPinned) {
+    try {
+      pacing = await balancePacingAmounts(pacing);
+      console.log(
+        `Balanced round-trip: ${pacing.cbtcInAmount} CBTC↔${pacing.ccInAmount} CC (CC matched to CBTC→CC output)`
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn(`  pacing balance skipped (using seed ccInAmount): ${msg.slice(0, 120)}`);
+    }
+  }
+
   let bytesPerSwap = resolveBytesPerSwap(
     pacing.bytesPerSwap,
     fleet.calibration?.bytesPerSwap
@@ -496,6 +517,25 @@ export async function runFarmBot(): Promise<void> {
             `  recalibrated bytes/swap≈${Math.round(bytesPerSwap)} meanInterval≈${Math.round(meanInterval)}s (lighthouse)`
           );
         }
+
+        // Re-match the CC return-leg size to the moved quote so the round-trip
+        // stays conserving as the CBTC/CC price drifts during a long run.
+        if (!ccInPinned) {
+          try {
+            const rebalanced = await balancePacingAmounts(pacing);
+            if (rebalanced.ccInAmount !== pacing.ccInAmount) {
+              pacing = rebalanced;
+              cachedFloat = null; // float thresholds depend on leg sizes — re-read
+              console.log(
+                `  rebalanced round-trip CC→CBTC in=${pacing.ccInAmount} (matched to ${pacing.cbtcInAmount} CBTC→CC output)`
+              );
+            }
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            console.warn(`  pacing rebalance skipped: ${msg.slice(0, 100)}`);
+          }
+        }
+
         calibrateSwaps = 0;
         calibrateStartConsumed = consumed;
       }
@@ -504,6 +544,21 @@ export async function runFarmBot(): Promise<void> {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`✗ swap failed: ${msg.slice(0, 200)}`);
+      if (/insufficient|float check failed/i.test(msg)) {
+        cachedFloat = null;
+        if (/insufficient CBTC/i.test(msg)) {
+          plannerState = { ...plannerState, lastDirection: "CBTC→CC" };
+        }
+        const refill = tryAutoRefillFromPlanError(msg);
+        if (refill.ran) {
+          console.log("  auto-refill triggered after float failure");
+          if (refill.cacheRefreshNeeded) {
+            await runWithLedgerReadSession(jwt, () =>
+              refreshVaultCbtcCacheIfEmpty(jwt, fleet.vault)
+            ).catch(() => undefined);
+          }
+        }
+      }
       if (isAcsLimitError(e) || needsUtxoConsolidation(e)) {
         try {
           await recoverFromUtxoPressure(

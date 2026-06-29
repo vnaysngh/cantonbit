@@ -12,8 +12,14 @@ import {
   submitLedgerCommands
 } from "./ledger";
 import {
+  configureVaultCbtcCache,
+  ensureVaultCbtcCacheReady,
+  getVaultCbtcCachedHoldings,
   ingestVaultCbtcFromSubmit,
-  isVaultCbtcCacheParty
+  isStaleVaultHoldingError,
+  isVaultCbtcCacheParty,
+  pickVaultCbtcInputsForAmount,
+  removeVaultCbtcFromCache
 } from "./vault-cbtc-holdings";
 
 export type FarmAsset = "CBTC" | "CC";
@@ -88,53 +94,80 @@ export async function consolidatePartyAsset(params: {
     }
 
     const reg = await registrarForAsset(params.jwt, params.asset);
-    const leg = await buildTransferExercise({
-      jwt: params.jwt,
-      senderParty: params.party,
-      receiverParty: params.party,
-      amount,
-      inputHoldings: batch,
-      useAllInputHoldings: true,
-      instrumentId: reg.instrumentId,
-      registrarAdmin: reg.admin,
-      registryKind: reg.kind,
-      assetSymbol: params.asset,
-      memo: "farm-utxo-consolidate"
-    });
+    const isVaultCbtc =
+      params.asset === "CBTC" && isVaultCbtcCacheParty(params.party);
+    const maxAttempts = isVaultCbtc ? 8 : 1;
+    let merged = false;
 
-    const cmdId = `farm-consolidate-${params.asset}-${params.party.slice(0, 12)}-${Date.now()}`;
-    const { updateId, eventsById } = await submitLedgerCommands({
-      jwt: params.jwt,
-      actAs: [params.party],
-      commands: [leg.command],
-      disclosedContracts: leg.disclosedContracts,
-      commandId: cmdId,
-      synchronizerId: leg.synchronizerId,
-      workflowId: cmdId
-    });
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      let inputHoldings = batch;
+      if (isVaultCbtc) {
+        await ensureVaultCbtcCacheReady(params.jwt, params.party);
+        const cached = getVaultCbtcCachedHoldings();
+        if (cached.length > 0) {
+          inputHoldings = pickVaultCbtcInputsForAmount(cached, amount);
+        }
+      }
 
-    if (
-      params.asset === "CBTC" &&
-      isVaultCbtcCacheParty(params.party) &&
-      updateId
-    ) {
-      await ingestVaultCbtcFromSubmit({
-        jwt: params.jwt,
-        vaultParty: params.party,
-        updateId,
-        submitEventsById: eventsById
-      });
+      try {
+        const leg = await buildTransferExercise({
+          jwt: params.jwt,
+          senderParty: params.party,
+          receiverParty: params.party,
+          amount,
+          inputHoldings,
+          useAllInputHoldings: true,
+          instrumentId: reg.instrumentId,
+          registrarAdmin: reg.admin,
+          registryKind: reg.kind,
+          assetSymbol: params.asset,
+          memo: "farm-utxo-consolidate"
+        });
+
+        const cmdId = `farm-consolidate-${params.asset}-${params.party.slice(0, 12)}-${Date.now()}`;
+        const { updateId, eventsById } = await submitLedgerCommands({
+          jwt: params.jwt,
+          actAs: [params.party],
+          commands: [leg.command],
+          disclosedContracts: leg.disclosedContracts,
+          commandId: cmdId,
+          synchronizerId: leg.synchronizerId,
+          workflowId: cmdId
+        });
+
+        if (isVaultCbtc && updateId) {
+          await ingestVaultCbtcFromSubmit({
+            jwt: params.jwt,
+            vaultParty: params.party,
+            updateId,
+            submitEventsById: eventsById
+          });
+        }
+
+        try {
+          const after = await countHoldings(params.jwt, params.party);
+          const utxoAfter = params.asset === "CBTC" ? after.cbtc : after.cc;
+          console.log(
+            `  ✓ ${params.label}: ${params.asset} UTXO ${batch.length} → ${utxoAfter} (${isDirectTransferKind(leg.transferKind) ? "direct" : "offer path"})`
+          );
+        } catch {
+          console.log(`  ✓ ${params.label}: merged ${batch.length} ${params.asset} UTXO(s)`);
+        }
+
+        merged = true;
+        break;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (isVaultCbtc && isStaleVaultHoldingError(msg) && attempt < maxAttempts) {
+          removeVaultCbtcFromCache(inputHoldings.map((h) => h.contractId));
+          console.warn(`  ${params.label}: consolidate retry ${attempt} (stale UTXO)`);
+          continue;
+        }
+        throw e;
+      }
     }
 
-    try {
-      const after = await countHoldings(params.jwt, params.party);
-      const utxoAfter = params.asset === "CBTC" ? after.cbtc : after.cc;
-      console.log(
-        `  ✓ ${params.label}: ${params.asset} UTXO ${batch.length} → ${utxoAfter} (${isDirectTransferKind(leg.transferKind) ? "direct" : "offer path"})`
-      );
-    } catch {
-      console.log(`  ✓ ${params.label}: merged ${batch.length} ${params.asset} UTXO(s)`);
-    }
+    if (!merged) break;
 
     merges++;
     if (holdings.length <= batchLimit) break;
@@ -154,6 +187,7 @@ export async function consolidateVaultUtxos(params: {
   const minUtxo = params.minUtxo ?? 2;
   const reason = params.reason ? ` (${params.reason})` : "";
   console.log(`Consolidate vault${reason}: minUtxo=${minUtxo}`);
+  configureVaultCbtcCache(params.fleet.vault);
 
   let total = 0;
   for (const asset of ["CC", "CBTC"] as const) {
