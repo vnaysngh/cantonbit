@@ -61,3 +61,26 @@ test("assertMainnetAllowed: allows mainnet when opted in", async () => {
     else process.env.ALLOW_MAINNET = prev;
   }
 });
+
+test("resolveWbtcAddress: chain-specific wins over generic WBTC_ADDRESS", async () => {
+  const prev = {
+    generic: process.env.WBTC_ADDRESS,
+    arb: process.env.WBTC_ADDRESS_ARBITRUM_SEPOLIA,
+  };
+  process.env.WBTC_ADDRESS = "0x8d587e55236d1d4898e85711f709e53e657413ee";
+  process.env.WBTC_ADDRESS_ARBITRUM_SEPOLIA =
+    "0x9d5e24f388c3821f26eb82239a25016979f5a331";
+  try {
+    const { getAddress } = await import("viem");
+    const { resolveWbtcAddress } = await import("./htlc-evm-chain.js");
+    assert.equal(
+      resolveWbtcAddress("arbitrum-sepolia"),
+      getAddress("0x9d5e24f388c3821f26eb82239a25016979f5a331"),
+    );
+  } finally {
+    if (prev.generic === undefined) delete process.env.WBTC_ADDRESS;
+    else process.env.WBTC_ADDRESS = prev.generic;
+    if (prev.arb === undefined) delete process.env.WBTC_ADDRESS_ARBITRUM_SEPOLIA;
+    else process.env.WBTC_ADDRESS_ARBITRUM_SEPOLIA = prev.arb;
+  }
+});

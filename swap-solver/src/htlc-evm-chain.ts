@@ -130,16 +130,8 @@ export function resolveWbtcAddress(slug: EvmChainSlug): Address {
     process.env[`NEXT_PUBLIC_WBTC_${suffix}`];
   const generic =
     process.env.WBTC_ADDRESS ?? process.env.NEXT_PUBLIC_WBTC_ADDRESS;
-  if (chainSpecific && generic) {
-    const chainSpecificAddress = getAddress(chainSpecific);
-    const genericAddress = getAddress(generic);
-    if (chainSpecificAddress.toLowerCase() !== genericAddress.toLowerCase()) {
-      throw new Error(
-        `WBTC_ADDRESS conflicts with WBTC_ADDRESS_${suffix}; remove the generic value or make them match`
-      );
-    }
-    return chainSpecificAddress;
-  }
+  // Chain-specific wins — .env.devnet keeps generic WBTC_ADDRESS for the web app's
+  // default chain (Base) while per-chain daemons set EVM_CHAIN + WBTC_ADDRESS_* .
   if (chainSpecific) return getAddress(chainSpecific);
   if (generic) return getAddress(generic);
   if (slug === "base-sepolia" || slug === "arbitrum-sepolia") {
