@@ -28,6 +28,7 @@ import { cantonQuoteUnavailableUserMessage } from "@/lib/canton-quote-messages";
 import type { CantonSwapMvpAssetId } from "@/lib/canton-swap-types";
 import { assertSwapPayAmountLimit } from "@/lib/swap-amount-limits";
 import { NETWORK } from "@/lib/constants";
+import { c2cDisabledResponse } from "@/lib/swap-feature-flags-server";
 
 export const dynamic = "force-dynamic";
 
@@ -46,6 +47,8 @@ function impliedPrice(outAmount: string, inAmount: string): string | undefined {
 }
 
 export async function POST(req: Request) {
+  const blocked = c2cDisabledResponse();
+  if (blocked) return blocked;
   try {
     const body = await req.json();
     const fromAsset = parseMvpAsset(body.fromAsset);

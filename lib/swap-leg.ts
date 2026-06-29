@@ -60,12 +60,21 @@ export function wbtcPickerBlocked(otherLeg?: SwapLeg): boolean {
   return false;
 }
 
+export type SwapFeatureFlags = {
+  crossChainEnabled?: boolean;
+  c2cEnabled?: boolean;
+};
+
 /** Whether a token row is disabled in the picker. */
 export function swapLegPickerDisabled(
   candidate: SwapLeg,
-  otherLeg?: SwapLeg
+  otherLeg?: SwapLeg,
+  flags?: SwapFeatureFlags
 ): boolean {
+  const crossChainEnabled = flags?.crossChainEnabled ?? true;
+  const c2cEnabled = flags?.c2cEnabled ?? true;
   if (candidate.chain === "evm") {
+    if (!crossChainEnabled) return true;
     if (otherLeg?.chain === "evm") return true;
     if (
       otherLeg?.chain === "canton" &&
@@ -74,6 +83,14 @@ export function swapLegPickerDisabled(
       return true;
     }
     return false;
+  }
+
+  if (
+    otherLeg?.chain === "canton" &&
+    candidate.chain === "canton" &&
+    !c2cEnabled
+  ) {
+    return true;
   }
 
   if (otherLeg?.chain === "canton" && otherLeg.token === candidate.token) {
@@ -115,10 +132,32 @@ export function alternateCantonToken(
 export function normalizeSwapLegs(
   pay: SwapLeg,
   receive: SwapLeg,
-  enabledCanton: CantonSwapAssetId[] = ["CBTC", "CC", "USDCX"]
+  enabledCanton: CantonSwapAssetId[] = ["CBTC", "CC", "USDCX"],
+  flags?: SwapFeatureFlags
 ): { pay: SwapLeg; receive: SwapLeg } {
+  const crossChainEnabled = flags?.crossChainEnabled ?? true;
+  const c2cEnabled = flags?.c2cEnabled ?? true;
   let p = pay;
   let r = receive;
+
+  if (!crossChainEnabled && !c2cEnabled) {
+    return { pay: p, receive: r };
+  }
+
+  if (!crossChainEnabled && (p.chain === "evm" || r.chain === "evm")) {
+    p = { chain: "canton", token: CROSS_CHAIN_CANTON_ASSET };
+    r = {
+      chain: "canton",
+      token: alternateCantonToken(CROSS_CHAIN_CANTON_ASSET, enabledCanton)
+    };
+  }
+
+  if (!c2cEnabled && p.chain === "canton" && r.chain === "canton") {
+    if (crossChainEnabled) {
+      p = { chain: "evm", token: "WBTC" };
+      r = { chain: "canton", token: CROSS_CHAIN_CANTON_ASSET };
+    }
+  }
 
   if (p.chain === "evm" && r.chain === "evm") {
     r = { chain: "canton", token: CROSS_CHAIN_CANTON_ASSET };
@@ -149,11 +188,12 @@ export function applyLegChange(
   next: SwapLeg,
   pay: SwapLeg,
   receive: SwapLeg,
-  enabledCanton: CantonSwapAssetId[] = ["CBTC", "CC", "USDCX"]
+  enabledCanton: CantonSwapAssetId[] = ["CBTC", "CC", "USDCX"],
+  flags?: SwapFeatureFlags
 ): { pay: SwapLeg; receive: SwapLeg } {
   const draftPay = side === "pay" ? next : pay;
   const draftReceive = side === "receive" ? next : receive;
-  return normalizeSwapLegs(draftPay, draftReceive, enabledCanton);
+  return normalizeSwapLegs(draftPay, draftReceive, enabledCanton, flags);
 }
 
 export function legDisplay(leg: SwapLeg): { token: string; network: string } {

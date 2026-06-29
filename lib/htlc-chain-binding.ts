@@ -1,5 +1,6 @@
 import {
-  assertEnabledHtlcChain,
+  assertConfiguredHtlcChain,
+  assertHtlcChainEnabledForIntake,
   chainConfigForOrder,
   type SwapChain
 } from "./swap-evm";
@@ -15,7 +16,7 @@ export function bindEnabledHtlcEvmChain(slug?: string | null): {
   chain: SwapChain;
   fields: HtlcEvmChainBinding;
 } {
-  const chain = assertEnabledHtlcChain(slug);
+  const chain = assertHtlcChainEnabledForIntake(slug);
   if (!chain.escrow?.trim()) {
     throw new Error(`HTLC escrow not configured for ${chain.slug}`);
   }
@@ -44,7 +45,7 @@ export function assertOrderChainMatchesRequest(
 ): void {
   if (!requestedSlug) return;
   const orderChain = chainConfigForOrder(order);
-  const requestChain = assertEnabledHtlcChain(requestedSlug);
+  const requestChain = assertConfiguredHtlcChain(requestedSlug);
   if (orderChain.slug !== requestChain.slug) {
     throw new Error(
       `EVM chain mismatch: order is ${orderChain.slug}, request is ${requestChain.slug}`

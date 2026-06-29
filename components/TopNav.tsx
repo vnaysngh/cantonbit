@@ -11,7 +11,8 @@ import { useCantonIdentity } from "@/hooks/useCantonIdentity";
 import { useWallet } from "@/hooks/useWallet";
 import { useEvmWallet } from "@/hooks/useEvmWallet";
 import { useBalance } from "@/hooks/useBalance";
-import { SWAP_CHAINS, SWAP_CHAIN, enabledHtlcEvmChains } from "@/lib/swap-evm";
+import { useEnabledHtlcEvmChains } from "@/hooks/useSwapFeatureFlags";
+import { SWAP_CHAINS, SWAP_CHAIN } from "@/lib/swap-evm";
 import { formatCc } from "@/lib/format";
 import { truncateEvmAddress, truncatePartyId } from "@/lib/party-display";
 import { cn } from "@/lib/utils";
@@ -65,7 +66,7 @@ function NavLinks({ pathname }: { pathname: string }) {
 export function TopNav() {
   const pathname = usePathname();
   const evm = useEvmWallet();
-  const enabledEvmChains = enabledHtlcEvmChains();
+  const enabledEvmChains = useEnabledHtlcEvmChains();
   const enabledEvmChainIds = new Set(enabledEvmChains.map((chain) => chain.id));
   const connectedEvmChain =
     evm.chainId == null

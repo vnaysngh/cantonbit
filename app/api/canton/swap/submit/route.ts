@@ -8,6 +8,7 @@ import type { CantonSwapMvpAssetId } from "@/lib/canton-swap-types";
 import { isParticipantManagedParty, requirePartyOwner } from "@/lib/htlc-auth";
 import { CantonQuoteUnavailableError } from "@/lib/canton-quote";
 import { distributedRateLimitOk } from "@/lib/api-rate-limit";
+import { c2cDisabledResponse } from "@/lib/swap-feature-flags-server";
 
 export const dynamic = "force-dynamic";
 
@@ -17,6 +18,8 @@ function parseAsset(raw: unknown): CantonSwapMvpAssetId | null {
 }
 
 export async function POST(req: Request) {
+  const blocked = c2cDisabledResponse();
+  if (blocked) return blocked;
   try {
     const body = await req.json();
     const fromAsset = parseAsset(body.fromAsset);

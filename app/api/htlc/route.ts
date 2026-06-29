@@ -29,10 +29,13 @@ import {
 } from "@/lib/canton-network-fee";
 import { distributedRateLimitOk } from "@/lib/api-rate-limit";
 import { bindEnabledHtlcEvmChain } from "@/lib/htlc-chain-binding";
+import { crossChainDisabledResponse } from "@/lib/swap-feature-flags-server";
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
+    const blocked = crossChainDisabledResponse(body.evmChain);
+    if (blocked) return blocked;
     const direction = String(body.direction ?? "");
     if (!body.id || !body.hashLock || !direction) {
       return NextResponse.json({ error: "missing id / direction / hashLock" }, { status: 400 });

@@ -60,7 +60,6 @@ import {
   encodeAllowance,
   encodeBalanceOf,
   decodeUint,
-  enabledHtlcEvmChains,
   formatWbtc,
   parseWbtc,
   resolveHtlcChainConfig,
@@ -141,8 +140,20 @@ import type { SwapLeg } from "@/lib/swap-leg";
 import {
   applyLegChange,
   normalizeSwapLegs,
-  resolveSwapKind
+  resolveSwapKind,
+  type SwapFeatureFlags
 } from "@/lib/swap-leg";
+import { envFlagEnabled } from "@/lib/env-flag-enabled";
+import {
+  crossChainSwapDisabledMessage,
+  c2cSwapDisabledMessage,
+  type SwapFeatureFlagsSnapshot
+} from "@/lib/swap-feature-flags";
+import {
+  useEnabledHtlcEvmChains,
+  useSwapFeatureFlags,
+  useSwapLegFeatureFlags
+} from "@/hooks/useSwapFeatureFlags";
 import { formatCantonQuoteError } from "@/lib/canton-quote-messages";
 import { formatSettlementError } from "@/lib/swap-settlement-messages";
 import {
@@ -161,13 +172,28 @@ import {
   extractSubmitUpdateId
 } from "@/lib/mint-processor-logic";
 
-function publicEnvFlagEnabled(raw: string | undefined): boolean {
-  if (raw == null || raw.trim() === "") return true;
-  const v = raw.trim().replace(/\s+#.*$/, "").trim().toLowerCase();
-  return v === "1" || v === "true" || v === "yes";
+function initialSwapLegs(
+  flags: SwapFeatureFlagsSnapshot
+): { pay: SwapLeg; receive: SwapLeg } {
+  if (flags.crossChainEnabled) {
+    return {
+      pay: { chain: "evm", token: "WBTC" },
+      receive: { chain: "canton", token: "CBTC" }
+    };
+  }
+  if (flags.c2cEnabled) {
+    return {
+      pay: { chain: "canton", token: "CBTC" },
+      receive: { chain: "canton", token: "CC" }
+    };
+  }
+  return {
+    pay: { chain: "canton", token: "CBTC" },
+    receive: { chain: "canton", token: "CC" }
+  };
 }
 
-const NETWORK_FEE_UI_ENABLED = publicEnvFlagEnabled(
+const NETWORK_FEE_UI_ENABLED = envFlagEnabled(
   process.env.NEXT_PUBLIC_NETWORK_FEE_ENABLED
 );
 
@@ -338,6 +364,13 @@ type Stage =
 const FEE_BPS = DEFAULT_PLATFORM_FEE_BPS;
 
 export default function SwapPage() {
+  const swapFlags = useSwapFeatureFlags();
+  const swapLegFlags = useSwapLegFeatureFlags();
+  const enabledEvmChains = useEnabledHtlcEvmChains();
+  const crossChainSwapsEnabled = swapFlags.crossChainEnabled;
+  const c2cSwapsEnabled = swapFlags.c2cEnabled;
+  const initialLegs = initialSwapLegs(swapFlags);
+
   const evm = useEvmWallet();
   const wallet = useWallet();
   const {
@@ -409,15 +442,8 @@ export default function SwapPage() {
   // downstream logic (receiveEstimate, amountState) already treats "" as not-set.
   const [amount, setAmount] = useState("");
   /** Pay / receive legs — network + token selectors on the unified swap card. */
-  const [payLeg, setPayLeg] = useState<SwapLeg>({
-    chain: "evm",
-    token: "WBTC"
-  });
-  const [receiveLeg, setReceiveLeg] = useState<SwapLeg>({
-    chain: "canton",
-    token: "CBTC"
-  });
-  const enabledEvmChains = useMemo(() => enabledHtlcEvmChains(), []);
+  const [payLeg, setPayLeg] = useState<SwapLeg>(initialLegs.pay);
+  const [receiveLeg, setReceiveLeg] = useState<SwapLeg>(initialLegs.receive);
   const [selectedEvmChainSlug, setSelectedEvmChainSlug] = useState<string>(
     initialSelectedEvmChainSlug
   );
@@ -469,7 +495,8 @@ export default function SwapPage() {
         next,
         payLeg,
         receiveLeg,
-        enabledCantonIds
+        enabledCantonIds,
+        swapLegFlags
       );
       setPayLeg(pay);
       setReceiveLeg(receive);
@@ -485,7 +512,8 @@ export default function SwapPage() {
         next,
         payLeg,
         receiveLeg,
-        enabledCantonIds
+        enabledCantonIds,
+        swapLegFlags
       );
       setPayLeg(pay);
       setReceiveLeg(receive);
@@ -1024,6 +1052,15 @@ export default function SwapPage() {
 
   // --- 1. quote (cross-chain + canton-to-canton) ---
   const handleQuote = useCallback(async () => {
+    if (isC2c && !c2cSwapsEnabled) {
+      fail(c2cSwapDisabledMessage());
+      return;
+    }
+    if (!isC2c && !crossChainSwapsEnabled) {
+      fail(crossChainSwapDisabledMessage(selectedEvmChain.slug));
+      return;
+    }
+
     if (swapKind === "invalid-evm-evm") {
       fail("Same-chain EVM swaps aren't supported yet.");
       return;
@@ -2857,6 +2894,24 @@ export default function SwapPage() {
         onClick: () => {},
         disabled: true
       };
+    } else if (!crossChainSwapsEnabled && !c2cSwapsEnabled) {
+      primary = {
+        label: "Swaps temporarily unavailable",
+        onClick: () => {},
+        disabled: true
+      };
+    } else if (isC2c && !c2cSwapsEnabled) {
+      primary = {
+        label: "C2C swaps unavailable",
+        onClick: () => {},
+        disabled: true
+      };
+    } else if (!isC2c && !crossChainSwapsEnabled) {
+      primary = {
+        label: "Cross-chain swaps unavailable",
+        onClick: () => {},
+        disabled: true
+      };
     } else if (swapKind === "invalid-evm-evm") {
       primary = {
         label: "Same-chain EVM swaps not supported",
@@ -2946,6 +3001,16 @@ export default function SwapPage() {
         </h1>
       )}
 
+      {( !crossChainSwapsEnabled || !c2cSwapsEnabled) && showForm && (
+        <div className="mb-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-foreground">
+          {!crossChainSwapsEnabled && !c2cSwapsEnabled
+            ? "New swaps are temporarily unavailable. In-flight orders can still be completed from Orders."
+            : !crossChainSwapsEnabled
+              ? `${crossChainSwapDisabledMessage()} C2C swaps on Canton remain available.`
+              : `${c2cSwapDisabledMessage()} Cross-chain swaps remain available.`}
+        </div>
+      )}
+
       <div className="rounded-3xl border border-foreground/10 bg-card p-4 shadow-sm sm:p-5">
         {stage.kind === "redirecting" && (
           <div className="flex justify-center px-1 py-10">
@@ -2984,6 +3049,7 @@ export default function SwapPage() {
                 setWbtcBalanceStatus("loading");
                 setWbtcBalanceError(null);
               }}
+              swapFeatureFlags={swapLegFlags}
             />
 
             <div className="relative z-10 -my-3 flex justify-center">
@@ -2994,7 +3060,8 @@ export default function SwapPage() {
                   const { pay, receive } = normalizeSwapLegs(
                     receiveLeg,
                     payLeg,
-                    enabledCantonIds
+                    enabledCantonIds,
+                    swapLegFlags
                   );
                   setPayLeg(pay);
                   setReceiveLeg(receive);
@@ -3032,6 +3099,7 @@ export default function SwapPage() {
                 setWbtcBalanceStatus("loading");
                 setWbtcBalanceError(null);
               }}
+              swapFeatureFlags={swapLegFlags}
             />
 
             <div className="px-1 pb-1 pt-3">
@@ -3809,7 +3877,8 @@ function TokenPanel({
   evmNetworkName,
   evmChains,
   selectedEvmChainSlug,
-  onEvmChainSelect
+  onEvmChainSelect,
+  swapFeatureFlags
 }: {
   title: string;
   leg: SwapLeg;
@@ -3827,6 +3896,7 @@ function TokenPanel({
   evmChains?: SwapChain[];
   selectedEvmChainSlug?: string;
   onEvmChainSelect?: (slug: string) => void;
+  swapFeatureFlags?: SwapFeatureFlags;
 }) {
   const decimals =
     leg.chain === "evm"
@@ -3891,6 +3961,7 @@ function TokenPanel({
           evmChains={evmChains}
           selectedEvmChainSlug={selectedEvmChainSlug}
           onEvmChainSelect={onEvmChainSelect}
+          swapFeatureFlags={swapFeatureFlags}
         />
       </div>
       {/* Balance + MAX row — only on the editable (pay) panel, or when a balance

@@ -53,6 +53,19 @@ Same rule: do not use `htlc-daemon:mainnet` on Railway (it expects local `.env` 
 
 See `docs/MAINNET-DEPLOY.md` for HTLC env vars.
 
+### Web app swap kill switches (oranjswap-web-* only)
+
+Set on the **web** Railway service (not solver workers). Unset = enabled. `0` / `false` blocks **new** quotes and orders; solvers keep settling in-flight swaps.
+
+| Flag | Pauses |
+|------|--------|
+| `CROSS_CHAIN_SWAP_ENABLED` + `NEXT_PUBLIC_CROSS_CHAIN_SWAP_ENABLED` | All WBTC↔CBTC HTLC |
+| `HTLC_BASE_ENABLED` + `NEXT_PUBLIC_HTLC_BASE_ENABLED` | Base + Base Sepolia HTLC |
+| `HTLC_ARBITRUM_ENABLED` + `NEXT_PUBLIC_HTLC_ARBITRUM_ENABLED` | Arbitrum + Arbitrum Sepolia HTLC |
+| `C2C_SWAP_ENABLED` + `NEXT_PUBLIC_C2C_SWAP_ENABLED` | Canton CBTC↔CC |
+
+Redeploy the web app after changing flags.
+
 ## Wrong (causes `cd: can't cd to swap-solver`)
 
 ```

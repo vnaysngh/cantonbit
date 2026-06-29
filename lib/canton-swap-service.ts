@@ -1,5 +1,7 @@
 import "server-only";
 
+import { assertC2cIntakeEnabled } from "./swap-feature-flags";
+
 import { fromBaseUnits, toBaseUnits, toBaseUnitsFloor } from "./amount-units";
 import { getSwapAsset } from "./canton-assets";
 import {
@@ -90,6 +92,7 @@ export class CantonSwapService {
     /** Server-validated prepare timestamp — do not pass from raw client input. */
     createdAt?: number;
   }): Promise<CantonSwapOrder> {
+    assertC2cIntakeEnabled();
     const vaultParty = expectedCantonSwapParty();
     if (!vaultParty) {
       throw new Error(

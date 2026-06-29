@@ -8,6 +8,8 @@
  * All amounts are hex-encoded uint256. Addresses are lowercased 20-byte hex.
  */
 
+import { isHtlcEvmChainFamilyEnabled } from "@/lib/swap-feature-flags";
+
 /** Canonical Permit2 (same address on every chain). */
 export const PERMIT2_ADDRESS = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
 
@@ -163,16 +165,7 @@ function normalizeHtlcChainSlug(value: unknown): HtlcEvmChainSlug | null {
   return raw in SWAP_CHAINS ? (raw as HtlcEvmChainSlug) : null;
 }
 
-export function defaultHtlcEvmChainSlug(): HtlcEvmChainSlug {
-  const configured = normalizeHtlcChainSlug(process.env.NEXT_PUBLIC_SWAP_CHAIN);
-  if (configured) return configured;
-  return process.env.NEXT_PUBLIC_NETWORK === "mainnet" ||
-    process.env.SWAP_NETWORK === "mainnet"
-    ? "arbitrum"
-    : "base-sepolia";
-}
-
-export function enabledHtlcEvmChains(): SwapChain[] {
+function configuredHtlcEvmChainSlugs(): HtlcEvmChainSlug[] {
   const raw =
     process.env.NEXT_PUBLIC_ENABLED_EVM_CHAINS?.trim() ||
     process.env.ENABLED_EVM_CHAINS?.trim();
@@ -182,8 +175,27 @@ export function enabledHtlcEvmChains(): SwapChain[] {
         .map((s) => normalizeHtlcChainSlug(s))
         .filter((s): s is HtlcEvmChainSlug => !!s)
     : [defaultHtlcEvmChainSlug()];
-  const unique = [...new Set(slugs)];
-  return unique.map((slug) => SWAP_CHAINS[slug]);
+  return [...new Set(slugs)];
+}
+
+/** Chains configured via ENABLED_EVM_CHAINS (ignores intake feature flags). */
+export function configuredHtlcEvmChains(): SwapChain[] {
+  return configuredHtlcEvmChainSlugs().map((slug) => SWAP_CHAINS[slug]);
+}
+
+export function enabledHtlcEvmChains(): SwapChain[] {
+  return configuredHtlcEvmChains().filter((chain) =>
+    isHtlcEvmChainFamilyEnabled(chain.slug)
+  );
+}
+
+export function defaultHtlcEvmChainSlug(): HtlcEvmChainSlug {
+  const configured = normalizeHtlcChainSlug(process.env.NEXT_PUBLIC_SWAP_CHAIN);
+  if (configured) return configured;
+  return process.env.NEXT_PUBLIC_NETWORK === "mainnet" ||
+    process.env.SWAP_NETWORK === "mainnet"
+    ? "arbitrum"
+    : "base-sepolia";
 }
 
 export function resolveHtlcChainConfig(
@@ -207,11 +219,25 @@ export function resolveHtlcChainConfig(
   };
 }
 
-export function assertEnabledHtlcChain(slug?: string | null): SwapChain {
+export function assertConfiguredHtlcChain(slug?: string | null): SwapChain {
   const cfg = resolveHtlcChainConfig(slug);
-  const enabled = new Set(enabledHtlcEvmChains().map((c) => c.slug));
+  const enabled = new Set(configuredHtlcEvmChains().map((c) => c.slug));
   if (!enabled.has(cfg.slug)) {
     throw new Error(`EVM chain ${cfg.slug} is not enabled`);
+  }
+  return cfg;
+}
+
+/** Config allowlist only — used by daemons and in-flight order paths. */
+export function assertEnabledHtlcChain(slug?: string | null): SwapChain {
+  return assertConfiguredHtlcChain(slug);
+}
+
+/** Config allowlist + intake feature flags — used for new HTLC quotes/orders. */
+export function assertHtlcChainEnabledForIntake(slug?: string | null): SwapChain {
+  const cfg = assertConfiguredHtlcChain(slug);
+  if (!isHtlcEvmChainFamilyEnabled(cfg.slug)) {
+    throw new Error(`EVM chain ${cfg.slug} is not enabled for new swaps`);
   }
   return cfg;
 }

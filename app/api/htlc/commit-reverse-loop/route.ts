@@ -14,10 +14,13 @@ import { assertValidTimelocks, MIN_GAP } from "@/lib/htlc-timelock";
 import { toBaseUnits } from "@/lib/amount-units";
 import { assertSwapPayAmountLimit } from "@/lib/swap-amount-limits";
 import { bindEnabledHtlcEvmChain } from "@/lib/htlc-chain-binding";
+import { crossChainDisabledResponse } from "@/lib/swap-feature-flags-server";
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
+    const blocked = crossChainDisabledResponse(body.evmChain);
+    if (blocked) return blocked;
     const direction = "canton-to-evm";
     const id = String(body.id ?? body.hashLock).toLowerCase();
     const hashLock = String(body.hashLock).toLowerCase();

@@ -10,6 +10,7 @@ import {
   type CantonSwapAssetMeta
 } from "@/hooks/useCantonSwapAssets";
 import type { SwapChain, SwapLeg } from "@/lib/swap-leg";
+import type { SwapFeatureFlags } from "@/lib/swap-leg";
 import {
   crossChainPickerHint,
   legDisplay,
@@ -39,7 +40,8 @@ export function SwapLegBadge({
   evmNetworkName,
   evmChains,
   selectedEvmChainSlug,
-  onEvmChainSelect
+  onEvmChainSelect,
+  swapFeatureFlags
 }: {
   leg: SwapLeg;
   otherLeg?: SwapLeg;
@@ -51,6 +53,7 @@ export function SwapLegBadge({
   evmChains?: HtlcEvmChain[];
   selectedEvmChainSlug?: string;
   onEvmChainSelect?: (slug: string) => void;
+  swapFeatureFlags?: SwapFeatureFlags;
 }) {
   const [open, setOpen] = useState(false);
   const { token, network } = legDisplay(leg);
@@ -109,6 +112,7 @@ export function SwapLegBadge({
           evmChains={evmChains}
           selectedEvmChainSlug={selectedEvmChainSlug}
           onEvmChainSelect={onEvmChainSelect}
+          swapFeatureFlags={swapFeatureFlags}
           onClose={() => setOpen(false)}
           onSelect={(next) => {
             onChange(next);
@@ -130,7 +134,8 @@ function SwapTokenSelectModal({
   selectedEvmChainSlug,
   onEvmChainSelect,
   onClose,
-  onSelect
+  onSelect,
+  swapFeatureFlags
 }: {
   leg: SwapLeg;
   otherLeg?: SwapLeg;
@@ -142,6 +147,7 @@ function SwapTokenSelectModal({
   onEvmChainSelect?: (slug: string) => void;
   onClose: () => void;
   onSelect: (leg: SwapLeg) => void;
+  swapFeatureFlags?: SwapFeatureFlags;
 }) {
   const availableEvmChains =
     evmChains && evmChains.length > 0
@@ -206,7 +212,7 @@ function SwapTokenSelectModal({
           symbol: a.symbol,
           name: a.label,
           network: "Canton",
-          disabled: swapLegPickerDisabled(candidate, otherLeg)
+          disabled: swapLegPickerDisabled(candidate, otherLeg, swapFeatureFlags)
         });
       }
     }
@@ -229,7 +235,7 @@ function SwapTokenSelectModal({
         name: "Wrapped Bitcoin",
         network: chain.name,
         evmChainSlug: chain.slug,
-        disabled: swapLegPickerDisabled(candidate, otherLeg)
+        disabled: swapLegPickerDisabled(candidate, otherLeg, swapFeatureFlags)
       });
     }
 

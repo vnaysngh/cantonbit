@@ -27,10 +27,13 @@ import {
 import { distributedRateLimitOk } from "@/lib/api-rate-limit";
 import { clientIpFromRequest } from "@/lib/canton-swap-rate-limit";
 import { bindEnabledHtlcEvmChain } from "@/lib/htlc-chain-binding";
+import { crossChainDisabledResponse } from "@/lib/swap-feature-flags-server";
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
+    const blocked = crossChainDisabledResponse(body.evmChain);
+    if (blocked) return blocked;
     const { user, wbtcAmount, cbtcAmount, cantonParty, direction } = body;
     const { chain } = bindEnabledHtlcEvmChain(body.evmChain);
 

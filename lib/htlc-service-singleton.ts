@@ -16,7 +16,8 @@ import { Buffer } from "node:buffer";
 
 import { getHoldings } from "./canton";
 import { alert } from "./alert";
-import { chainConfigForOrder, enabledHtlcEvmChains } from "./swap-evm";
+import { chainConfigForOrder, configuredHtlcEvmChains } from "./swap-evm";
+import { assertCrossChainIntakeEnabled } from "./swap-feature-flags";
 import {
   createTransfer,
   findOfferFromSender,
@@ -386,6 +387,7 @@ class HtlcService {
     o: Omit<SwapOrder, "status" | "createdAt">,
     opts?: { createdAt?: number }
   ): Promise<SwapOrder> {
+    assertCrossChainIntakeEnabled(o.evmChainSlug);
     // No-overwrite + idempotent (audit 2026-06-12) — see resolveCreateOrder.
     const existing = await this.store.get(o.id);
     const { order, isNew } = resolveCreateOrder(
@@ -974,7 +976,7 @@ class HtlcService {
     const wrongChain = await detectWrongChainCounterLockTx(
       o.counterLockTx,
       o.evmChainSlug,
-      enabledHtlcEvmChains()
+      configuredHtlcEvmChains()
     );
     if (!wrongChain) return o;
     console.warn(
@@ -2481,7 +2483,7 @@ class HtlcService {
     const wrongChain = await detectWrongChainCounterLockTx(
       counterLockTx,
       o.evmChainSlug ?? "",
-      enabledHtlcEvmChains()
+      configuredHtlcEvmChains()
     );
     if (wrongChain) {
       throw new Error(

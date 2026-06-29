@@ -5,8 +5,11 @@ import { NextResponse } from "next/server";
 
 import { cantonSwapService } from "@/lib/canton-swap-service";
 import { requireC2cLoopIntentRateLimit, requirePartyOwner } from "@/lib/htlc-auth";
+import { c2cDisabledResponse } from "@/lib/swap-feature-flags-server";
 
 export async function POST(req: Request) {
+  const blocked = c2cDisabledResponse();
+  if (blocked) return blocked;
   try {
     const body = await req.json();
     const userParty = String(body.userParty ?? "").trim();
