@@ -39,6 +39,7 @@
     "farm:pingpong:stats:mainnet": "bash scripts/with-env.sh mainnet npx tsx scripts/farm/pingpong-stats.ts",
     "farm:audit-burns:mainnet": "bash scripts/with-env.sh mainnet npx tsx scripts/farm/cli.mts audit-burns",
     "farm:run:railway": "npx tsx scripts/farm/railway-start.mts",
+    "farm:pingpong:railway": "npx tsx scripts/farm/railway-pingpong.mts",
     "dev:all": "bash scripts/dev-all.sh",
     "stop": "bash scripts/stop-all.sh",
     "solver:api": "npm --prefix swap-solver run api",
