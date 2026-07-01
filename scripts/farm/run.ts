@@ -47,6 +47,7 @@ import {
   reconcileVaultCbtcInFloat
 } from "./lib/vault-cbtc-holdings";
 import { needsUtxoConsolidation } from "./lib/utxo-guard";
+import { assertNodeVersion } from "./lib/node-guard";
 
 function assertBitsafeGate(): void {
   if (
@@ -197,6 +198,35 @@ async function handlePlanFailure(params: {
   }
 
   if (/no viable swap/i.test(msg)) {
+    // A "vault=low CBTC" plan failure is often NOT a real funds shortage — the
+    // vault holds enough CBTC total but it is shredded across many dust UTXOs, so
+    // the spendable working set is starved. Refilling would just add more dust.
+    // Consolidate the vault's fragmented UTXOs FIRST; consolidateVaultUtxos is
+    // idempotent and no-ops (minUtxo guard) when there is nothing to merge, so
+    // this is safe even when the vault genuinely is low — we then fall through to
+    // refill below. This closes the gap where a fragmented vault could loop
+    // forever on a silently-failing refill without ever merging its own dust.
+    if (/vault=low CBTC/i.test(msg) || /low CBTC/i.test(msg)) {
+      try {
+        const merged = await runWithLedgerReadSession(params.jwt, () =>
+          consolidateVaultUtxos({
+            jwt: params.jwt,
+            fleet: params.fleet,
+            minUtxo: 2,
+            reason: "plan-blocked-low-cbtc"
+          })
+        );
+        if (merged > 0) {
+          console.log(`  consolidated vault dust (${merged} merge round(s)) — retrying plan`);
+          await sleepMs(3000);
+          return { jwt: params.jwt, float: null };
+        }
+      } catch (ce) {
+        const cm = ce instanceof Error ? ce.message : String(ce);
+        console.warn(`  pre-refill vault consolidate skipped: ${cm.slice(0, 120)}`);
+      }
+    }
+
     const refill = tryAutoRefillFromPlanError(msg);
     if (refill.ran) {
       let float = params.cachedFloat;
@@ -247,6 +277,7 @@ async function handlePlanFailure(params: {
 }
 
 export async function runFarmBot(): Promise<void> {
+  assertNodeVersion();
   assertMainnetNetwork();
   requireMainnetGuard();
   assertBitsafeGate();

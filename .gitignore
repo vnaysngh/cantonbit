@@ -47,3 +47,5 @@ snapshots/
 # CBTC farm fleet state (party ids + calibration) — never commit
 .farm-fleet.mainnet.json
 farm-swap.log
+farm-pingpong.log
+farm-run-*.log

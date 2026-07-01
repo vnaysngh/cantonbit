@@ -35,6 +35,12 @@ export function isTransientError(err: unknown): boolean {
     return false;
   }
 
+  // NOTE: traffic/sequencer-capacity rejections are deliberately NOT here. A fast
+  // 2–20s backoff cannot refill a genuinely-empty shared traffic bucket (20s ≈
+  // 6.6k bytes < one ~8.7k-byte transfer), so per-call retrying just hammers the
+  // empty bucket. Traffic errors are handled by farm-level pacing (token bucket +
+  // refill-window backoff), classified via isTrafficError() in ./traffic-error.
+  // Only true network transients belong here.
   const transient = [
     "fetch failed",
     "timeout",
@@ -50,14 +56,7 @@ export function isTransientError(err: unknown): boolean {
     "503",
     "504",
     "aborted",
-    "lighthouse fetch failed",
-    // Node free-traffic bucket temporarily exhausted — refills over time, so
-    // backing off and retrying lets a slightly-too-big tx through once the base
-    // traffic remainder regenerates above its byte cost.
-    "traffic rejection",
-    "sequencer_request_failed",
-    "not_enough_traffic_credit",
-    "abovetrafficlimit"
+    "lighthouse fetch failed"
   ];
   return transient.some((t) => combined.includes(t));
 }

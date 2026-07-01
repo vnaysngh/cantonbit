@@ -6,6 +6,7 @@ import type { FarmFleetConfig } from "./types";
 
 export const FLEET_FILE = ".farm-fleet.mainnet.json";
 export const SWAP_LOG_FILE = "farm-swap.log";
+export const PINGPONG_LOG_FILE = "farm-pingpong.log";
 /** Default farm trader count when `--traders` is omitted on provision. */
 export const DEFAULT_FARM_TRADER_COUNT = 5;
 /** Default CC/CBTC funded per trader from treasury (warpx-mainnet-1). */
@@ -49,6 +50,10 @@ export function fleetPath(cwd?: string): string {
 
 export function swapLogPath(cwd?: string): string {
   return resolve(cwd ?? farmDataDir(), SWAP_LOG_FILE);
+}
+
+export function pingpongLogPath(cwd?: string): string {
+  return resolve(cwd ?? farmDataDir(), PINGPONG_LOG_FILE);
 }
 
 /** Write fleet JSON from env when file is missing (Railway / CI). */
