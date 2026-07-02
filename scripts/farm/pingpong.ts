@@ -38,7 +38,7 @@ import {
 import { assertNodeVersion } from "./lib/node-guard";
 import { logPingpongTransfer, readPingpongStats } from "./lib/pingpong-log";
 import { TokenBucket } from "./lib/token-bucket";
-import { isTrafficError, parseTrafficError } from "./lib/traffic-error";
+import { isAuthError, isTrafficError, parseTrafficError } from "./lib/traffic-error";
 import { parseArg, parseFlag, parseNumberArg, requireMainnetGuard } from "./lib/parse-args";
 import { retry } from "./lib/retry";
 
@@ -171,14 +171,17 @@ async function sendCbtc(params: {
 }
 
 /**
- * Live pacing state shared across all sends this run: the local token-bucket
- * mirror plus the runtime byte-cost estimate, which is calibrated from real
- * SEQUENCER trafficCosts as they arrive.
+ * Live run state shared across all sends: the token-bucket mirror, the runtime
+ * byte-cost estimate (calibrated from real SEQUENCER trafficCosts), and the
+ * ledger JWT. The JWT lives here (mutable) so that when a transfer hits a 401
+ * (m2m tokens expire ~8h) and we re-auth, the fresh token propagates to every
+ * subsequent transfer, cycle, and consolidation without re-threading it.
  */
 interface Pacing {
   bucket: TokenBucket;
   estBytes: number;
   utilization: number;
+  jwt: string;
 }
 
 /**
@@ -192,20 +195,20 @@ interface Pacing {
  * Returns whether the transfer ultimately succeeded.
  */
 async function gatedSend(params: {
-  jwt: string;
   sender: Trader;
   receiver: Trader;
   amount: string;
   dryRun: boolean;
   pacing: Pacing;
 }): Promise<{ ok: boolean; error?: string }> {
-  const { jwt, sender, receiver, amount, dryRun, pacing } = params;
+  const { sender, receiver, amount, dryRun, pacing } = params;
 
   if (dryRun) {
     console.log(`  [dry-run] ${sender.hint} → ${receiver.hint}  ${amount} CBTC`);
     return { ok: true };
   }
 
+  let authRetried = false;
   for (let backoff = 0; backoff <= MAX_TRAFFIC_BACKOFFS; backoff++) {
     // 1) Gate: wait for local bucket headroom for this transfer's estimated cost.
     const waitMs = pacing.bucket.waitMsFor(pacing.estBytes, Date.now());
@@ -215,7 +218,7 @@ async function gatedSend(params: {
     }
     try {
       // 2) Attempt; network transients (not traffic) use the fast retry path.
-      await retry(() => sendCbtc({ jwt, sender, receiver, amount, dryRun }), {
+      await retry(() => sendCbtc({ jwt: pacing.jwt, sender, receiver, amount, dryRun }), {
         retries: 3,
         baseMs: 1000,
         maxMs: 8000,
@@ -226,10 +229,25 @@ async function gatedSend(params: {
       return { ok: true };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      // 4a) Expired/invalid JWT → re-auth ONCE and retry this same leg. The fresh
+      // token lands in pacing.jwt so every later transfer uses it too. Does not
+      // count against the traffic-backoff budget.
+      if (isAuthError(e) && !authRetried) {
+        authRetried = true;
+        try {
+          console.warn(`  🔑 JWT rejected (401) — refreshing token…`);
+          pacing.jwt = await getLedgerJwt();
+          console.warn(`  🔑 token refreshed; retrying ${sender.hint}→${receiver.hint}`);
+        } catch (re) {
+          return { ok: false, error: `JWT refresh failed: ${re instanceof Error ? re.message : re}` };
+        }
+        backoff--; // this attempt shouldn't consume a traffic-backoff slot
+        continue;
+      }
       if (!isTrafficError(e)) {
         return { ok: false, error: msg }; // genuine non-traffic failure
       }
-      // 4) Traffic rejection → learn the node's real numbers and back off.
+      // 4b) Traffic rejection → learn the node's real numbers and back off.
       const parsed = parseTrafficError(e);
       if (parsed.trafficCost) pacing.estBytes = Math.max(pacing.estBytes, parsed.trafficCost);
       if (parsed.baseTrafficRemainder !== null) {
@@ -252,9 +270,9 @@ async function gatedSend(params: {
   return { ok: false, error: "unreachable" };
 }
 
-/** One cycle: derangement-paired CBTC sends, SERIAL with per-transfer pacing. */
+/** One cycle: derangement-paired CBTC sends, SERIAL with per-transfer pacing.
+ *  The JWT is carried in `pacing` (mutable) so a 401 re-auth mid-cycle sticks. */
 async function runCycle(params: {
-  jwt: string;
   traders: Trader[];
   minUnits: bigint;
   maxUnits: bigint;
@@ -262,7 +280,7 @@ async function runCycle(params: {
   cycle: number;
   pacing: Pacing;
 }): Promise<{ ok: number; fail: number }> {
-  const { jwt, traders, minUnits, maxUnits, dryRun, cycle, pacing } = params;
+  const { traders, minUnits, maxUnits, dryRun, cycle, pacing } = params;
   const n = traders.length;
   const recv = derangement(n);
   console.log(`Cycle: ${n} derangement-paired CBTC sends (serial, no self-sends)`);
@@ -273,7 +291,7 @@ async function runCycle(params: {
     const sender = traders[i]!;
     const receiver = traders[recv[i]!]!;
     const amount = randomAmount(minUnits, maxUnits);
-    const r = await gatedSend({ jwt, sender, receiver, amount, dryRun, pacing });
+    const r = await gatedSend({ sender, receiver, amount, dryRun, pacing });
     if (!dryRun) {
       logPingpongTransfer({ cycle, from: sender.hint, to: receiver.hint, amount, ok: r.ok, error: r.error });
     }
@@ -299,12 +317,11 @@ async function runCycle(params: {
  * would silently overdraw the bucket that the transfers just paced.
  */
 async function consolidateTraders(params: {
-  jwt: string;
   traders: Trader[];
   dryRun: boolean;
   pacing: Pacing;
 }): Promise<void> {
-  const { jwt, traders, dryRun, pacing } = params;
+  const { traders, dryRun, pacing } = params;
   console.log(`Consolidating trader CBTC UTXOs (minUtxo=${CONSOLIDATE_MIN_UTXO})…`);
   for (const t of traders) {
     if (!dryRun) {
@@ -315,9 +332,9 @@ async function consolidateTraders(params: {
       }
     }
     try {
-      const merged = await runWithLedgerReadSession(jwt, () =>
+      const merged = await runWithLedgerReadSession(pacing.jwt, () =>
         consolidatePartyAsset({
-          jwt,
+          jwt: pacing.jwt,
           party: t.party,
           label: t.hint,
           asset: "CBTC",
@@ -330,7 +347,15 @@ async function consolidateTraders(params: {
       if (merged > 0) console.log(`  ✓ ${t.hint}: ${merged} merge round(s)`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      if (isTrafficError(e)) {
+      if (isAuthError(e)) {
+        // Expired token mid-consolidation → re-auth so later merges + cycles work.
+        try {
+          pacing.jwt = await getLedgerJwt();
+          console.warn(`  🔑 token refreshed during consolidation`);
+        } catch {
+          console.warn(`  consolidate skipped for ${t.hint}: JWT refresh failed`);
+        }
+      } else if (isTrafficError(e)) {
         const parsed = parseTrafficError(e);
         if (parsed.baseTrafficRemainder !== null) pacing.bucket.reset(parsed.baseTrafficRemainder, Date.now());
         console.warn(`  consolidate deferred for ${t.hint} (traffic) — bucket recovering`);
@@ -379,10 +404,14 @@ export async function runPingPong(): Promise<void> {
     Date.now(),
     forceFast // startFull only when the user explicitly forces fast (spike mode)
   );
-  const pacing: Pacing = { bucket, estBytes: bytesPerTransfer, utilization };
   const perTransferSec = Math.round(bytesPerTransfer / (FREE_REFILL_BYTES_PER_SEC * utilization));
 
-  let jwt = await getLedgerJwt();
+  const pacing: Pacing = {
+    bucket,
+    estBytes: bytesPerTransfer,
+    utilization,
+    jwt: await getLedgerJwt()
+  };
 
   console.log(`Ping-pong farm — network=${process.env.NEXT_PUBLIC_NETWORK ?? "mainnet"} dryRun=${dryRun}`);
   console.log(`Traders: ${traders.length} (${traders.map((t) => t.hint).join(", ")})`);
@@ -399,7 +428,7 @@ export async function runPingPong(): Promise<void> {
   // Show starting balances (skip in dry-run to avoid noise).
   if (!dryRun) {
     for (const t of traders) {
-      const bal = await cbtcBalance(jwt, t.party).catch(() => "?");
+      const bal = await cbtcBalance(pacing.jwt, t.party).catch(() => "?");
       console.log(`  ${t.hint}: ${bal} CBTC`);
     }
     console.log("");
@@ -413,7 +442,7 @@ export async function runPingPong(): Promise<void> {
     console.log(`──── Cycle ${cycle}${cycles ? `/${cycles}` : ""} ────`);
     let cycleFail = 0;
     try {
-      const { ok, fail } = await runCycle({ jwt, traders, minUnits, maxUnits, dryRun, cycle, pacing });
+      const { ok, fail } = await runCycle({ traders, minUnits, maxUnits, dryRun, cycle, pacing });
       totalOk += ok;
       totalFail += fail;
       cycleFail = fail;
@@ -426,9 +455,9 @@ export async function runPingPong(): Promise<void> {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`  cycle error: ${msg.slice(0, 200)}`);
-      if (/401|unauthorized|jwt/i.test(msg)) {
+      if (isAuthError(e)) {
         console.warn("  refreshing JWT…");
-        jwt = await getLedgerJwt();
+        pacing.jwt = await getLedgerJwt();
       }
     }
 
@@ -438,7 +467,7 @@ export async function runPingPong(): Promise<void> {
     // through the SAME per-transfer gate so they can't overdraw either.
     const didConsolidate = consolidateEvery > 0 && cycle % consolidateEvery === 0 && cycleFail === 0;
     if (didConsolidate) {
-      await consolidateTraders({ jwt, traders, dryRun, pacing });
+      await consolidateTraders({ traders, dryRun, pacing });
     } else if (consolidateEvery > 0 && cycle % consolidateEvery === 0 && cycleFail > 0) {
       console.log(`  (skipping consolidation — ${cycleFail} traffic failure(s) this cycle; letting bucket recover)`);
     }

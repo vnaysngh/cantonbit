@@ -39,6 +39,23 @@ export function isTrafficError(err: unknown): boolean {
   );
 }
 
+/**
+ * True for an expired/invalid JWT (m2m tokens lapse every ~8h). The ledger
+ * returns 401 with "security-sensitive error"; a fresh getLedgerJwt() fixes it.
+ * Kept separate from traffic errors so the farm re-auths instead of backing off.
+ */
+export function isAuthError(err: unknown): boolean {
+  const t = errText(err).toLowerCase();
+  return (
+    t.includes("401") ||
+    t.includes("unauthorized") ||
+    t.includes("security-sensitive") ||
+    t.includes("jwt") ||
+    t.includes("token expired") ||
+    t.includes("invalid_token")
+  );
+}
+
 function grabInt(text: string, key: string): number | null {
   // matches e.g.  trafficCost = 8849   or   "trafficCost":8849
   const re = new RegExp(`${key}\\s*[=:]\\s*"?(\\d+)`, "i");

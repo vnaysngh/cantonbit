@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { isTrafficError, parseTrafficError } from "./traffic-error";
+import { isAuthError, isTrafficError, parseTrafficError } from "./traffic-error";
 
 // Real error shape observed on mainnet (warpx-mainnet-1), 2026-07-01 run.
 const NOT_ENOUGH_CREDIT =
@@ -34,4 +34,16 @@ test("parseTrafficError returns nulls when fields absent", () => {
   const p = parseTrafficError(new Error(REQUEST_FAILED));
   assert.equal(p.trafficCost, null);
   assert.equal(p.baseTrafficRemainder, null);
+});
+
+test("isAuthError matches the 401 security-sensitive JWT expiry", () => {
+  const e = new Error(
+    'ledger-end failed (401): {"code":"NA","cause":"A security-sensitive error has been received"}'
+  );
+  assert.equal(isAuthError(e), true);
+});
+
+test("isAuthError does NOT match traffic or network errors", () => {
+  assert.equal(isAuthError(new Error(NOT_ENOUGH_CREDIT)), false);
+  assert.equal(isAuthError(new Error("fetch failed: ECONNRESET")), false);
 });
