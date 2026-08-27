@@ -23,4 +23,4 @@ ENV FARM_DATA_DIR=/data
 RUN mkdir -p /data
 
 # Invoke tsx directly; never use npx under production (breaks on Railway).
-CMD ["./node_modules/.bin/tsx", "scripts/farm/railway-start.mts"]
+CMD ["./node_modules/.bin/tsx", "scripts/farm/railway-pingpong.mts"]
