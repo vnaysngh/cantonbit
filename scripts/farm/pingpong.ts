@@ -58,14 +58,23 @@ const DEFAULT_MAX = "0.000003";
 const FREE_REFILL_BYTES_PER_SEC = 333.3;
 const FREE_BURST_BYTES = 400_000;
 // Start the runtime estimate at the fragmented worst case (9457) and converge
-// DOWN toward observed (~8700) as real trafficCosts come in — never under-budget
+// DOWN toward observed (~8634) as real trafficCosts come in — never under-budget
 // before we have data. --bytes-per-transfer overrides the starting estimate.
 const DEFAULT_BYTES_PER_TRANSFER = 9457;
-// Shared-bucket safety margin: assume we get ~half the refill for our farm, so we
-// never starve co-tenant node traffic (and vice-versa). Effective budget ≈167 B/s
-// → ~1 transfer / 57s. Slow, but it is the true free-tier ceiling with no paid
-// traffic. Override with --utilization (higher = faster but riskier).
-const TARGET_UTILIZATION = 0.5;
+// Convergence bounds for the runtime byte estimate. Real measured cost on this
+// node is ~8634 B/transfer (14.1MB/day ÷ 1633 tx/day, 2026-08-31..09-02). We let
+// the estimate drift DOWN toward the observed mean via EWMA so a single fragmented
+// worst-case sample cannot pin the gate high forever, but never below MIN (which
+// would systematically under-budget and cause a rejection on every send).
+const MIN_BYTES_PER_TRANSFER = 8600;
+// EWMA weight applied to each newly observed real trafficCost.
+const BYTES_EWMA_ALPHA = 0.25;
+// Shared-bucket target. 0.95 drives the free bucket near its ceiling: the farm is
+// the dominant consumer on this node, and the rejection path below re-syncs from
+// the node's real baseTrafficRemainder, so overshoot self-corrects rather than
+// wedging. Effective budget ≈317 B/s → ~1 transfer / 27s. Lower it if a co-tenant
+// workload (swap solver) starts contending. Override with --utilization.
+const TARGET_UTILIZATION = 0.95;
 // Serial, per-transfer gating (NOT parallel batches): firing N transfers at once
 // is an instantaneous N× overdraw against a bucket that sustains ~1 tx / minute.
 const SERIAL_STAGGER_MS = 500; // tiny gap between serial sends for log readability
@@ -249,7 +258,19 @@ async function gatedSend(params: {
       }
       // 4b) Traffic rejection → learn the node's real numbers and back off.
       const parsed = parseTrafficError(e);
-      if (parsed.trafficCost) pacing.estBytes = Math.max(pacing.estBytes, parsed.trafficCost);
+      // Track the node's REAL cost with an EWMA rather than a one-way Math.max
+      // ratchet: a single fragmented sample used to pin estBytes at the worst case
+      // permanently, over-waiting on every later gate. Clamped to
+      // [MIN_BYTES_PER_TRANSFER, burst] so it can neither under-budget nor exceed
+      // what one transfer could ever cost.
+      if (parsed.trafficCost) {
+        const blended =
+          pacing.estBytes * (1 - BYTES_EWMA_ALPHA) + parsed.trafficCost * BYTES_EWMA_ALPHA;
+        pacing.estBytes = Math.min(
+          FREE_BURST_BYTES,
+          Math.max(MIN_BYTES_PER_TRANSFER, Math.ceil(blended))
+        );
+      }
       if (parsed.baseTrafficRemainder !== null) {
         pacing.bucket.reset(parsed.baseTrafficRemainder, Date.now());
       } else {

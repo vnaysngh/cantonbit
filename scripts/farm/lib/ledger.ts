@@ -253,7 +253,13 @@ export async function submitLedgerCommands(params: {
       throw new Error(`duplicate command committed: ${params.commandId}`);
     }
     if (/traffic|quota|rate/i.test(text)) {
-      throw new Error(`traffic rejection: ${text.slice(0, 300)}`);
+      // Keep a wide slice: parseTrafficError() reads trafficCost /
+      // baseTrafficRemainder / availableTraffic out of this string to re-sync the
+      // pacing bucket to the node's real level. Those fields sit ~160-350 chars in
+      // (after the member party id), so a 300-char cut dropped them and forced the
+      // caller into a blind full-window backoff. 2000 covers the whole
+      // AboveTrafficLimit(...) payload with room for a JSON envelope.
+      throw new Error(`traffic rejection: ${text.slice(0, 2000)}`);
     }
     throw new Error(`ledger submit failed (${res.status}): ${text.slice(0, 500)}`);
   }

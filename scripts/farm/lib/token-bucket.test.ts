@@ -93,3 +93,37 @@ test("reset clamps to the usable cap", () => {
   b.reset(999_999, 0); // absurd — should clamp to cap 360000
   assert.equal(b.available(0), 360_000);
 });
+
+// ── Byte-estimate convergence (mirrors pingpong.ts EWMA clamp) ───────────────
+// pingpong.ts blends each observed real trafficCost into estBytes instead of
+// ratcheting it up with Math.max, so one fragmented worst-case sample cannot pin
+// the pacing gate high forever. These assert the arithmetic that drives that.
+const MIN_BYTES = 8600;
+const BURST = 400_000;
+const ALPHA = 0.25;
+
+function blend(est: number, observed: number): number {
+  const b = est * (1 - ALPHA) + observed * ALPHA;
+  return Math.min(BURST, Math.max(MIN_BYTES, Math.ceil(b)));
+}
+
+test("byte estimate converges DOWN toward the observed real cost", () => {
+  let est = 9457; // fragmented worst-case start
+  for (let i = 0; i < 25; i++) est = blend(est, 8634);
+  assert.ok(est < 8700, `expected convergence toward 8634, got ${est}`);
+  assert.ok(est >= MIN_BYTES, `must not fall below floor, got ${est}`);
+});
+
+test("byte estimate never drops below the floor", () => {
+  let est = 9457;
+  for (let i = 0; i < 100; i++) est = blend(est, 10); // absurd low samples
+  assert.equal(est, MIN_BYTES);
+});
+
+test("a single worst-case sample does not pin the estimate high", () => {
+  let est = 8634;
+  est = blend(est, 12_000); // one bad fragmented sample
+  const afterSpike = est;
+  for (let i = 0; i < 10; i++) est = blend(est, 8634); // normal samples resume
+  assert.ok(est < afterSpike, "estimate must recover after a spike");
+});
